@@ -893,7 +893,7 @@ flowchart LR
     end
     subgraph Accel["acceleration (untrusted)"]
         P1[indexer adapter] & P2[snapshot importer] --> SAMP[sampler/verifier]
-        SAMP --> LI[(local-index tables<br/>origin='indexer'|'snapshot')]
+        SAMP --> LI[(local-index tables<br/>origin: indexer or snapshot)]
     end
     LI -->|read-only, labelled| UI[screens: history only]
     CH -->|verification reads| SAMP
