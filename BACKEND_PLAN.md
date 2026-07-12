@@ -1,7 +1,9 @@
 # Polkadot Futarchy Parachain
 ## Implementation-Ready Architecture Specification — Version 1.0 Draft
 
-**Status:** Draft for engineering review, economic simulation, and independent audit scoping.
+> **⚠️ SUPERSEDED (2026-07-12).** This document is retained as a historical reference only. The authoritative architecture is the component document set in [`docs/architecture/`](docs/architecture/README.md), which reorganizes this specification and applies every fix mandated by [`DESIGN_REVIEW.md`](DESIGN_REVIEW.md) v2.0 per the decisions in [`docs/architecture/00-decision-record.md`](docs/architecture/00-decision-record.md). Do not implement from this file.
+
+**Status:** Superseded draft (was: Draft for engineering review, economic simulation, and independent audit scoping).
 **Normative language:** RFC 2119 (MUST, MUST NOT, SHOULD, SHOULD NOT, MAY).
 **Research cutoff:** Model knowledge through January 2026; Polkadot SDK repository state verified against `raw.githubusercontent.com/paritytech/polkadot-sdk` on **2026-07-11**. Claims that could not be verified from primary sources in this run are explicitly labeled **[VERIFY]** and MUST be validated before implementation begins.
 **Verified in this run:** existence of release branches `polkadot-stable2412` … `polkadot-stable2606`; umbrella crate `polkadot-sdk = "2603.0.0"` on `polkadot-stable2603`; `frame_system::{authorize_upgrade, apply_authorized_upgrade, authorize_upgrade_without_checks}` dispatchables; presence of `pallet-parameters`, `pallet-referenda`, `pallet-conviction-voting`, `pallet-preimage`, `pallet-scheduler`, `pallet-assets`, `pallet-treasury`, `pallet-utility`, `pallet-proxy`, `pallet-multisig`, `pallet-migrations`, `frame-metadata-hash-extension`, `pallet-safe-mode`, `pallet-tx-pause`, `cumulus-pallet-parachain-system`, cumulus `pallet-collator-selection`; `sp-arithmetic` fixed-point types (`FixedU64/I64/U128/I128`); existence of Zombienet, Chopsticks, and `try-runtime-cli` repositories.

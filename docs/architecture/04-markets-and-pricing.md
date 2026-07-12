@@ -1,0 +1,273 @@
+# 04 — Markets and Pricing
+
+**Status: normative component specification. Supersedes the corresponding sections of BACKEND_PLAN.md/FRONTEND_PLAN.md** (BE §11, §13 market mechanics, §17.3 seeding hooks, §5.2.2). Normative language per RFC 2119. Implements [00-decision-record.md](./00-decision-record.md) decisions **D-3** (trade denomination) and **D-8** (forecast-trading cut), and the dispositions for **B-6, B-7, B-3/X-10 (market side), X-5**, the forecast-mint medium, and the maker-loss and ADR-11 lows.
+
+**Boundary.** This document owns: the LMSR mechanism and its fixed-point contract, the trade path and its denomination, market-side solvency (revenue recycling, headroom), the authoritative test vectors and their CI regime, the TWAP accumulator, the market-side specification of decision, gate, and Baseline books, the market lifecycle, and the `Traded`/`Observed` events. It references, and does not own: ledger custody, mint/burn, VOID and gate-instrument semantics ([03-conditional-ledger.md](./03-conditional-ledger.md)); the decision rule and decision-grade evaluation, breach-flag computation ([05-welfare-and-decision-engine.md](./05-welfare-and-decision-engine.md), doc 07); POL budgets and per-class economics (doc 08); frozen event/storage/API shapes ([02-integration-contract.md](./02-integration-contract.md)); parameter values ([13-parameters.md](./13-parameters.md)).
+
+---
+
+## 1. Market inventory and bounds
+
+### 1.1 Inventory per proposal class
+
+| Class | Markets | Books |
+| --- | --- | --- |
+| PARAM | decision pair (ACCEPT-scalar, REJECT-scalar) | 2 |
+| TREASURY ≤ 1% NAV | decision pair | 2 |
+| TREASURY > 1% NAV, CODE, META | decision pair + 4 gate books (S,C)×(adopt,reject) | 6 |
+| Per epoch (unconditional) | Baseline welfare market on `s_e` (§8) | 1 |
+| CONSTITUTIONAL | none (referendum path) | 0 |
+
+There is no `Emergency` class (deleted per D-7). Decision and Baseline books are scalar LONG/SHORT on the settlement score `s ∈ [0,1]`; gate books are binary YES/NO on the deterministic breach fact (§9).
+
+### 1.2 Bounds (normative; single derivation)
+
+Books per proposal ≤ **6** (2 decision + 4 gate). Live Baseline books ≤ **4** (one per live epoch; ≤ 4 epochs are non-terminal at once). With `MaxLiveProposals = 32` spanning Screening→Settled across all live cohorts:
+
+```
+MaxLiveMarkets = 32·6 + 4 = 196
+```
+
+Typical per-epoch creation load is `N_active·6 + 1 = 31` books. All PoV/storage budgets derive from the 196 bound (re-derivation table in [13-parameters.md](./13-parameters.md)). The prior 121/225/7-books figures are superseded (D-10).
+
+---
+
+## 2. Market lifecycle
+
+| Stage | When (epoch offsets; *normative values: §13*) | Actor | Semantics |
+| --- | --- | --- | --- |
+| **Create** | Seed, d4–d5 (57,600–72,000) | `pallet-epoch` tick work list | Vaults, decision pair, gate books for slotted proposals; Baseline(e) book; `BaselineMarketOf[e]` written (§8.3) |
+| **Seed** | same window, atomic with create | treasury POL flow | Per-book headroom `b·ln 2` minted as complete sets via the ledger (§6.3, §10) |
+| **Trade** | Trading, **d5–d18** (72,000–259,200; 13 days); per-pair `Extended` adds 3 days once | Signed users via `buy`/`sell` (§6) | Observations every `mkt.obs_interval = 10` blocks (§7). Trading is permitted **only** while the owning proposal is `Trading`/`Extended` (Baseline: §8.4) — this matches the frontend's pre-sign precondition rows exactly (X-5 closure) |
+| **Close** | decision close (d18, or extended close) | internal (`pallet-epoch` → `close(market)`) | Book freezes: `q` immutable, TWAP accumulator sealed at the window boundary. **Books MUST NOT reopen after branch resolution — there is no post-resolution forecast trading in v1 (D-8; §13)** |
+| **Settle** | cohort settlement at e+3 Housekeeping | SettleAuthority path (single path: `pallet-epoch::settle_cohort` → `pallet-welfare::compute_settlement` → ledger) | Winning-branch scalar books settle at `s`; gate books at the recorded daily breach flags (realized branch only; unrealized-branch instruments void); Baseline at `s_e`. Voided-branch branch-NUM refunds principal per [03-conditional-ledger.md](./03-conditional-ledger.md) |
+| **Reap** | settlement + `ledger.archive_delay` | keeper `reap(market)` | Bounded cleanup; `Markets` entry removed; history survives via events (§11) and `RecentCohortSummaries` (doc 02) |
+
+The Trade phase is **d5–d18** (offsets 72,000–259,200 = 13 days). The former "d4–d18" label was arithmetic drift; d4–d5 is Seed (maker-loss low batch, Part 3 frozen constants).
+
+---
+
+## 3. LMSR mathematics
+
+Two-outcome LMSR per book with subsidy parameter `b` (NUM):
+
+```
+C(q_L, q_S) = b · ln(e^{q_L/b} + e^{q_S/b})
+p_L = e^{q_L/b} / (e^{q_L/b} + e^{q_S/b});   p_S = 1 − p_L
+cost(buy Δ LONG) = C(q_L + Δ, q_S) − C(q_L, q_S)
+displacement:  Δ = b·(logit p′ − logit p);   cost = b · ln((1 − p)/(1 − p′))
+worst-case maker loss = b · ln 2   (from symmetric start)
+```
+
+Subsidy sizing: `b = SubsidyBudget / ln 2` per book; per-class `b` defaults (`pol.b`, `pol.b_gate`, `pol.b_baseline`) are constitution keys in [13-parameters.md](./13-parameters.md); the security-scaled sizing of D-4 (Ask-scaled `pol.b`) is owned by doc 08. Gate books use the identical mechanism with YES ↦ LONG, NO ↦ SHORT.
+
+Every LMSR obligation is pre-collateralized in the conditional ledger: the book account holds complete sets covering its worst-case delivery and loss (§6.3). Invariant I-12 ties book state to held sets; a total failure of `pallet-market` can produce bad prices but can neither mint claims nor move escrow.
+
+---
+
+## 4. Fixed-point implementation (`futarchy-fixed` crate)
+
+- Representation: unsigned 64.64 (`u128`; 64 integer + 64 fractional bits); signed ops on `i128` with explicit domain checks. `sp_arithmetic::FixedU128` at API boundaries; it lacks exp/ln, hence the custom crate.
+- Domain: enforce `|q_L − q_S| / b ≤ 48` (prices confined to ≈ `[1.4e-21, 1 − 1.4e-21]`, practically clamped to `[0.001, 0.999]` for quoting). Trades that would exit the domain MUST be rejected (`PriceBoundExceeded`).
+- `exp2`/`log2` via range reduction to `[1,2)` + 64-bit polynomial iteration; `ln x = log2 x · ln 2` with `ln 2` a 64.64 constant; log-sum-exp `C = max(q_L,q_S) + b·ln(1 + e^{−|q_L−q_S|/b})` for stability.
+- **Maximum approximation error (normative):** each `exp2`/`log2` call ≤ 2 ulp of 64.64 (≈ 1.1e-19 relative); composed cost-function error ≤ 8 ulp; per-trade cost error ≤ `8·2⁻⁶⁴·b` NUM — below one base unit for every `b ≤ 10⁹` NUM. Verified by differential testing against MPFR at 256-bit precision over ≥ 10⁷ sampled points including domain edges (doc 15).
+- Rounding: every charge rounds **up**, every payout/proceed rounds **down** (maker-adverse from the trader's perspective, escrow-favoring); cumulative maker benefit ≤ 1 base unit per trade, swept as dust per the ledger dust rule.
+- Overflow: all intermediate products in two-limb `u256` emulation; checked throughout; overflow aborts the extrinsic, never wraps.
+
+---
+
+## 5. Authoritative test vectors (B-6)
+
+Normative; independent implementations MUST reproduce to stated precision. `b = 10,000` NUM (64.64). Start `q = (0,0)`, `p_L = 0.5`, `C(0,0) = 10,000·ln 2 = 6,931.47180560…`
+
+| # | Action | Exact result (≥ 12 sig. figs) |
+| --- | --- | --- |
+| V1 | cost of buying 1,000 LONG | `C(1000,0) − C(0,0) = 10000·ln((e^{0.1}+1)/2) =` **`512.494795136…`** NUM |
+| V2 | price after V1 | `p_L = e^{0.1}/(e^{0.1}+1) = 0.524979187479…` |
+| V3 | displace p 0.5 → 0.6 | `Δ = 10000·ln 1.5 = 4054.65108108…` LONG; cost `= 10000·ln(0.5/0.4) = 2231.43551314…` NUM |
+| V4 | worst-case loss | `10000·ln 2 = 6931.47180560…` NUM |
+| V5 | round trip: V1 then sell 1,000 | proceeds = V1 cost (path independence); net **`−3.074969…`** NUM = 2 × 30 bps × 512.494795136 = 2 × 1.53748439 (fees only) |
+| V6 | domain edge | a buy pushing `q_L − q_S > 48·b` MUST be rejected (`PriceBoundExceeded`) |
+
+On-chain results MUST match within the §4 error bound plus one base unit of rounding. V1's former value (512.925…) and V5's former net (−3.077552) were computation errors ~14 orders of magnitude above the §4 precision bound at `b = 10⁴`; V2–V4 were and remain exact (B-6).
+
+**CI regeneration rule (normative).** The vector table above is *generated*, not hand-maintained: CI regenerates every §5-equivalent vector from the reference model (`reference-model/`, MPFR at 256-bit) on every commit and MUST fail if the committed table, the runtime implementation, or the exported JSON corpus disagree beyond the stated bound. Consequences:
+
+1. **Differential corpus.** The ≥ 10⁷-point MPFR corpus is exported as JSON from `reference-model/` and published with each release as a backend test artifact (D-2/X-15; feed frozen in [02-integration-contract.md](./02-integration-contract.md)).
+2. **Frontend port.** The frontend's TypeScript LMSR/TWAP port (`packages/protocol`, BigInt 64.64, maker-adverse rounding, domain clamp) differential-tests against V1–V6 *and* the JSON corpus. Because V1/V5 were wrong in the superseded parent, any FE snapshot pinned to the old values MUST be regenerated; conformance is defined against this document's table only.
+
+---
+
+## 6. Trade path and denomination (B-7, D-3)
+
+### 6.1 Denomination and the auto-split wrapper
+
+LMSR books are denominated in **branch-NUM** of their branch. The user-facing calls accept and return **NUM**; the wrapper performs the branch plumbing atomically inside the extrinsic (all-or-nothing with the ledger moves):
+
+```
+buy(market, side, amount, max_cost)   // side ∈ {Long, Short} (gate books: Yes ↦ Long, No ↦ Short)
+  1. ensure market phase == Trading and owning proposal ∈ {Trading, Extended}
+  2. ensure MinTrade ≤ amount ≤ MaxTrade = b/4          // |Δlogit| ≤ 0.25 per extrinsic
+  3. cost = ceil(C(q + Δ_side) − C(q));  fee = ceil(mkt.fee · cost)   // 30 bps
+  4. ensure cost + fee ≤ max_cost                        // mandatory slippage bound
+  5. ledger.split(vault, cost + fee): (cost+fee) NUM → (cost+fee) AcceptNum + (cost+fee) RejectNum
+  6. target branch:  cost bNUM → book;  fee bNUM → fees_accrued
+     mirror branch:  cost bNUM → buyer; fee bNUM → fees_accrued        // fee held as a complete pair
+  7. book delivers amount LONG/SHORT (target branch) from inventory → buyer
+  8. book recycles: split_scalar(cost bNUM) → cost complete LONG+SHORT sets into inventory (§6.3)
+  9. update q; record observation from the previous block's stored quote (§7); emit Traded (§11)
+```
+
+`sell(market, side, amount, min_proceeds)` is the inverse: the seller delivers `amount` position units; `proceeds = floor(C(q) − C(q − Δ))`, `fee = ceil(mkt.fee · proceeds)` withheld from proceeds in target-branch bNUM to `fees_accrued`; the book raises the payout by `merge_scalar` of complete sets (the received instruments pair against inventory); the wrapper then automatically merges the net target-branch proceeds with the seller's mirror-branch bNUM balance, up to `min(net, mirror balance)`, into NUM. Any unmatched remainder stays with the seller as target-branch branch-NUM (redeemable per doc 03). `min_proceeds` bounds the NUM-equivalent net.
+
+Buyer's net position after `buy`: `amount` LONG/SHORT of the target branch **plus `cost` mirror-branch branch-NUM**. Total debit: `cost + fee` NUM.
+
+**Fees.** `mkt.fee = 30 bps` (*normative value: §13*), non-refundable on all paths. On `buy` the fee is collected as a **complete branch-NUM pair** (both legs to `fees_accrued`) — worth exactly `fee` NUM at any settlement, so fee income is unconditional and the buyer's voided-branch loss is exactly the fee (PT-2 form: void ⇒ net principal delta = −fees only). On `sell` the fee is withheld single-sided in target-branch bNUM; its realized value follows the branch (0 if voided — a protocol-side income haircut, never a trader-side charge beyond 30 bps). Realized fee value routes 50% INSURANCE / 50% POL offset at settlement (economics owned by doc 08).
+
+**Baseline books** are unconditional: the wrapper degenerates — `cost + fee` NUM pays in directly, `split_scalar` against the epoch's Baseline vault mints unconditional LONG+SHORT sets, and there is no mirror credit (§8.2).
+
+### 6.2 Annulment and VOID for buyers (G-3)
+
+- **Branch annulment (normal resolution).** A buyer in the losing branch holds `cost` mirror-branch branch-NUM = winning-branch branch-NUM, redeemable **at par** at resolution. The dominant user path therefore loses only fees when its branch is annulled — G-3 holds by construction of the wrapper, not by trader diligence.
+- **Protocol VOID (D-1).** Under `VaultState::Voided`, `merge`/`merge_scalar` stay enabled and every instrument redeems at its neutral-prior value (unpaired branch-NUM `floor(a/2)`, unpaired LONG/SHORT `floor(a/4)`; pairs always 100% — normative rules in [03-conditional-ledger.md](./03-conditional-ledger.md)). A buyer's package (`q` LONG + `cost` mirror bNUM) is the reconstructible remainder of their own split: the mirror leg alone returns `cost/2` in cash-equivalent, the scalar leg redeems at neutral `s = 0.5`, and any holder of complete pairs recovers par outright. Recovery is par for buyers on the protocol path in the D-1 sense: no instrument's principal is confiscated — payouts equal the neutral price of a voided claim, and deviation from 100% is exactly the premium a position paid over that neutral prior (the same footing as the deliberately unpaired speculator).
+
+### 6.3 Revenue recycling, headroom, and solvency by construction (B-7)
+
+**Revenue recycling (normative).** All book revenue (branch-NUM) is **immediately `split_scalar` into complete LONG+SHORT sets held by the book** (step 8 above). A complete set is worth exactly 1 branch-NUM at every settlement `s ∈ [0,1]` (LONG pays `s`, SHORT pays `1 − s`), so recycled revenue never carries price risk.
+
+**Headroom (normative sizing).** At book creation the treasury seeds `headroom = b·ln 2` branch-NUM through the vault, scalar-split into `b·ln 2` complete sets held by the book.
+
+**Pre-collateralization argument (the `ln 2` bound).** Consider the worst one-sided walk: buyers take `Δ = x·b` LONG from a symmetric start. The book's net LONG-inventory outflow is delivery minus recycled revenue:
+
+```
+drain(x) = Δ − [C(Δ,0) − C(0,0)] = b·[x − ln((e^x + 1)/2)] = b·[ln 2 − ln(1 + e^{−x})]
+sup_x [x − ln((e^x + 1)/2)] = ln 2,  approached strictly from below
+```
+
+So with revenue recycling, cumulative one-sided drain is `< b·ln 2` for every finite walk (and the domain clamp §4 bounds `x ≤ 48`): the `b·ln 2` seed can never be exhausted; the book can always deliver from held inventory and never issues an unbacked claim. At settlement every remaining set redeems 1 branch-NUM per pair, so the book's realized loss equals net sets consumed `≤ b·ln 2` — exactly the V4 worst case and exactly the seed. **The book is solvent by construction**; maker-adverse rounding (§4) keeps the residual on escrow's side, and the ≤ 1-base-unit-per-trade dust is swept per the ledger dust rule. Invariant I-12: `maker loss per book ≤ b·ln 2 + rounding_bound`.
+
+### 6.4 Trading rules
+
+`MinTrade = 1 NUM`, `MaxTrade = b/4` per extrinsic (single-trade impact `|Δlogit| ≤ 0.25`); `max_cost`/`min_proceeds` are mandatory; per-trade bounds are readable via the runtime constants API (no FE hardcoding — doc 02). `buy`/`sell` are atomic with all ledger moves; weight is O(1). Trading outside `Trading`/`Extended` MUST fail — there is no other trading window in v1 (D-8).
+
+---
+
+## 7. TWAP accumulator (ADR-11 low, corrected)
+
+Per book: observation `o_t = clamp(p_prev_block, o_{t−1}·(1−κ), o_{t−1}·(1+κ))`, recorded at most once per **10-block observation interval** (`mkt.obs_interval`; *normative value: §13*), from on-trade updates and keeper `crank_observe` calls. **The slew cap κ applies per 10-block observation interval** — the superseded ADR-11 text saying "per 60-block interval" was drift; §5.2.2/§21-equivalent always defined the 10-block grid, and this document is now the single statement (Part 3 frozen constant).
+
+- The observation reads the **previous block's stored quote** — a trade in block `n` can never contribute its own price to the observation recorded in block `n`, removing intra-block manipulation from the decision statistic.
+- κ = 0.005 per interval ⇒ recorded-series slew ≤ ~0.5%/min. Over `k` missed intervals the clamp widens to `(1±κ)^k`. Moving a 72 h window mean by δ requires holding displacement for hours against arbitrage: the cap converts manipulation into capital × time.
+- Accumulator `A += o_t·Δblocks` in u256 (two-limb); `window_checkpoints: BoundedVec<(BlockNumber, Cum), 8>` at decision-window and trailing-window boundaries give O(1) `TWAP(w) = (A(end) − A(start))/blocks`.
+- Staleness: any observation gap > 50 blocks inside the decision window increments `stale_events`; first event extends the pair once by 3 days, second forces reject (status-quo default). Missing cranks produce staleness accounting, never wrong data.
+- Every recorded observation emits `Observed{market, o_t}` (§11).
+
+**Windows and checks (summary; the decision rule owns evaluation — [05-welfare-and-decision-engine.md](./05-welfare-and-decision-engine.md)):** full decision window = final 72 h (`dec.window`); trailing window = final 24 h (`dec.trailing`); convergence `|spot_close − TWAP| ≤ Δ_max = 0.05`; coverage ≥ 95% of scheduled intervals; POL floor met and undisturbed; non-POL contest notional ≥ `V_min(class)` **per book**; sanity band `TWAP ∈ [0.02, 0.98]` applies to **welfare (scalar) books only** — gate books are exempt and carry a near-boundary validity rule instead (doc 05). Invariant I-13: recorded drift per interval ≤ κ; a single block cannot move a decision TWAP by more than κ.
+
+---
+
+## 8. Baseline market (B-3, X-10 — market side)
+
+### 8.1 Definition
+
+One **unconditional** scalar book per epoch `e` on the epoch's realized welfare score `s_e = GeoMean(W_{e+1}, W_{e+2})` — the same statistic that settles epoch-e cohorts. LONG pays `s_e`, SHORT pays `1 − s_e` per unit; complete set = 1 NUM at any `s_e`.
+
+### 8.2 Ledger home and collateral
+
+Collateral is plain NUM (no branch, no mirror). The ledger home is normative in [03-conditional-ledger.md](./03-conditional-ledger.md): epoch-keyed `BaselineVaults`, `PositionId::Baseline{epoch, Long|Short}`, escrow/supply identity extended over the baseline set. The trade path is §6.1's degenerate (unbranched) form; revenue recycling and the `b·ln 2` headroom argument of §6.3 apply verbatim (sets pay 1 NUM at any `s_e`).
+
+### 8.3 Subsidy and discoverability
+
+- Subsidy parameter: **`pol.b_baseline`** constitution key (*value: [13-parameters.md](./13-parameters.md)*), funded from the dedicated **`POL_BASELINE`** treasury line, **outside `pol.budget_epoch`** ([08 §4.3](./08-treasury-and-economics.md)) — the Baseline book never competes with proposal subsidies under shrink-to-fit; seeding mechanics are otherwise those of every book (§10).
+- **`BaselineMarketOf: map EpochIndex → MarketId`** — declared in `pallet-market` storage, written at Baseline book creation (Seed, epoch e), reaped with the market. Shape and name are **frozen in [02-integration-contract.md](./02-integration-contract.md)**; the decision engine's `baseline_market(epoch)` accessor and the frontend's Baseline reads both resolve through it (X-10 closure). The frontend precondition row for Baseline trading exists in doc 11.
+
+### 8.4 Lifecycle and settlement
+
+Created and seeded during epoch e's Seed window; trades d5–d18 alongside decision books and **remains open through the last epoch-e decision, including per-pair 3-day extensions** (its TWAP is consumed over each deciding pair's own window); then freezes. Settlement at **e+3** Housekeeping via the single SettleAuthority path (`pallet-epoch::settle_cohort` → `pallet-welfare::compute_settlement` → ledger), when `snapshot(e+2)` has finalized and survived its challenge window; reaped after settlement + archive delay.
+
+### 8.5 Role in the decision rule
+
+Every `decide()` consumes the Baseline TWAP as the reject-leg floor (evaluation owned by doc 05):
+
+```
+r_eff = max(r_f, base − σ_class)        // adopt must beat max(reject leg, Baseline − σ)
+```
+
+This is the capture-resistance adaptation of the reject-leg floor: suppressing the reject book below the economy's own unconditional forecast cannot lower the hurdle below `base − σ`. The Baseline book is also the standing **"priced second opinion"**: an always-on, unconditional market estimate of next-horizon welfare used for entrenchment-path calibration and phase-graduation evidence (doc 06/09 ownership). Degradation rules when the Baseline book fails decision-grade checks are owned by doc 05; the Baseline-floor-suppression threat row lives in doc 14.
+
+---
+
+## 9. Gate markets
+
+For CODE, META, and TREASURY > 1% NAV: **four binary books per proposal** — question: "Conditional on ADOPT (resp. REJECT), will the `g` daily floor-breach flag be set on ≥ 1 day during epochs e+1…e+2?", for `g ∈ {S, C}`.
+
+- **Instruments.** YES/NO complete sets against branch-NUM in the corresponding branch: `PositionKind::GateYes(g)` / `GateNo(g)` per branch, with per-branch gate-set supplies in `VaultInfo` and the conservation identity extended over the enlarged set — the B-2 ledger fix makes the four-book set representable; normative instrument semantics in [03-conditional-ledger.md](./03-conditional-ledger.md).
+- **Mechanism.** Identical LMSR (§3–§4) with YES ↦ LONG, NO ↦ SHORT; subsidy `b = pol.b_gate` (*value: §13*); same wrapper, recycling, and `b·ln 2` headroom (§6); a complete YES+NO set is worth 1 branch-NUM at either flag outcome.
+- **Settlement.** On **deterministic daily breach flags computed from `C_onchain`/`S` sub-components only** (D-18 gate split: `C_attested` never drives daily flags or gate settlement). Flag computation is owned by docs 05/07; the market consumes the recorded flags via `settle_gate(pid, gate, outcome)` (doc 03) on the realized branch. Unrealized-branch gate instruments void (pay 0); that branch's branch-NUM refunds principal per the ledger rules. There is no oracle discretion anywhere in gate settlement.
+- **Consumption.** The veto tests (`p̂ᵍ_adopt > p_max(g)`; `p̂ᵍ_adopt > p̂ᵍ_reject + ε(g)`) read gate-book TWAPs before any welfare comparison — kernel-ordered, owned by doc 05. Healthy gate books trade near the boundary by design and are therefore **exempt from the [0.02, 0.98] sanity band**; their near-boundary validity rule is in doc 05.
+
+---
+
+## 10. POL seeding hooks
+
+POL enters as **dual-minted complete sets on both branches at book creation**: the treasury splits NUM through the proposal's vault (one split funds both branches' books — the mirror branch's seed is the free image of the live one, decision-neutral by construction), then `split_scalar`s each branch leg into the branch's book inventories, `b·ln 2` per book (§6.3). The seeding flow MUST satisfy the **per-branch** escrow/supply identity walk of [03-conditional-ledger.md](./03-conditional-ledger.md) (the B-4 fix: per-branch supply fields; no single `branch_pairs` counter exists to underflow). Baseline seeding is the unbranched form against `BaselineVaults`.
+
+- POL MUST remain undisturbed through the decision window (a decision-grade condition, doc 05) and withdraws at settlement; realized cost = divergence loss in the live branch = the explicit information subsidy.
+- **POL and book accounts are protocol accounts: exempt from `MaxPositionsPerAccount = 64` and from the per-entry Positions deposit** (doc 03) — seeding 196 books cannot collide with user-facing position caps.
+- Per-class budget arithmetic, the 0.75%-NAV epoch cap, minimum-viable NAV, and Ask-scaled `b` (D-4) are owned by doc 08; fee routing (50% INSURANCE / 50% POL offset) likewise.
+
+---
+
+## 11. Events (normative here; shapes frozen in [02-integration-contract.md](./02-integration-contract.md))
+
+`pallet-market` MUST emit:
+
+| Event | Fields | Semantics |
+| --- | --- | --- |
+| `Traded` | `{ market: MarketId, who: AccountId, side: TradeSide, amount: Balance, cost: Balance, p_after: FixedU64 }` | One per executed `buy`/`sell`. `side` is the frozen 4-variant **`TradeSide { BuyLong, BuyShort, SellLong, SellShort }`** ([02 §2/§5](./02-integration-contract.md)) — derived from the call (`buy`/`sell`) and its `Long`/`Short` parameter (gate books: Yes ↦ Long, No ↦ Short). `amount` and `cost` are **unsigned magnitudes**: `amount` in position units, `cost` the NUM flow (trader → book on buys, book → trader on sells), fee-exclusive — direction is carried entirely by `side`, which is clearer for indexers than signed values. `p_after` = post-trade `p_L` (1e9 fixed); `p_S = 1 − p_L` is derived |
+| `Observed` | `{ market: MarketId, o_t: FixedU64 }` | One per recorded (capped) observation, on-trade or crank |
+
+These two events are the frontend's entire price-history pillar (event-derived, chain-served — D-2/D-6); they are load-bearing and MUST NOT be gated behind an indexer. Emission is unconditional on success paths; `close`/`reap` and settlement events are enumerated in doc 02.
+
+---
+
+## 12. Worked numerical example
+
+TREASURY proposal, decision pair, `b = 25,000` NUM/branch. Books open at 0.5/0.5; headroom seeded per book `= 25,000·ln 2 = 17,328.68` NUM of complete sets. Over the **d5–d18** Trading phase, informed flow moves ACCEPT-LONG to 0.560 and REJECT-LONG to 0.520.
+
+- Decision-window TWAPs: `P̄_acc = 0.5585`, `P̄_rej = 0.5210`, Baseline TWAP `= 0.5230`.
+- Reject-leg floor: `r_eff = max(0.5210, 0.5230 − σ=0.005) = 0.5210`. Uplift `= 0.0375 ≥ δ_TREASURY = 0.025` ✔.
+- Trailing 24 h TWAPs 0.5570 / 0.5222 ⇒ uplift 0.0348 ✔; convergence `|0.560 − 0.5585| = 0.0015 ≤ 0.05` ✔.
+- Gate books: breach TWAPs S: 0.011 acc / 0.009 rej; C: 0.017 / 0.015 — under `p_max = 0.05`, within `ε = 0.02` ✔. **Adopt.**
+- **Maker loss realized (ACCEPT book walked 0.5 → 0.56):** with revenue recycled, expected divergence subsidy at final price `p` is `b·[ln 2 − H(p)]`, `H(p) = −p·ln p − (1−p)·ln(1−p)`:
+
+```
+loss = 25,000 · (0.693147 − 0.685930) ≈ 180.4 NUM  (≈ 180 NUM)
+check: Δ = b·logit(0.56) = 6,029.05 LONG; revenue = 3,195.83; E[payout at s=0.56] = 3,376.27; diff = 180.4 ✔
+bound: ≤ b·ln 2 = 17,328.68 NUM
+```
+
+The superseded worked example's "≈ 1,507 NUM" was a computation error (maker-loss low); the subsidy actually paid to informed traders for a 6-point move is two orders of magnitude below the worst-case bound.
+
+---
+
+## 13. Deferred work
+
+**Forecast trading is CUT from v1 (X-5, D-8).** Books close at branch resolution and never reopen; there is no post-decision "running forecast" trading of the live branch through measurement. This simultaneously removes: (a) the frontend surface gap (no screen or precondition row existed; FE pre-sign preconditions only construct `market.buy/sell` in `Trading`/`Extended` — the windows now agree across the boundary); and (b) the **inventory problem that made reopened books unable to function at all**: `split_scalar` requires the vault to be `Open`, and post-resolution vaults are not — a reopened book could neither recycle revenue into complete sets nor replenish delivery inventory, so the §6.3 solvency construction breaks the moment the vault leaves `Open` (the forecast-mint medium, moot by this cut). A v2 design MUST solve resolved-state minting first — e.g., a winning-branch-scoped mint rule (winning branch-NUM is par, so complete sets remain fully backed) or an inventory-only frozen-float book — and MUST ship the FE surface in the same release train. Recorded here as the single deferred-work statement; do not partially re-enable.
+
+**Order-book / batch-auction layer.** A 60 s frequent-batch-auction layer remains excluded from v1 (weight at hostile-controllable order counts, resting-order state growth, implementation risk in the solvency-adjacent path; the previous-block observation rule already removes decision-relevant intra-block manipulation, leaving ordinary fill MEV bounded by `MaxTrade` impact ≤ 0.25 logit). Phase-6+ optimization behind a META proposal.
+
+---
+
+## Resolves
+
+| Finding | Resolution in this document |
+| --- | --- |
+| **B-6** | §5: V1 corrected to **512.494795136…**, V5 net to **−3.074969** (V2–V4 unchanged); vectors CI-regenerated from the reference model; differential corpus and FE TypeScript port re-anchored to the corrected table |
+| **B-7** | §6 (D-3): books denominated in branch-NUM; `buy`/`sell` NUM wrapper with auto-split and mirror credit; revenue recycling into complete sets; `headroom = b·ln 2` stated and sized via `sup_x[x − ln((e^x+1)/2)] = ln 2`; book solvent by construction |
+| **B-3** (market side) | §8: Baseline market fully specified — unconditional book on `s_e`, `pol.b_baseline` subsidy, lifecycle, settlement at e+3 via the single SettleAuthority path, reject-leg-floor and priced-second-opinion roles (ledger home in doc 03; value in doc 13) |
+| **X-10** | §8.3: `BaselineMarketOf: map EpochIndex → MarketId` declared, written at Seed, frozen in doc 02 — the Baseline id is discoverable by engine and frontend alike |
+| **X-5** | §2, §6.4, §13 (D-8): forecast trading cut; books close at branch resolution and never reopen; trading windows now agree with the FE precondition rows (`Trading`/`Extended` only) |
+| Forecast-mint medium | §13: moot by the D-8 cut; the `split_scalar`-requires-`Open` deadlock is recorded as the blocking constraint for any v2 revival |
+| Maker-loss low | §12: worked example corrected to ≈ **180 NUM** (`b·[ln 2 − H(0.56)]` at b = 25,000), not ~1,507; §2: Trade phase labeled **d5–d18** matching offsets 72,000–259,200 |
+| ADR-11 low | §7: slew cap κ normatively applies per **10-block observation interval** (60-block drift removed); observation reads the previous block's stored quote; full-window/trailing/convergence checks summarized with ownership in doc 05 |

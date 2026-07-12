@@ -1,0 +1,263 @@
+# 07 — Oracle and Dispute System
+
+**Status: normative component specification. Supersedes the corresponding sections of BACKEND_PLAN.md/FRONTEND_PLAN.md** (primarily BE §15, the oracle rows of §5.2.5, §12.3's attested-input column, and the oracle rows of §21/§22). Normative language: RFC 2119. Implements [D-18 (oracle side)](./00-decision-record.md) and the disposition rows for B-9 (attested side), ProcessHold, oracle bonds, challenge censorship, Incident/MilestoneRegistry, USDC reserve health, and the §15.2-latency low finding.
+
+**Boundary.** This document owns: the adapter hierarchy; the C-pillar determinism split as it constrains the oracle (what is attested, when, and what attested data may never touch); the reporter and watchtower registries; the bonded optimistic reporting game with value-scaled bonds and 72-hour watchtower-acknowledged challenge windows; `pallet-registry` (IncidentRegistry + MilestoneRegistry); the deterministic reserve-health probe `R` and playbook `PB-RESERVE` (trigger side); the scoped `ProcessHold` predicate; the evidence and `recompute_proof` flow; and the reconciled dispute-latency budget. It references, and does not restate: pillar composition, daily flags and `W` ([05](./05-welfare-and-decision-engine.md)); the `OracleResolution` adjudication track and guardian playbook registry ([06](./06-governance-and-guardians.md)); `Voided` ledger semantics ([03](./03-conditional-ledger.md)); oracle/registry economics, budget lines and bootstrap sequencing ([08](./08-treasury-and-economics.md)); frontend surfaces ([10](./10-frontend-architecture.md), [11](./11-frontend-workflows.md)); evidence hosting and ops funding ([12](./12-release-and-operations.md)); residual collusion threats ([14](./14-threat-model.md)); the frozen name/type contract ([02](./02-integration-contract.md)); the master parameter table ([13](./13-parameters.md)).
+
+---
+
+## 1. Adapter hierarchy and the determinism boundary
+
+Priority order (unchanged from BE §15.1, SGF §7.1): (1) **on-chain deterministic** — no oracle at all; (2) **relay-derived** — read from validation data, deterministic; (3) **deterministic cross-chain query** — the reserve-health probe of §8, an XCM query with a fail-static timeout, new in this revision; (4) **bonded optimistic attestation** — everything else. Only class-4 components enter the dispute system of §5. A MetricSpec MUST place every component in the lowest-numbered class that can produce it; `register_spec` MUST reject a class-4 declaration for a quantity derivable in classes 1–3.
+
+Class 3 is deliberately narrow: exactly one component (`R`, §8) uses it in v1, its output is monotone fail-static (a missing or failed response can only *lower* the component), and no other XCM-derived input may be admitted without an entrenched-track amendment. This is the reconciliation of the reserve probe with invariant I-24, which [15](./15-invariants-and-testing.md) restates as: *no XCM outcome may move any decision or settlement input toward adoption or toward higher settlement; absence of a response is always the pessimistic case*.
+
+## 2. The C-pillar split: `C_onchain` and `C_attested` (B-9, D-18)
+
+ADR-10's claim that gate-breach facts are deterministic with "no oracle discretion" was false as previously specified: C mixed same-block counters with attested components that carry challenge windows and up to multi-week dispute latency. The split below makes the claim true by construction. Pillar composition, weights and the daily-flag computation are owned by [05](./05-welfare-and-decision-engine.md); this section is normative for what the oracle may and may not feed.
+
+| Sub-pillar | Components (v1) | Source class | Consumed by |
+|---|---|---|---|
+| `C_onchain` | Economic security `E` (dimensionless coverage ratios per D-18/B-10 — no attested price, see [05](./05-welfare-and-decision-engine.md)); weight headroom `H`; reserve health `R` (§8) | classes 1–3 | **Daily gate-breach flags `C_daily`**, gate-market settlement, and settlement-time `W` |
+| `C_attested` | Incident score `I` (from IncidentRegistry, §7); external-price components if ever admitted (≥ Phase 6, none in v1 — the §17.1 depeg feed remains monitoring-only and is never a settlement input) | class 4 | **Settlement-time `W` only** |
+
+Normative consequences:
+
+1. Daily `C_daily` flags MUST be computed from `C_onchain` alone, same-block, from data available at the flag block. The oracle never gates daily flags; gate markets (which settle on the daily flags — [04](./04-markets-and-pricing.md)) therefore settle without any oracle input, restoring ADR-10.
+2. `C_attested` components enter exactly one place: the settlement-time recomputation of `W_{e+1}, W_{e+2}` used to produce `s` for a cohort. A conforming implementation MUST NOT read any class-4 value on any daily, decide-time, or gate path.
+3. **What reporters attest, and when.** For each admitted class-4 component `c` and each measurement epoch `m`, one value `v(c, m) ∈` the component's sanity bounds is attested, in the report window opening at the close of epoch `m` (§5 step 1). For `I` the "reporter" is the registry aggregation of §7 (individual filings are the bonded objects; the epoch aggregate is derived deterministically from challenge-closed filings — no separate report round). For any future external-price component, the reporter attests the value computed per the frozen formula (`formula_ref`) from content-addressed raw data.
+4. **MetricSpec version freezing.** Cohorts settle on their creation-time MetricSpec version (I-16). A report MUST name the spec version it attests under; a report naming a version other than the frozen version of every cohort consuming `(c, m)` is invalid at dispatch (`Error::SpecVersionMismatch`). Where two live cohorts consume the same `(c, m)` under *different* frozen versions (possible across an activation boundary), one report per version is required and each settles only its own cohorts; the game of §5 runs per `(c, m, version)`.
+5. Admission control: an attested component MUST NOT be admitted to a MetricSpec unless its documented maximum single-epoch settlement impact satisfies the bond-coverage rule of §6.3, and ≥ 3 registered reporters plus ≥ 2 registered watchtowers exist (bootstrap sequencing and stake-loan funding per [08](./08-treasury-and-economics.md)).
+
+## 3. Reporter registry
+
+Permissionless entry with `orc.reporter_stake` *(normative value: [13](./13-parameters.md); default 100,000 NUM)* held; exit returns the stake after all rounds the reporter participated in are closed. ≥ 3 registered reporters with full stakes are REQUIRED before any attested component may be admitted to a MetricSpec and before Phase-3 arming ([08](./08-treasury-and-economics.md) funds recallable stake-bootstrapping loans from the incentive allocation). Stake discipline: 50% slash on a second adjudicated-false report; ejection on the third; slashes route 40% to the honest counterparty of the terminating round, 60% to INSURANCE (GFP §9.5).
+
+OCWs on reporter-operated nodes MAY compute values and submit the signed extrinsics automatically; consensus verifies only signatures, bonds and windows. No unsigned oracle transactions are accepted (`ValidateUnsigned` is not implemented for any call in this document).
+
+## 4. Watchtower registry (challenge-censorship repair, D-18)
+
+The prior rule "unchallenged ⇒ final" made silence load-bearing: colluding collators could censor challenges for one 48 h window and finalize a false report (the review's challenge-censorship medium; TM-4's "delay, never wrong" was a mischaracterization). Finalization-by-silence now additionally requires positive, bonded evidence that the report was *observable*:
+
+- **Registry.** `register_watchtower(entity_ref)` — Signed, `wt.stake` *(default 25,000 NUM)* held; bounded `wt.max = 16` seats; watchtowers MUST be independent registered entities under the same entity rule that pins the collator-concentration metric (no two seats per entity; entity registry per [05](./05-welfare-and-decision-engine.md)). Membership is permissionless-with-stake; the values layer MAY recall a watchtower via the `guardian` track ([06](./06-governance-and-guardians.md)).
+- **Acknowledgment.** `ack_observed(component, epoch, round, report_hash)` — Signed by a registered watchtower, O(1), keeper-class fee rebate. It asserts exactly: "this report/counter-report was visible in a finalized block and the challenge surface is reachable." It asserts nothing about the value's truth.
+- **Quorum rule.** An *unchallenged* round finalizes at window close **only if ≥ `wt.quorum = 2` distinct watchtowers have acknowledged it** (`wt.quorum` is a kernel floor; raising is META-amendable). Otherwise the window extends **once** by `orc.ext_window = 48 h (28,800 blocks)` for that `(component, epoch)` lifecycle — one extension total across all its rounds, never per round. If at the end of the extension there is still neither a challenge nor a quorum, the value is treated as unobservable: the component takes the **neutral-settlement path** of §10 (never finalizes forward), the reporter's bond is refunded in full (absence of quorum is not the reporter's fault), and a `QuorumFailed` event is emitted.
+- A **challenge supersedes the quorum requirement** for that round: a posted challenge is itself proof that the report was observable, and the game proceeds on the escalation clock regardless of acknowledgments.
+- **Liveness discipline.** A watchtower that acknowledges no round in an epoch with ≥ 1 open round is marked inactive (event `WatchtowerInactive`); two consecutive inactive epochs slash 10% of `wt.stake` and eject. Rebates make honest participation approximately costless; the stake makes registration-then-abandonment (to starve the quorum) costly.
+
+Corrected TM-4 characterization (row owned by [14](./14-threat-model.md)): collator censorship now yields **delay, and a wrong settlement only under watchtower + collator collusion** — ≥ 2 watchtowers and the censoring collator set must jointly defect. That residual is a threat-model row, not a protocol claim.
+
+## 5. The reporting game (per `(component, epoch)`, class-4 only)
+
+1. **Report** — within 2 days of the measurement epoch's end: `report(component, epoch, spec_version, value, evidence_hash)`, Signed by a registered reporter, round-1 bond `B_1` (§6) held. Evidence MUST be retrievable: content-addressed raw data + recomputation instructions per the frozen MetricSpec; unretrievable evidence is treated as absent (GFP §9.1). No report by window close ⇒ neutral settlement (§10).
+2. **Challenge window** — **72 h (43,200 blocks)** *(frozen shared constant; kernel floor — `orc.window` MAY be raised via META to ≤ 120 h, never lowered)*: anyone MAY `challenge(component, epoch, counter_value, evidence_hash)` posting the current-round bond. Window close resolves per the §4 quorum rule: quorum + no challenge ⇒ value final; no quorum + no challenge ⇒ one 48 h extension, then neutral; challenge ⇒ escalate.
+3. **Escalation** — bonds double per round (§6), `R_max = 3` rounds, each with its own 72 h window. Where the frozen spec permits deterministic recomputation from the committed raw data, any keeper MAY submit `recompute_proof(round_id, proof)` resolving the round mechanically at any point (§9); otherwise rounds resolve by counter-report + counter-challenge.
+4. **Terminal adjudication** — a round-3 dispute escalates to the `OracleResolution` values track: **60% approval / 10% support / 7-day decision** with a **pre-cohort conviction snapshot** (GOV locked before the subject cohort's creation; capital that entered later does not vote) — track parameters and snapshot mechanics owned by [06](./06-governance-and-guardians.md). The only admissible call is `oracle.adjudicate(round_id, verdict)`. Trust assumption unchanged: the backstop is stake-weighted (A-3) and exists to make earlier-round lying unprofitable, not for routine use (FGP §6).
+5. **Slashing** — the adjudicated-wrong side forfeits its full round-bond stack: 40% to the honest counterparty, 60% to INSURANCE. Reporter-stake discipline per §3. Bond resolution follows the verdict **whenever it lands**, including after the money deadline of §11 — a late verdict settles bonds and reputations but never re-opens settled money (I-18).
+6. **Latency cap and money deadline** — per §11: components not challenge-closed by `OracleSettleDeadline` settle neutrally; the schedule budget is met by construction, not by hope.
+7. **Neutral settlement** — §10. No path settles "forward" on contested data.
+
+Worked example (BE §30.6, restated under this spec): reporter posts integrations value 0.62 for epoch 41 on a cohort stack with `StakeAtRisk = 400k` NUM ⇒ `B_1 = max(10k, 2.5% × 400k) = 10k`; challenger posts 0.44 with usage-bar evidence (10k); round 2 (20k) counter-assert; round 3 (40k) opens; a keeper's `recompute_proof` resolves mechanically at 0.44. The reporter forfeits the 70k stack (40/60), second offense recorded; settlement uses 0.44; total delay 9 days — inside the §11 budget.
+
+## 6. Bonds: value-scaled (oracle-bonds medium, D-18)
+
+Flat bonds made high-value cohorts cheap to attack: on a ~1.2M-NUM META cohort, shifting `s` by 0.10 on a subjective attested component netted ~+50k NUM even after forfeiting the full flat 70k stack. Bonds now scale with value-at-stake.
+
+### 6.1 Definitions
+
+```
+StakeAtRisk(c, m)   = Σ CohortEscrow(k)  over every cohort k whose frozen MetricSpec
+                      consumes component c for measurement epoch m
+CohortEscrow(k)     = Σ_pid escrowed(pid) over k's vaults, read at the block Snapshot(m)
+                      finalizes (deterministic, on-chain; frozen for the lifecycle)
+B_1(c, m)           = max(orc.bond_floor, orc.bond_bps × StakeAtRisk(c, m))
+B_r(c, m)           = B_1(c, m) · 2^(r−1),   r = 1…R_max
+```
+
+Note the Σ over cohorts: with k = 2, epochs `m` are consumed by two overlapping cohorts (cohort e and e+1 both measure e+2), so the value a false `v(c, m)` can move is the *sum* of their escrows, and the bond prices that sum.
+
+### 6.2 Escalation table (defaults; master table [13](./13-parameters.md))
+
+| Round | Bond (each side) | Cumulative forfeit if adjudicated wrong |
+|---|---|---|
+| 1 (report / first challenge) | `B_1 = max(10,000 NUM, 250 bps × StakeAtRisk)` | `B_1` |
+| 2 | `2·B_1` | `3·B_1` |
+| 3 | `4·B_1` | `7·B_1` |
+| Terminal | no new bond; verdict distributes the stack | `7·B_1 = 17.5% × StakeAtRisk` at the default bps |
+
+`orc.bond_floor` default 10,000 NUM (hard min 2,500, hard max 100,000); `orc.bond_bps` default **250 bps**, hard min **150 bps** (see §6.3), hard max 1,000 bps; both META-amendable within bounds, cooldown 2 epochs. Honest-challenger revenue also scales: winning any round pays 40% of the loser's stack, ≥ `0.4·B_1 = 1% of StakeAtRisk` — challenge incentives grow with exactly the value that needs defending.
+
+### 6.3 Bond-coverage rule and the META worked example
+
+**Admission rule (normative, machine-checked at `register_spec`):** an attested component with documented maximum single-epoch settlement impact `Δs_max` (a mandatory MetricSpec field per [05](./05-welfare-and-decision-engine.md) §12.4-equivalent) MAY be admitted only if
+
+```
+(2^R_max − 1) · orc.bond_bps  ≥  Δs_max          // default: 7 × 2.5% = 17.5%
+```
+
+so that a reporter who must survive every round (or win at terminal, against the pre-cohort-snapshot electorate) risks more than the maximum value a lie can move. The 150 bps hard min keeps the left side ≥ 10.5% even at the parameter floor.
+
+**The review's scenario, recomputed.** META cohort, `StakeAtRisk = 1,200,000` NUM; attacker shifts `s` by 0.10 via a subjective attested component; gross gain bounded by `0.10 × 1,200,000 = 120,000` NUM (attained only if the attacker holds *every* winning scalar unit).
+
+| Regime | `B_1` | Stack at risk | Best-case attacker net |
+|---|---|---|---|
+| Old (flat) | 10,000 | 70,000 | **+50,000** (profitable) |
+| This spec | `max(10,000; 2.5% × 1.2M) = 30,000` | `7 × 30,000 = 210,000` | `120,000 − 210,000 =` **−90,000** |
+
+At any realistic position share (< 100% of the winning side) the loss deepens; a *successful* attack additionally requires winning the terminal referendum against pre-cohort conviction locks, which the bond math no longer subsidizes.
+
+## 7. `pallet-registry` — IncidentRegistry and MilestoneRegistry
+
+The bonded filing/challenge/slashing subsystem that feeds `C_attested` (incidents) and the A pillar (milestones) previously had no owning pallet, no bounds and no budget. It is one pallet, two instances via `RegistryKind ∈ {Incident, Milestone}`. Outputs are consumed **only at settlement time** (§2); registry sub-games can hold *settlement*, never *decisions* (§12).
+
+**Purpose / trust boundary.** Turns permissionless bonded claims about off-chain facts ("an S2 incident occurred in epoch m", "milestone M shipped, 3 points") into challenge-closed on-chain records. It holds only filing bonds; it cannot touch escrow, markets or W directly — `pallet-welfare` reads its *closed* records at snapshot time.
+
+```rust
+pub trait Config: frame_system::Config {
+    type RuntimeEvent: /* … */;
+    type Collateral: fungibles::Mutate<AccountId>;        // NUM bonds
+    type Kind: Get<RegistryKind>;                          // instance discriminant
+    type MaxFilingsPerEpoch: Get<u32>;                     // 64
+    type MaxEvidenceLen: Get<u32>;                         // 32-byte content hash only
+    type WeightInfo: WeightInfo;
+}
+```
+
+**Storage** (all bounded, SCALE-stable):
+
+| Item | Type | Max-size argument |
+|---|---|---|
+| `Filings: double_map (EpochId, FilingId) → Filing` | `{ who, class: FilingClass, points: u16, evidence_hash: H256, bond: Balance, state: Filed{window_end} \| Challenged{round, window_end} \| Upheld \| Rejected, spec_version }` | ≤ `MaxFilingsPerEpoch(=64)` per epoch × ≤ 4 non-settled epochs live; closed epochs reaped at cohort settlement + archive delay |
+| `FilingCount: map EpochId → u32` | overflow ⇒ `Error::EpochFull` (hard bound, never silent growth) | ≤ 4 keys live |
+| `Aggregates: map EpochId → FixedU64` | derived once per epoch at close-out (the `I` input or milestone-points input to welfare) | ≤ 4 keys live |
+
+`FilingClass` for the Incident instance = severity `{S1 = 1.0, S2 = 0.4, S3 = 0.1}` (values normative in [05](./05-welfare-and-decision-engine.md)); for the Milestone instance = the enumerated scope classes of the frozen MetricSpec (scope inflation stays challengeable).
+
+**Calls:**
+
+| Call | Origin | Bond / preconditions | Effect | Events | Weight |
+|---|---|---|---|---|---|
+| `file(epoch, class, points, evidence_hash, spec_version)` | Signed | `reg.bond_incident` (default 5,000 NUM) or `reg.bond_milestone` (2,500 NUM) held; epoch within its filing window (open through the epoch + its report window); count < 64; evidence content-addressed | creates `Filed` with a **72 h challenge window** *(frozen constant; supersedes the previous 4-day milestone window)*, watchtower quorum rule of §4 applies to unchallenged closure | `IncidentFiled` / `MilestoneFiled` | O(1) |
+| `challenge_filing(epoch, filing_id, evidence_hash)` | Signed | matching bond held; window open | `Challenged`; one counter-round (registry games do not escalate — round 2 closes by `recompute_proof` where the spec permits, else by the filing party's terminal escalation into §5 step 4 as a `(component, epoch)` dispute) | `IncidentChallenged` / `MilestoneChallenged` | O(1) |
+| `crank_close(epoch, batch)` | Signed (keeper, rebated) | window elapsed | closes ≤ 20 filings/call: unchallenged + quorum ⇒ `Upheld`; quorum failure ⇒ per §4 (one 48 h extension, then the filing is `Rejected`-as-unobservable with bond refunded); challenged ⇒ resolve per round outcome; loser's bond splits 40/60 per §5.5 | `IncidentUpheld`/`IncidentRejected`/`MilestoneAccepted`/`MilestoneRejected`, `FilingBondSlashed` | bounded batch |
+| `close_epoch(epoch)` | Signed (keeper) | all filings terminal | computes `Aggregates[epoch]` (Incident: `max(0, 1 − Σ severity)` over Upheld filings, "no filings ⇒ 1"; Milestone: `points ÷ target`) and hands it to `pallet-welfare::note_external_component` | `RegistryEpochClosed` | O(filings ≤ 64) |
+
+**Hooks:** none (I-20). **Errors:** `EpochFull`, `WindowClosed`, `WindowOpen`, `AlreadyChallenged`, `SpecVersionMismatch`, `BondBelowMinimum`. **Suppression economics:** wrongly *rejecting* a true incident filing costs the challenger the bond (40% to the filer) — permissionless bonded filing plus slash-for-wrong-rejection keeps suppression priced, as the §12.3 gaming-vector column requires. **Audit concerns:** filing-window/report-window fencepost alignment; the terminal-escalation handoff into §5 (a registry dispute that escalates MUST carry §6 value-scaled bonds from that point, sized by the `StakeAtRisk` of the cohorts consuming `I` or the milestone component for that epoch).
+
+Event names above are frozen in [02](./02-integration-contract.md) §6 (pallet-registry row) and match it exactly; this section MUST NOT drift from it.
+
+## 8. Reserve health `R` and `PB-RESERVE` (USDC-freeze medium)
+
+A frozen Asset Hub USDC channel or a frozen sovereign-account balance previously fired nothing: PB-DEPEG watches *price*, which does not move when transfers freeze, so NAV and the FE kept reporting full backing. `R` is a deterministic class-3 sub-metric in `C_onchain`.
+
+**Probe.** Once per epoch day (`res.probe_interval = 14,400 blocks`), the keeper-cranked `crank_reserve_probe()` sends one XCM program to Asset Hub exercising **transferability** of the chain's sovereign USDC: withdraw `res.probe_amount` (default 10 NUM-cents) from the sovereign account, re-deposit to the same account, and report the outcome via a paid `ReportError`/`QueryResponse` leg with a fresh `query_id` **[VERIFY: exact instruction sequence admissible under Asset Hub's barrier on stable2603; the probe MUST NOT require `Transact` in either direction]**. Probe fees are paid from sovereign DOT/USDC under the ops budget line ([12](./12-release-and-operations.md), [08](./08-treasury-and-economics.md)).
+
+**Scoring (fail-static, normative):**
+
+- Success response within `res.probe_timeout = 600 blocks (1 h)` ⇒ probe pass.
+- Error response, or timeout, or no probe sent (keeper outage) ⇒ probe **fail**. Absence is never healthy: unlike the XCM-traffic metric `X` ("no traffic ⇒ 1"), `R` has no benefit-of-the-doubt branch.
+- `R_daily = 1` if the day's probe passed, else `0`; `res.fail_threshold = 2` consecutive failed probes ⇒ `ReserveUnhealthy` state.
+
+**Consequences of `ReserveUnhealthy`:**
+
+1. The daily **C breach flag is set** (via `R = 0` in `C_onchain`), and — because probe traffic rides the NUM channel — sustained unresponsiveness also degrades `X`, a second `C_onchain` component ([05](./05-welfare-and-decision-engine.md) §4.3): the C gate fails toward status quo, deterministically, with no oracle in the loop.
+2. **`PB-RESERVE` is armed** (guardian playbook, registered in [06](./06-governance-and-guardians.md)'s playbook registry): activation halts **split inflows only** (`ledger.split` rejects with `Error::ReserveUnhealthy`; `merge`, `redeem*`, trading and withdrawals of already-escrowed value are unaffected — the halt stops new exposure, never exit), and sets the **treasury NAV-haircut flag** (NAV reporting and the mark-down rule are economics, owned by [08](./08-treasury-and-economics.md); the FE surfaces the flag and the degraded-backing banner per [10](./10-frontend-architecture.md)).
+3. Recovery: `res.recover_threshold = 3` consecutive passed probes clears the state (`ReserveRecovered`), lifts the split halt automatically, and schedules the mandatory retrospective ratification of the playbook activation per [06](./06-governance-and-guardians.md).
+
+I-24 reconciliation per §1: the probe is the sole XCM-derived settlement input and is monotone fail-static. Residual: a relay or Asset Hub outage honestly sets the flags — that is the intended behavior (the reserve *is* unreachable), same philosophy as `F`.
+
+## 9. Evidence and `recompute_proof`
+
+Evidence is content-addressed raw data + recomputation instructions sufficient for a third party to reproduce the value under the frozen `formula_ref`. Retrievability is a validity condition (§5.1); hosting is a funded ops line with a named owner ([12](./12-release-and-operations.md)); once the Bulletin Chain path is live **[VERIFY: Bulletin Chain mainnet availability and authorization path]**, large artifacts MAY publish there by CID with only the hash on-chain — expiry of evidence storage MUST NOT affect any settled decision. `recompute_proof(round_id, proof)` is permissionless (any keeper, rebated), bounded at `orc.max_proof_bytes = 256 KiB`, and resolves a round mechanically wherever the frozen spec declares the component deterministically recomputable from committed data; the FE surfaces submission and evidence display in the operator area ([11](./11-frontend-workflows.md), FE-15).
+
+## 10. Neutral settlement and VOID
+
+Deadline breach, no-report, quorum failure (§4), or a §11 money-deadline miss ⇒ the component **carries its last valid value with the epoch flagged**; two consecutive flagged epochs ⇒ affected not-yet-settled cohorts recompute `W` without the component, weights renormalized (EFP §3 rule). If the failed component is a **gate input**, affected cohorts VOID. VOID semantics are owned by [03](./03-conditional-ledger.md)'s `Voided` state: scalar sets settle at neutral `s = 0.5`, complete pairs recover par via `merge`, unpaired branch-NUM pays `floor(a/2)`, unpaired LONG/SHORT pays `floor(a/4)`; decisions already made stand; queued executions depending on the voided epoch's gates cancel (I-15). Under the §2 split no gate input is attested, so the oracle-driven VOID trigger arises only via `R`-adjacent determinism failures or PB-ORACLE-VOID ([06](./06-governance-and-guardians.md)) — the fail-static backstop is retained even though the daily gate path no longer touches the oracle.
+
+## 11. Latency budget, reconciled (§15.2-latency low)
+
+The old §15.2 table (2 d + 3×2 d + 5 d + 2 d ≈ 15 d) matched neither the 72 h windows nor the hardened track. Reconciled worst case, anchored at `t0` = close of measurement epoch `m` (= epoch `m+1`, day 0; for a cohort `e`, the binding case is `m = e+2`, i.e. days count within epoch `e+3`):
+
+| Stage | Window | Worst-case close (days after `t0`) |
+|---|---|---|
+| Report window | 2 d | d2 |
+| Round 1 (72 h) + the single 48 h quorum extension | 3 d + 2 d | d7 |
+| Round 2 (72 h) | 3 d | d10 |
+| Round 3 (72 h) | 3 d | d13 |
+| Terminal: `OracleResolution` 7 d decision + 1 d confirm, immediate enactment ([06](./06-governance-and-guardians.md)) | 8 d | d21 |
+
+Rules making the budget hold by construction rather than by arithmetic luck:
+
+1. **Money deadline.** `OracleSettleDeadline(m) = start of epoch(m+1) Housekeeping (d20)`. Any `(component, m)` not challenge-closed by the deadline settles **neutrally** (§10) for every consuming cohort. Cohort settlement therefore always proceeds in its scheduled Housekeeping; `settle_cohort`'s cursor MAY run into the next epoch's opening cranks, which is safe for I-21 because the next cohort cannot enter `Settling` before its own d20, ≥ 19 days later.
+2. **Verdict-vs-deadline.** A terminal verdict landing by d20 settles money normally (the common case: an undisputed or early-escalated path closes by ≈ d13–d17). The maximally delayed path (report at d2, extension consumed, all three rounds, full track) lands at d21 — past the deadline — so its money settles neutrally and the verdict resolves **bonds only** (§5.5). This is I-18 verbatim: only challenge-closed values settle money; contested ⇒ neutral/VOID.
+3. The single-extension rule (§4) is what keeps the sum at 21 d; per-round extensions would add 4 d and are prohibited.
+4. An attacker who rides a dispute to terminal purely to force neutral settlement pays the §6 stack for a status-quo outcome (carry-last + flag, or VOID for gate inputs) — a griefing price, priced in [14](./14-threat-model.md)'s dispute-griefing row.
+
+## 12. `ProcessHold`, scoped (ProcessHold medium)
+
+The decision engine's step-2 predicate ([05](./05-welfare-and-decision-engine.md) §14.1-equivalent) is now:
+
+```rust
+fn any_open_dispute_touching(spec: MetricSpecVersion, now: BlockNumber) -> bool {
+    Rounds::iter().any(|d|
+        d.is_oracle_round()                                   // §5 rounds only — registry
+                                                              // sub-games NEVER hold decisions
+        && spec.components().contains(&d.component)           // consumed by the proposal's
+                                                              // FROZEN MetricSpec version
+        && d.posted_bond >= dis_merit_min(d.component, d.epoch))
+}
+```
+
+- **Merit floor.** `dis.merit_min(c, m) = B_1(c, m)` — the value-scaled round-1 bond of §6.1 (a distinct parameter key so the values layer can raise it independently; default equality). Every §5 oracle challenge qualifies by construction; the flat, smaller registry-filing bonds of §7 never do. Censoring one decide window therefore costs a forfeit-at-risk of ≥ 2.5% of the touched `StakeAtRisk`, not one flat bond.
+- **Scope.** "Consumed" means: the component id is in the proposal's *creation-time-frozen* spec version's component set (I-16). Disputes on components outside that set — or on any registry filing whose challenge round has not escalated into a §5 round — do not hold the decision. Rationale: a merit dispute on a consumed component contests the very quantity the proposal's scalar books will settle on (directly for `m ∈` the cohort's measurement window; indirectly through the frozen normalization history); everything else is settlement's problem, handled below.
+- **Registry sub-games hold settlement, never decisions.** `settle_cohort` treats a component as not challenge-closed while any consumed filing's window or challenge round is open; the cohort waits in `AwaitingOracle` until closure or the §11 money deadline (then: neutral). `decide()` never reads registry state.
+- **Extended proposals and the epoch boundary (explicit).** An `Extended` proposal decides up to 3 days into the next epoch's calendar — exactly when the previous measurement epoch's report window (d0–d2) and round-1 windows (through ≈ d7) are open. The predicate is evaluated **at `decide()` dispatch time against rounds open at that block**; the extension does not grandfather a clean state, and a merit dispute opened during the extension window MAY hold the extended decide. This is the intended direction of failure: `Reject(ProcessHold)` is status-quo, the bond is refundable and the proposal resubmittable (per the reason-code table in [05](./05-welfare-and-decision-engine.md)), while the censor has posted a value-scaled bond it forfeits if the dispute is adjudicated frivolous. Keeper-lag races change nothing: a late `decide` evaluates the same recorded accumulators and the same dispatch-time predicate. The residual (repeated bonded censorship across epochs) is a [14](./14-threat-model.md) row with the §6 economics attached.
+- A hold never produces a noisy PASS, and `DeadMan::engaged()` / guardian holds remain independent conjuncts unchanged from the source.
+
+## 13. `pallet-oracle` implementation deltas
+
+Format per BE §5.2. Storage names and value shapes are frozen in [02](./02-integration-contract.md) §7.2; this pallet implements exactly those items (all bounded): `Reporters: map AccountId → ReporterInfo` (≤ 64); `Watchtowers: map AccountId → WatchtowerInfo` (≤ `wt.max = 16`); `Rounds: map (MetricId, EpochId) → RoundState { round, spec_version, reporter, value, evidence_hash, bond, challenge_deadline, extended, challenger, counter_value, acks }` — ≤ 16 components × ≤ 4 concurrently-settling epochs (one live round per key; per-version games across an activation boundary per §2(4)); `ComponentValues: map (MetricId, EpochId) → SettledComponent { value, path, flagged }` reaped at cohort settlement; `ReserveHealth: { consecutive_fails: u8, consecutive_passes: u8, unhealthy: bool, last_query_id }` (single value). Calls: `register_reporter`, `deregister_reporter`, `report`, `challenge`, `recompute_proof`, `register_watchtower`, `ack_observed`, `crank_round_close(batch)`, `crank_reserve_probe`, `adjudicate` (`OracleResolution` origin only). Hooks: none except the `QueryResponse` handler for the reserve probe (O(1), keyed by stored `query_id`; unknown query ids are dropped unpaid). Errors: `NotRegistered`, `WindowClosed`, `BondBelowMinimum`, `SpecVersionMismatch`, `AlreadyFinal`, `QuorumPending`, `ReserveUnhealthy`. Weight drivers: O(1) per call; round-close and probe cranks are bounded batches, keeper-rebated within the oracle budget line ([08](./08-treasury-and-economics.md)).
+
+**Events (canonical names frozen in [02](./02-integration-contract.md) §7.2; this list matches it exactly):** `ReporterRegistered`, `ReporterSlashed`, `ReporterEjected`, `Reported`, `Challenged`, `RoundEscalated`, `RecomputeProven`, `AdjudicationRequested`, `Adjudicated`, `ComponentSettled`, `NeutralSettlement`, `WindowAcknowledged`, `WindowExtended`, `QuorumFailed`, `WatchtowerRegistered`, `WatchtowerInactive`, `WatchtowerSlashed`, `ReserveProbeSent`, `ReserveProbeResult`, `ReserveUnhealthy`, `ReserveRecovered`.
+
+**Invariants (machine-checked in `try-state`):** I-18 (only challenge-closed values settle money); every `ComponentValues` entry is either quorum-acknowledged, challenge-resolved, adjudicated, or neutral-flagged; `Σ held bonds == Σ open-round bonds × sides`; no `Rounds` entry survives its epoch's `OracleSettleDeadline` in a money-bearing state. **Audit concerns:** window/extension fencepost arithmetic at epoch boundaries; ack replay across rounds (acks are per-round, keyed by `report_hash`); bond-schedule freezing at snapshot finalization (no mid-game repricing when escrow changes); the registry→oracle terminal-escalation handoff (§7).
+
+## 14. Parameters introduced or changed here
+
+Single source of truth is [13](./13-parameters.md); this table enumerates the keys this document defines so 13 can consolidate them. All defaults are simulation hypotheses unless marked K.
+
+| Key | Default | Bounds / class |
+|---|---|---|
+| `orc.window` | **72 h (43,200 blocks)** — frozen shared constant | kernel floor 72 h; META ≤ 120 h |
+| `orc.ext_window` | 48 h (28,800 blocks), once per lifecycle | K |
+| `orc.bond_floor` | 10,000 NUM | 2,500 – 100,000; META |
+| `orc.bond_bps` | 250 bps of `StakeAtRisk` | **hard min 150 bps** (§6.3); max 1,000; META, cooldown 2 |
+| `orc.rounds` `R_max` | 3 | 2 – 4; META |
+| `orc.reporter_stake` | 100,000 NUM | 25k – 500k; META |
+| `orc.max_proof_bytes` | 256 KiB | K |
+| `wt.quorum` | 2 | kernel floor 2; META upward |
+| `wt.max` | 16 | K |
+| `wt.stake` | 25,000 NUM | 10k – 100k; META |
+| `dis.merit_min` | `= B_1(c, m)` (value-scaled) | floor: `orc.bond_floor`; META |
+| `reg.bond_incident` / `reg.bond_milestone` | 5,000 / 2,500 NUM | ×0.5 – ×10; META |
+| `reg.max_filings_epoch` | 64 | K |
+| `res.probe_interval` / `res.probe_timeout` | 14,400 / 600 blocks | PARAM |
+| `res.probe_amount` | 10 NUM-cents | PARAM |
+| `res.fail_threshold` / `res.recover_threshold` | 2 / 3 consecutive | META |
+| `OracleSettleDeadline(m)` | start of epoch(m+1) Housekeeping (**d20** at the default length) — the §11 money deadline | K (schedule-derived; consolidated in [13](./13-parameters.md) §2) |
+
+The previous `orc.bond0 / rounds / window` row of BE §21 is superseded by the rows above.
+
+---
+
+## Resolves
+
+| Finding | Resolution in this document |
+|---|---|
+| B-9 (attested side; D-18 gate split) | §2: `C_attested` (incidents, external prices) enters settlement-time `W` only; daily gate flags and gate-market settlement consume `C_onchain` exclusively — the oracle never gates daily flags; reporters' subject matter, timing and MetricSpec-version freezing specified (§2.3–2.4). On-chain pillar composition owned by 05. |
+| ProcessHold (medium) | §12: `any_open_dispute_touching` scoped to §5 oracle rounds on components consumed by the proposal's frozen MetricSpec with posted bond ≥ `dis.merit_min` (= the value-scaled round-1 bond); registry sub-games hold settlement, never decisions; extended-proposal/epoch-boundary evaluation made explicit (dispatch-time predicate, no grandfathering, refundable status-quo reject); griefing priced via §6 and rowed in 14. |
+| Oracle bonds (medium; D-18) | §6: `bond = max(flat_floor, bps × StakeAtRisk)` with doubling rounds expressed in those terms; §6.3 bond-coverage admission rule; the ~1.2M-NUM META cohort attack recomputed from +50k profitable to ≤ −90k. |
+| Challenge censorship (medium; D-18) | §4–§5: 72 h windows (frozen constant) + bonded-watchtower quorum (≥ 2-of-N ack) required for finalization-by-silence, else one 48 h extension, then neutral settlement — "unchallenged ⇒ final" no longer settles money under censorship; TM-4 corrected to "delay, and wrong only under watchtower + collator collusion" (residual rowed in 14). |
+| Incident/MilestoneRegistry (medium) | §7: `pallet-registry` fully specified — bonded filings, 72 h challenge windows with quorum, slashing (40/60), bounded storage with max-size arguments, weights, frozen event names (02); outputs feed `C_attested`/A at settlement only. |
+| USDC reserve health (medium) | §8: deterministic class-3 `R` sub-metric in `C_onchain` (Asset Hub transferability probe via XCM query + fail-static timeout); frozen/unresponsive reserve sets the daily C breach flag (via `R`, and under sustained unresponsiveness via `X` as well — both `C_onchain` components, [05](./05-welfare-and-decision-engine.md) §4.3) and arms `PB-RESERVE` (split-inflow halt + NAV-haircut flag; economics in 08, FE surface in 10); I-24 restated fail-static (§1, 15). |
+| §15.2 latency (low) | §11: latency table reconciled with the 72 h windows, single 48 h extension and the hardened 60%/10%/7-day track (06); worst case 21 d bounded by the d20 money deadline — contested-at-deadline values settle neutrally, verdicts settle bonds whenever they land (I-18). |
