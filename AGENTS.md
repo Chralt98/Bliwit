@@ -109,6 +109,7 @@ per milestone):
 | Path | Status | What it is |
 |---|---|---|
 | `docs/architecture/` | frozen | The specification (00–15 + README) |
+| `docs/design/` | derived | Non-normative design-context pack (`claude-design-kit/`: spec distillations + Claude Design prompt); spec wins on conflict; regenerate after any amendment |
 | `PLAN.md` | living | Implementation roadmap, status, session log |
 | `README.md` | living | Human orientation |
 | `AGENTS.md` / `CLAUDE.md` | living | This manual / Claude Code wiring |

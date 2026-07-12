@@ -146,7 +146,7 @@ never edit the spec). Format: `| ID | Question | Spec ref | Raised | Status |`
 
 | ID | Question | Spec ref | Raised | Status |
 |---|---|---|---|---|
-| — | none yet | | | |
+| SQ-1 | E-row numbering collides: 15 §3.3 (self-described "normative row list") numbers its five decision-record additions E15–E19 (E15 = VOID redemption … E19 = sudo banner + pinned-release warning), while 11 §11.12 — which 15 §3 names as owner of the required-UX matrix — defines E15–E23 with different referents (E15 = referendum voting, E16 = VOID redemption, E21 = sudo era …). Cross-refs disagree, e.g. 15 §4.8 "E15 redeem flow" = 11's E16. Which numbering is canonical? (Scenario content is equivalent; IDs conflict.) | 11 §11.12; 15 §3.3, §4.8 | 2026-07-12 | open |
 
 ## Verification log
 
@@ -189,7 +189,7 @@ Architecture amendments (change-control procedure, AGENTS.md). None expected; no
 
 Repo changes outside any milestone (config tweaks, user-driven edits) — one line each.
 
-- — none yet
+- 2026-07-12 — Added `docs/design/claude-design-kit/` (user-requested): 7-file non-normative context pack for Claude Design (docs 10/11 copied verbatim with derived-copy headers; 00/01–09/13/14/15 distilled read-only) + `PROMPT.md`. Spec untouched; README/AGENTS repo maps updated.
 
 ## Session log
 
@@ -198,3 +198,4 @@ Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
 | Date | Milestone(s) | Done | Next |
 |---|---|---|---|
 | 2026-07-12 | — (infrastructure) | Agent/session infrastructure created: PLAN.md, AGENTS.md, CLAUDE.md, README.md, .claude (settings, 3 hooks, 4 skills, 3 subagents, 3 path rules), .codex playbooks. Architecture write-guard tested (26 cases). | M0 — repo bootstrap incl. V-1 pin re-verification |
+| 2026-07-12 | — (design kit, unplanned) | Built `docs/design/claude-design-kit/` for Claude Design's 10-attachment limit: 7 context files (2 verbatim copies of docs 10/11 + 5 distillations of 00–09/13–15) + generation prompt. Logged SQ-1 (E-row numbering conflict 11 §11.12 vs 15 §3.3). Architecture untouched; README/AGENTS maps updated. | M0 — repo bootstrap incl. V-1 pin re-verification |

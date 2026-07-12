@@ -30,6 +30,7 @@ rollout that removes `sudo` at Phase 4.
 | Path | What it is |
 |---|---|
 | [`docs/architecture/`](docs/architecture/README.md) | The frozen specification (00–15). Start with its README; reading order 01 → 02 → 03 → 04 → 05 |
+| [`docs/design/`](docs/design/claude-design-kit/00-START-HERE.md) | Derived, non-normative design assets: `claude-design-kit/` packs the spec into ≤10 files + a ready prompt for generating frontend design prototypes with Claude Design |
 | [`PLAN.md`](PLAN.md) | Implementation roadmap, milestone status, session log — the living source of "where are we" |
 | [`AGENTS.md`](AGENTS.md) | Operating manual + rules for all coding agents (and useful for humans) |
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code wiring: skills, subagents, hooks |
