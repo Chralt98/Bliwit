@@ -41,6 +41,7 @@ rollout that removes `sudo` at Phase 4.
 | `.claude/` | Automation: session-context injection, skills, subagents, path-scoped rules, and Stop-hook guards for PLAN.md freshness and README's pinned lines |
 | `.codex/` | Codex CLI session playbooks mirroring the skills |
 | [`Cargo.toml`](Cargo.toml), [`rust-toolchain.toml`](rust-toolchain.toml), [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`tools/ci/rust-workspace-gates.sh`](tools/ci/rust-workspace-gates.sh), [`tools/ci/check-doc-links.py`](tools/ci/check-doc-links.py) | M0 bootstrap: Rust workspace manifest, pinned toolchain components, CI skeleton, and local gate scripts |
+| `crates/futarchy-primitives/` | M1 shared primitive crate: `no_std` contract/view types, version constant, and kernel/chain/currency bounds (SCALE derive wiring pending registry access) |
 | `crates/`, `pallets/`, `runtime/`, `node/`, `reference-model/`, `frontend/` | Implementation roots created for future milestones; currently placeholders except where a milestone adds code |
 
 ## How this gets built
