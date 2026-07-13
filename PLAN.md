@@ -20,7 +20,7 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 
 ## Current focus
 
-**Current: A2 — `pallet-conditional-ledger`**. A1 is complete; next up is the conditional ledger milestone (vaults, per-branch supplies, split/merge/scalar/gate/Baseline families, `Voided`, `redeem_void`, and the internal wrapper API).
+**Current: A3 — `pallet-market`**. A2 is complete; next up is the LMSR market pallet milestone (branch-USDC books, trade wrapper, fees, TWAP, POL seeding, and Baseline market mapping).
 
 ---
 
@@ -43,7 +43,7 @@ tests (15 §4.1), `try-state` per 15 §1, benchmark stubs (15 §4.5). Scaffold v
 | ID | Milestone | Spec | Depends | Status | Notes |
 |---|---|---|---|---|---|
 | A1 | `pallet-constitution` — typed/bounded/rate-limited params, meters, capability tables, `PhaseFlags`, `ReleaseChannel` fixed-layout key, kernel re-export | 06; 13 §1/§4; 02 §7.3/§12 | M1 | ✅ | I-6, I-7, I-17; typed storage model, origin-gated dispatch entrypoints, try-state validation, benchmark stubs, and origin-misuse/error-path tests are in place |
-| A2 | `pallet-conditional-ledger` — vaults, per-branch supplies, split/merge/scalar/gate/Baseline families, `Voided` + `redeem_void`, internal wrapper API | 03 (all); 02 §6 | M1 | ⬜ | Audit scope A; L-1…L-6; PT-1…PT-8 (15 §4.2–4.3); frozen early |
+| A2 | `pallet-conditional-ledger` — vaults, per-branch supplies, split/merge/scalar/gate/Baseline families, `Voided` + `redeem_void`, internal wrapper API | 03 (all); 02 §6 | M1 | ✅ | Audit scope A; pure no_std ledger state machine, bounded position accounting, deposit/cap logic, terminal redemptions, internal authority API, try-state checks, benchmark stubs, and origin/error-path tests are in place |
 | A3 | `pallet-market` — LMSR books (branch-USDC, D-3), trade wrapper, fees, TWAP, POL seeding, `BaselineMarketOf` | 04; 02 §5–§7.4 | A2, M2, M3 | ⬜ | I-12, I-13; differential vs V1–V6 + corpus |
 | A4 | `pallet-origins` + `SafetyFilter` — 8 custom origins, closed wrapper set, call-domain derivation | 06 §3; 01 §6 | M1 | ⬜ | I-8, I-10, I-11 |
 | A5 | `pallet-oracle` — reporter/watchtower registries, bonded reporting game, challenge rounds (72 h + quorum), reserve probe `R`, neutral settlement | 07 §1–§6, §8–§13 | A1 | ⬜ | I-18, I-24 |
@@ -223,3 +223,5 @@ Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
 | 2026-07-13 | A1 | Started `pallet-constitution` as a workspace crate: added typed `ParamRecord`/`ParamValue` update validation with hard bounds, max-delta and cooldown checks; resettable meters; bounded capability records; `PhaseFlags` bit assignments; fixed-width 168-byte `ReleaseChannel` parsing; genesis parameter seeds for initial 13 §1 rows; and kernel/contract re-exports. Workspace Rust gates, no-default-features constitution tests, and docs link lint passed. A1 remains in progress because the crate is not yet a full FRAME pallet with storage/extrinsics, mock-runtime origin-misuse/error-path suites, try-state, and benchmark stubs. | Finish FRAME pallet wiring for `pallet-constitution`, add the A1 verification scaffolds, re-run gates, then mark A1 ✅ after spec-compliance review |
 
 | 2026-07-13 | A1 | Completed `pallet-constitution`: added bounded meter storage and genesis state helpers, origin-gated dispatch entrypoints for parameter, capability, phase-flag, release-channel, and meter updates, a try-state validator for storage shape/ranges, runtime-benchmark stubs behind `runtime-benchmarks`, and expanded unit coverage for origin misuse plus error paths. Full Rust workspace gates, no-default-features constitution tests, runtime-benchmarks feature tests, docs link lint, and a spec-compliance pass against 06, 13 §1/§4, 02 §7.3/§12, and 15 §4.1 found no blockers. A1 is now ✅. | A2 — `pallet-conditional-ledger` |
+
+| 2026-07-13 | A2 | Implemented `pallet-conditional-ledger` as a workspace crate: proposal and Baseline vault records, per-branch supply accounting, split/merge/scalar/gate families, authority state transitions, `Voided`/`redeem_void`, terminal scalar/gate/Baseline redemptions with claimant-adverse floors, protocol-account deposit/cap exemptions, internal authority-origin API, try-state validation, runtime-benchmark stubs, and mock-style unit coverage for origin misuse/error paths. Full Rust workspace gates, no-default-features conditional-ledger tests, runtime-benchmarks feature tests, docs link lint, and a spec-compliance pass against 03, 02 §6, and 15 §4.1–§4.3 found no blockers. A2 is now ✅. | A3 — `pallet-market` |
