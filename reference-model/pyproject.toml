@@ -4,10 +4,3 @@ version = "0.1.0"
 description = "Independent Python executable specification for Bleavit protocol vectors"
 requires-python = ">=3.11"
 dependencies = []
-
-[project.optional-dependencies]
-test = ["pytest>=8.0"]
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]

@@ -26,7 +26,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Run reference model tests
-        run: python3 -m pytest reference-model
+        run: PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
       - name: Check generated vector corpus
         run: python3 tools/reference-model/generate-vectors.py --check
 
