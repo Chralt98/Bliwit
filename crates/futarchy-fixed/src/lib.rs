@@ -314,6 +314,60 @@ pub fn lmsr_cost(
     max_q.checked_add(b.checked_mul(log_term)?)
 }
 
+/// Stable two-outcome LMSR long-side marginal price `p_L`.
+///
+/// The price is evaluated as a logistic function of `(q_L - q_S) / b` and
+/// is subject to the same `|q_L - q_S| / b <= 48` domain as the cost path.
+pub fn lmsr_price_long(
+    q_l: FixedU64x64,
+    q_s: FixedU64x64,
+    b: FixedU64x64,
+) -> Result<FixedU64x64, FixedError> {
+    ensure_lmsr_domain(q_l, q_s, b)?;
+    let max_q = cmp::max(q_l, q_s);
+    let min_q = cmp::min(q_l, q_s);
+    let displacement = max_q.checked_sub(min_q)?.checked_div(b)?;
+    let exp_neg = FixedU64x64::from_f64(exp_f64(-displacement.to_f64()))?;
+    let denom = FixedU64x64::ONE.checked_add(exp_neg)?;
+    if q_l >= q_s {
+        FixedU64x64::ONE.checked_div(denom)
+    } else {
+        exp_neg.checked_div(denom)
+    }
+}
+
+/// Stable two-outcome LMSR short-side marginal price `p_S = 1 - p_L`.
+pub fn lmsr_price_short(
+    q_l: FixedU64x64,
+    q_s: FixedU64x64,
+    b: FixedU64x64,
+) -> Result<FixedU64x64, FixedError> {
+    FixedU64x64::ONE.checked_sub(lmsr_price_long(q_l, q_s, b)?)
+}
+
+/// Quantity displacement required to move a two-outcome LMSR from one price
+/// to another: `b * (logit(p_to) - logit(p_from))`.
+///
+/// Both prices must be strictly inside `(0, 1)`. The returned value is an
+/// unsigned magnitude; callers choose which side to buy or sell from the sign
+/// implied by the price movement.
+pub fn lmsr_displacement_between_prices(
+    b: FixedU64x64,
+    p_from: FixedU64x64,
+    p_to: FixedU64x64,
+) -> Result<FixedU64x64, FixedError> {
+    fn logit(price: FixedU64x64) -> Result<f64, FixedError> {
+        if price.raw() == 0 || price >= FixedU64x64::ONE {
+            return Err(FixedError::Domain);
+        }
+        Ok(ln_f64(price.to_f64() / (1.0 - price.to_f64())))
+    }
+
+    let from = logit(p_from)?;
+    let to = logit(p_to)?;
+    FixedU64x64::from_f64((to - from).abs())?.checked_mul(b)
+}
+
 /// Side of a two-outcome LMSR book.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LmsrSide {
@@ -422,6 +476,37 @@ mod tests {
     fn log_zero_is_rejected() {
         assert_eq!(FixedU64x64::ZERO.ln(), Err(FixedError::Domain));
         assert_eq!(FixedU64x64::ZERO.log2(), Err(FixedError::Domain));
+    }
+
+    #[test]
+    fn lmsr_vectors_v2_and_v3_match_spec() {
+        let b = FixedU64x64::from_integer(10_000);
+        let price_after_v1 =
+            lmsr_price_long(FixedU64x64::from_integer(1_000), FixedU64x64::ZERO, b).unwrap();
+        approx(price_after_v1, 0.524979187479, 1e-12);
+        approx(
+            lmsr_price_short(FixedU64x64::from_integer(1_000), FixedU64x64::ZERO, b).unwrap(),
+            0.475020812521,
+            1e-12,
+        );
+
+        let displacement = lmsr_displacement_between_prices(
+            b,
+            FixedU64x64::from_f64(0.5).unwrap(),
+            FixedU64x64::from_f64(0.6).unwrap(),
+        )
+        .unwrap();
+        approx(displacement, 4054.65108108, 1e-8);
+
+        let cost = lmsr_buy_cost(
+            FixedU64x64::ZERO,
+            FixedU64x64::ZERO,
+            b,
+            LmsrSide::Long,
+            displacement,
+        )
+        .unwrap();
+        approx(cost, 2231.43551314, 1e-8);
     }
 
     #[test]
