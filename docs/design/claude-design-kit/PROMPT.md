@@ -7,7 +7,7 @@
 
 ---
 
-Design the canonical web application for **bleevit** — a futarchy-governed blockchain where
+Design the canonical web application for **Bliwit** — a futarchy-governed blockchain where
 prediction markets, not token votes, make the operational decisions. This is financial
 governance infrastructure with real money and adversarial users, and its specification
 mandates radical honesty in the interface. The product is fully specified; the visual
@@ -16,7 +16,7 @@ identity does not exist yet. You are creating it.
 ## Your sources — attached, in reading order
 
 1. `00-START-HERE.md` — how to read this pack and the ground rules.
-2. `01-product-brief.md` — what bleevit is, the nine personas, product principles.
+2. `01-product-brief.md` — what Bliwit is, the nine personas, product principles.
 3. `02-domain-model-and-lifecycles.md` — every entity, state machine and payout rule.
 4. `03-frontend-architecture-VERBATIM.md` — frozen spec: the provenance/trust model, boot
    state machine, degraded modes, history layers.
@@ -113,7 +113,7 @@ Light and dark themes, dark not being merely inverted.
 
 Before building, write a short **design plan**: 4–6 named hex values, the typefaces and
 their roles, the layout concept, and the ONE signature element that makes this app
-unmistakably bleevit (candidates: the epoch phase-clock, the provenance badge language, the
+unmistakably Bliwit (candidates: the epoch phase-clock, the provenance badge language, the
 ACCEPT/REJECT dual-world motif — or something better). Critique your own plan against the
 generic-AI-design defaults — warm cream + serif + terracotta; near-black + single acid
 accent; broadsheet hairlines everywhere — and if any part of your plan would look at home in

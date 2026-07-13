@@ -190,6 +190,7 @@ Architecture amendments (change-control procedure, AGENTS.md). None expected; no
 Repo changes outside any milestone (config tweaks, user-driven edits) — one line each.
 
 - 2026-07-12 — Added `docs/design/claude-design-kit/` (user-requested): 7-file non-normative context pack for Claude Design (docs 10/11 copied verbatim with derived-copy headers; 00/01–09/13/14/15 distilled read-only) + `PROMPT.md`. Spec untouched; README/AGENTS repo maps updated.
+- 2026-07-13 — Project renamed "bleevit" → "Bliwit" (user-requested): literal replace across README.md, AGENTS.md, `.claude/agents/*.md`, `.claude/hooks/session-context.sh`, `.claude/skills/implement/SKILL.md`, `docs/design/claude-design-kit/{00-START-HERE,01-product-brief,PROMPT}.md`. `docs/architecture/` contained zero occurrences of the old name, so no frozen-doc amendment was needed.
 
 ## Session log
 
@@ -199,3 +200,4 @@ Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
 |---|---|---|---|
 | 2026-07-12 | — (infrastructure) | Agent/session infrastructure created: PLAN.md, AGENTS.md, CLAUDE.md, README.md, .claude (settings, 3 hooks, 4 skills, 3 subagents, 3 path rules), .codex playbooks. Architecture write-guard tested (26 cases). | M0 — repo bootstrap incl. V-1 pin re-verification |
 | 2026-07-12 | — (design kit, unplanned) | Built `docs/design/claude-design-kit/` for Claude Design's 10-attachment limit: 7 context files (2 verbatim copies of docs 10/11 + 5 distillations of 00–09/13–15) + generation prompt. Logged SQ-1 (E-row numbering conflict 11 §11.12 vs 15 §3.3). Architecture untouched; README/AGENTS maps updated. | M0 — repo bootstrap incl. V-1 pin re-verification |
+| 2026-07-13 | — (rename, unplanned) | Renamed project "bleevit" → "Bliwit" across all living/derived docs (10 files, 18 lines). Confirmed `docs/architecture/` has no occurrences, so R-1 change control did not apply. | M0 — repo bootstrap incl. V-1 pin re-verification |

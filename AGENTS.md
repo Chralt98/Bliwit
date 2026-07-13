@@ -1,6 +1,6 @@
 # AGENTS.md — Operating Manual for Coding Agents
 
-This repository implements **bleevit**: a futarchy-governed Polkadot parachain
+This repository implements **Bliwit**: a futarchy-governed Polkadot parachain
 (native Rust FRAME pallets, LMSR conditional markets) with a canonical decentralized
 frontend (Arweave-distributed static app, in-browser light client). The complete,
 authoritative specification already exists; the job of every session is to turn it

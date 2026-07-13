@@ -1,13 +1,13 @@
-# bleevit — Product brief for frontend design
+# Bliwit — Product brief for frontend design
 
 > **DERIVED, NON-NORMATIVE.** Synthesized 2026-07-12 (commit `9f250be`) from the frozen
 > specification in `docs/architecture/` (mainly 00, 01, 10, 11) for upload to Claude Design.
 > Where this brief and the spec disagree, the spec wins. Citations like "(01 §4)" point into
 > the architecture set.
 
-## 1. What bleevit is
+## 1. What Bliwit is
 
-bleevit is a **futarchy-governed blockchain**: a Polkadot parachain whose decisions are made
+Bliwit is a **futarchy-governed blockchain**: a Polkadot parachain whose decisions are made
 by prediction markets instead of token voting. The slogan-level idea (R. Hanson): *vote on
 values, bet on beliefs.*
 

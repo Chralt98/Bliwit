@@ -1,4 +1,4 @@
-# bleevit design-context pack — START HERE
+# Bliwit design-context pack — START HERE
 
 > Generated 2026-07-12 from the frozen specification in `docs/architecture/` at commit
 > `9f250be`. This pack exists because design tools cap attachments (Claude Design: 10 files)
@@ -7,7 +7,7 @@
 
 ## What you (the design model) are looking at
 
-bleevit is a futarchy-governed blockchain — prediction markets make its decisions — with a
+Bliwit is a futarchy-governed blockchain — prediction markets make its decisions — with a
 fully decentralized canonical web app (in-browser light client, Arweave-distributed, no
 backend). The complete product behavior is already specified; these files are that
 specification, curated for design work.
@@ -17,7 +17,7 @@ specification, curated for design work.
 | File | What it is | Trust level |
 |---|---|---|
 | `00-START-HERE.md` | This manifest | — |
-| `01-product-brief.md` | What bleevit is, who uses it, product principles, look-and-feel drivers | Derived synthesis |
+| `01-product-brief.md` | What Bliwit is, who uses it, product principles, look-and-feel drivers | Derived synthesis |
 | `02-domain-model-and-lifecycles.md` | Every entity, state machine, payout rule, role — what each screen's objects ARE | Derived distillation |
 | `03-frontend-architecture-VERBATIM.md` | **Frozen spec doc 10, verbatim**: provenance/trust model, boot state machine, compat modes, three-layer history, resource budgets | Normative (verbatim copy) |
 | `04-frontend-workflows-and-screens-VERBATIM.md` | **Frozen spec doc 11, verbatim**: screen inventory S1–S20, transaction/signing rules, per-call precondition tables, VOID flow, governance/operator/funding surfaces, degradation rows E15–E23 | Normative (verbatim copy) |

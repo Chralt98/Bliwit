@@ -1,6 +1,6 @@
 ---
 name: implement
-description: Run one spec-driven implementation increment for the bleevit futarchy system — pick (or receive) the next PLAN.md milestone, implement it strictly from docs/architecture/, verify it per doc 15, and update PLAN.md. Use at the start of a working session, when the user says "continue" / "next step" / "weiter", or when a specific milestone is named.
+description: Run one spec-driven implementation increment for the Bliwit futarchy system — pick (or receive) the next PLAN.md milestone, implement it strictly from docs/architecture/, verify it per doc 15, and update PLAN.md. Use at the start of a working session, when the user says "continue" / "next step" / "weiter", or when a specific milestone is named.
 argument-hint: "[milestone-id, e.g. A2]"
 ---
 

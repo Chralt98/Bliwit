@@ -5,7 +5,7 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 model: inherit
 ---
 
-You keep the bleevit repository's living documents truthful. The four living documents
+You keep the Bliwit repository's living documents truthful. The four living documents
 and their single jobs:
 
 - **PLAN.md** — implementation status ONLY: milestone states, session log, spec questions,

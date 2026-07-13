@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
-echo "=== bleevit auto-context (SessionStart hook) ==="
+echo "=== Bliwit auto-context (SessionStart hook) ==="
 echo
 BRANCH=$(git branch --show-current 2>/dev/null || echo "?")
 LAST=$(git log -1 --format='%h %s' 2>/dev/null || echo "no commits")
