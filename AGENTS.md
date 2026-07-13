@@ -117,7 +117,7 @@ per milestone):
 
 | Area | Gate (current) |
 |---|---|
-| Rust (once the workspace exists) | `cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace` |
+| Rust | `tools/ci/rust-workspace-gates.sh` (runs `cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace` once member crates exist) |
 | Runtime crates | `try-state` green in test envs; benchmarks compile; no new `unwrap`/`expect`/`panic!`/`unsafe` in runtime code |
 | Reference model | its pytest suite; CI-regenerated vectors match committed vectors (04 §5) |
 | Frontend (once scaffolded) | lint · typecheck · unit tests · build; dependency-cruiser firewall clean |
@@ -134,11 +134,12 @@ per milestone):
 | `AGENTS.md` / `CLAUDE.md` | living | This manual / Claude Code wiring |
 | `.claude/` | living | Settings, hooks, skills, subagents, path rules |
 | `.codex/` | living | Codex session playbooks mirroring the skills |
-| `crates/futarchy-primitives`, `crates/futarchy-fixed` | planned (M1) | `no_std` shared types + verified 64.64 math |
-| `pallets/*` | planned (Track A) | The 12 custom pallets (01 §5.1) |
-| `runtime/`, `runtime-api/`, `node/` | planned (Track B) | Runtime assembly, `FutarchyApi`, collator node |
-| `reference-model/` | planned (M2) | Independent Python executable spec + vector corpus |
-| `frontend/` | planned (Track F) | Monorepo per 10 §10 (`apps/web`, `packages/*`, `tools/*`) |
+| `Cargo.toml`, `rust-toolchain.toml`, `.github/workflows/ci.yml`, `tools/ci/` | scaffold | M0 workspace/toolchain/CI and local gate scripts |
+| `crates/` | scaffold | Placeholder root; `futarchy-primitives` (M1) and `futarchy-fixed` (M2) land here |
+| `pallets/` | scaffold (Track A) | Placeholder root for the 12 custom pallets (01 §5.1) |
+| `runtime/`, `node/` | scaffold (Track B) | Placeholder roots for runtime assembly and collator node; `runtime-api/` is created in B2 |
+| `reference-model/` | scaffold (M3) | Placeholder root for independent Python executable spec + vector corpus |
+| `frontend/` | scaffold (Track F) | Placeholder root for monorepo per 10 §10 (`apps/web`, `packages/*`, `tools/*`) |
 | `zombienet/`, `chopsticks/` | planned (B7) | Test-environment definitions (release artifacts, 15 §4.7) |
 | `deploy/runbooks/` | planned (Track O) | Runbooks-as-code (12 §6) |
 

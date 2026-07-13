@@ -20,7 +20,7 @@ rollout that removes `sudo` at Phase 4.
 
 ## Status
 
-**Specification complete (2026-07-12) · implementation not started.**
+**Specification complete (2026-07-12) · implementation bootstrap started (M0, 2026-07-13).**
 
 - The authoritative spec is [`docs/architecture/`](docs/architecture/README.md) —
   16 component documents + decision record, produced by resolving all 101 findings
@@ -40,7 +40,8 @@ rollout that removes `sudo` at Phase 4.
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code wiring: skills, subagents, hooks |
 | `.claude/` | Automation: session-context injection, skills, subagents, path-scoped rules, and Stop-hook guards for PLAN.md freshness and README's pinned lines |
 | `.codex/` | Codex CLI session playbooks mirroring the skills |
-| `crates/`, `pallets/`, `runtime/`, `node/`, `reference-model/`, `frontend/` | Planned — created milestone by milestone per PLAN.md |
+| [`Cargo.toml`](Cargo.toml), [`rust-toolchain.toml`](rust-toolchain.toml), [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`tools/ci/rust-workspace-gates.sh`](tools/ci/rust-workspace-gates.sh), [`tools/ci/check-doc-links.py`](tools/ci/check-doc-links.py) | M0 bootstrap: Rust workspace manifest, pinned toolchain components, CI skeleton, and local gate scripts |
+| `crates/`, `pallets/`, `runtime/`, `node/`, `reference-model/`, `frontend/` | Implementation roots created for future milestones; currently placeholders except where a milestone adds code |
 
 ## How this gets built
 
@@ -64,8 +65,7 @@ Humans and agents alike: read [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md), t
   via permaweb-deploy/Turbo; Playwright + Lighthouse CI (01 §9, 10, 12).
 - **Reference model:** Python + MPFR-256, CI-regenerated vector corpus (04 §5, 15 §4.4).
 
-Pins must be re-verified before implementation begins — tracked as V-1 in
-[PLAN.md](PLAN.md).
+M0 re-verified the initial platform pins on 2026-07-13; the detailed result is tracked as V-1 in [PLAN.md](PLAN.md).
 
 ## License
 
