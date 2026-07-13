@@ -8,7 +8,6 @@
 //! currency boundaries. This crate keeps the fixed-point surface small and
 //! deterministic; broader protocol types live in `futarchy-primitives`.
 
-#[cfg(feature = "std")]
 use core::cmp;
 use core::fmt;
 use core::ops::{Add, Div, Mul, Sub};
@@ -25,6 +24,105 @@ pub const PRIMITIVE_MAX_ULP: u32 = 2;
 pub const COMPOSED_COST_MAX_ULP: u32 = 8;
 /// Protocol domain clamp for LMSR exponent displacement `|q_l - q_s| / b`.
 pub const LMSR_DOMAIN_CLAMP: FixedU64x64 = FixedU64x64(48u128 << FRAC_BITS);
+
+const LN_2_F64: f64 = core::f64::consts::LN_2;
+const INV_LN_2_F64: f64 = core::f64::consts::LOG2_E;
+
+fn floor_f64(x: f64) -> f64 {
+    let truncated = x as i64;
+    if x < 0.0 && (truncated as f64) != x {
+        (truncated - 1) as f64
+    } else {
+        truncated as f64
+    }
+}
+
+fn ceil_f64(x: f64) -> f64 {
+    let truncated = x as i64;
+    if x > 0.0 && (truncated as f64) != x {
+        (truncated + 1) as f64
+    } else {
+        truncated as f64
+    }
+}
+
+fn round_f64(x: f64) -> f64 {
+    if x >= 0.0 {
+        floor_f64(x + 0.5)
+    } else {
+        ceil_f64(x - 0.5)
+    }
+}
+
+fn exp_f64(x: f64) -> f64 {
+    if x == 0.0 {
+        return 1.0;
+    }
+    if x < -745.0 {
+        return 0.0;
+    }
+    if x > 709.0 {
+        return f64::INFINITY;
+    }
+    let n = round_f64(x * INV_LN_2_F64);
+    let r = x - n * LN_2_F64;
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    let mut k = 1.0;
+    while k <= 18.0 {
+        term *= r / k;
+        sum += term;
+        k += 1.0;
+    }
+    scale_pow2(sum, n as i32)
+}
+
+fn exp2_f64(x: f64) -> f64 {
+    let n = floor_f64(x);
+    exp_f64((x - n) * LN_2_F64) * scale_pow2(1.0, n as i32)
+}
+
+fn ln_f64(x: f64) -> f64 {
+    log2_f64(x) * LN_2_F64
+}
+
+fn log2_f64(x: f64) -> f64 {
+    if x <= 0.0 {
+        return f64::NAN;
+    }
+    let bits = x.to_bits();
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    if exponent == 0 {
+        return log2_f64(x * scale_pow2(1.0, 64)) - 64.0;
+    }
+    let e = exponent - 1023;
+    let mantissa_bits = (bits & ((1u64 << 52) - 1)) | (1023u64 << 52);
+    let m = f64::from_bits(mantissa_bits);
+    let z = (m - 1.0) / (m + 1.0);
+    let z2 = z * z;
+    let mut term = z;
+    let mut sum = 0.0;
+    let mut denom = 1.0;
+    for _ in 0..32 {
+        sum += term / denom;
+        term *= z2;
+        denom += 2.0;
+    }
+    e as f64 + (2.0 * sum) * INV_LN_2_F64
+}
+
+fn scale_pow2(x: f64, n: i32) -> f64 {
+    if x == 0.0 {
+        return x;
+    }
+    if n > 1023 {
+        return f64::INFINITY;
+    }
+    if n < -1074 {
+        return 0.0;
+    }
+    x * f64::from_bits(((n + 1023) as u64) << 52)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FixedError {
@@ -76,23 +174,28 @@ impl FixedU64x64 {
             .ok_or(FixedError::Domain)
     }
     pub fn checked_mul(self, rhs: Self) -> Result<Self, FixedError> {
-        match self
-            .0
-            .checked_mul(rhs.0)
+        let a_hi = self.0 >> FRAC_BITS;
+        let a_lo = self.0 & (ONE_RAW - 1);
+        let b_hi = rhs.0 >> FRAC_BITS;
+        let b_lo = rhs.0 & (ONE_RAW - 1);
+
+        let whole = a_hi
+            .checked_mul(b_hi)
+            .and_then(|v| v.checked_shl(FRAC_BITS))
+            .ok_or(FixedError::Overflow)?;
+        let cross_ab = a_hi.checked_mul(b_lo).ok_or(FixedError::Overflow)?;
+        let cross_ba = b_hi.checked_mul(a_lo).ok_or(FixedError::Overflow)?;
+        let frac = a_lo
+            .checked_mul(b_lo)
             .and_then(|v| v.checked_add(ONE_RAW - 1))
-        {
-            Some(v) => Ok(Self(v >> FRAC_BITS)),
-            None => {
-                #[cfg(feature = "std")]
-                {
-                    Self::from_f64(self.to_f64() * rhs.to_f64())
-                }
-                #[cfg(not(feature = "std"))]
-                {
-                    Err(FixedError::Overflow)
-                }
-            }
-        }
+            .ok_or(FixedError::Overflow)?
+            >> FRAC_BITS;
+        whole
+            .checked_add(cross_ab)
+            .and_then(|v| v.checked_add(cross_ba))
+            .and_then(|v| v.checked_add(frac))
+            .map(Self)
+            .ok_or(FixedError::Overflow)
     }
     pub fn checked_div(self, rhs: Self) -> Result<Self, FixedError> {
         if rhs.0 == 0 {
@@ -101,25 +204,16 @@ impl FixedU64x64 {
         if self.0 <= u128::MAX >> FRAC_BITS {
             Ok(Self((self.0 << FRAC_BITS) / rhs.0))
         } else {
-            #[cfg(feature = "std")]
-            {
-                Self::from_f64(self.to_f64() / rhs.to_f64())
-            }
-            #[cfg(not(feature = "std"))]
-            {
-                Err(FixedError::Overflow)
-            }
+            Self::from_f64(self.to_f64() / rhs.to_f64())
         }
     }
 
-    /// Convert to a nearest `f64` for reference-quality transcendental kernels.
-    #[cfg(feature = "std")]
+    /// Convert to a nearest `f64` for deterministic transcendental kernels and tests.
     pub fn to_f64(self) -> f64 {
         (self.0 as f64) / (ONE_RAW as f64)
     }
 
     /// Convert a finite non-negative `f64` to nearest 64.64.
-    #[cfg(feature = "std")]
     pub fn from_f64(value: f64) -> Result<Self, FixedError> {
         if !value.is_finite() {
             return Err(FixedError::NonFinite);
@@ -130,29 +224,39 @@ impl FixedU64x64 {
         if value >= (u64::MAX as f64) {
             return Err(FixedError::Overflow);
         }
-        Ok(Self((value * (ONE_RAW as f64)).round() as u128))
+        let whole = floor_f64(value);
+        let frac = value - whole;
+        let frac_raw = (frac * (ONE_RAW as f64) + 0.5) as u128;
+        let whole_raw = (whole as u128)
+            .checked_shl(FRAC_BITS)
+            .ok_or(FixedError::Overflow)?;
+        whole_raw
+            .checked_add(frac_raw)
+            .map(Self)
+            .ok_or(FixedError::Overflow)
     }
 
     /// Fixed-point base-2 exponent.
-    #[cfg(feature = "std")]
+    ///
+    /// The implementation is available in `no_std` builds through deterministic
+    /// in-crate range reduction and series helpers; the full integer polynomial
+    /// kernel and MPFR corpus gate are tracked in M2.
     pub fn exp2(self) -> Result<Self, FixedError> {
-        Self::from_f64(self.to_f64().exp2())
+        Self::from_f64(exp2_f64(self.to_f64()))
     }
     /// Fixed-point base-2 logarithm. Zero is outside the logarithm domain.
-    #[cfg(feature = "std")]
     pub fn log2(self) -> Result<Self, FixedError> {
         if self.0 == 0 {
             return Err(FixedError::Domain);
         }
-        Self::from_f64(self.to_f64().log2())
+        Self::from_f64(log2_f64(self.to_f64()))
     }
     /// Fixed-point natural logarithm.
-    #[cfg(feature = "std")]
     pub fn ln(self) -> Result<Self, FixedError> {
         if self.0 == 0 {
             return Err(FixedError::Domain);
         }
-        Self::from_f64(self.to_f64().ln())
+        Self::from_f64(ln_f64(self.to_f64()))
     }
 }
 
@@ -175,7 +279,6 @@ pub const fn round_payout_down(value: FixedU64x64) -> u128 {
 }
 
 /// Stable two-outcome LMSR cost `max(q_l,q_s) + b*ln(1 + exp(-|q_l-q_s|/b))`.
-#[cfg(feature = "std")]
 pub fn lmsr_cost(
     q_l: FixedU64x64,
     q_s: FixedU64x64,
@@ -188,8 +291,8 @@ pub fn lmsr_cost(
     let min_q = cmp::min(q_l, q_s);
     let displacement = max_q.checked_sub(min_q)?.checked_div(b)?;
     let clamped = cmp::min(displacement, LMSR_DOMAIN_CLAMP);
-    // exp(-d) = 2^(-d / ln 2)
-    let exp_neg = FixedU64x64::from_f64((-clamped.to_f64()).exp())?;
+    // exp(-d) is evaluated through the same in-crate helper in std and no_std builds.
+    let exp_neg = FixedU64x64::from_f64(exp_f64(-clamped.to_f64()))?;
     let log_term = FixedU64x64::ONE.checked_add(exp_neg)?.ln()?;
     max_q.checked_add(b.checked_mul(log_term)?)
 }
