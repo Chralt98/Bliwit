@@ -125,6 +125,100 @@ fn scale_pow2(x: f64, n: i32) -> f64 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct U256 {
+    hi: u128,
+    lo: u128,
+}
+
+impl U256 {
+    const ZERO: Self = Self { hi: 0, lo: 0 };
+
+    fn shl64(value: u128) -> Self {
+        Self {
+            hi: value >> FRAC_BITS,
+            lo: value << FRAC_BITS,
+        }
+    }
+
+    fn mul_u128(lhs: u128, rhs: u128) -> Self {
+        const MASK: u128 = (1u128 << 64) - 1;
+        let a0 = lhs & MASK;
+        let a1 = lhs >> 64;
+        let b0 = rhs & MASK;
+        let b1 = rhs >> 64;
+
+        let p0 = a0 * b0;
+        let p1 = a0 * b1;
+        let p2 = a1 * b0;
+        let p3 = a1 * b1;
+
+        let carry = (p0 >> 64) + (p1 & MASK) + (p2 & MASK);
+        let lo = (p0 & MASK) | (carry << 64);
+        let hi = p3 + (p1 >> 64) + (p2 >> 64) + (carry >> 64);
+        Self { hi, lo }
+    }
+
+    fn shr64_to_u128(self) -> Result<u128, FixedError> {
+        if self.hi >> 64 != 0 {
+            return Err(FixedError::Overflow);
+        }
+        Ok((self.hi << 64) | (self.lo >> 64))
+    }
+
+    fn bit(self, index: u32) -> bool {
+        if index < 128 {
+            ((self.lo >> index) & 1) == 1
+        } else {
+            ((self.hi >> (index - 128)) & 1) == 1
+        }
+    }
+
+    fn div_u128(self, divisor: u128) -> Result<u128, FixedError> {
+        if divisor == 0 {
+            return Err(FixedError::DivisionByZero);
+        }
+        let mut rem = Self::ZERO;
+        let mut quotient = 0u128;
+        for bit in (0..256u32).rev() {
+            rem = rem.shl1()?;
+            if self.bit(bit) {
+                rem.lo |= 1;
+            }
+            if rem.ge_u128(divisor) {
+                rem = rem.sub_u128(divisor);
+                if bit >= 128 {
+                    return Err(FixedError::Overflow);
+                }
+                quotient |= 1u128 << bit;
+            }
+        }
+        Ok(quotient)
+    }
+
+    fn shl1(self) -> Result<Self, FixedError> {
+        if (self.hi >> 127) != 0 {
+            return Err(FixedError::Overflow);
+        }
+        Ok(Self {
+            hi: (self.hi << 1) | (self.lo >> 127),
+            lo: self.lo << 1,
+        })
+    }
+
+    fn ge_u128(self, rhs: u128) -> bool {
+        self.hi != 0 || self.lo >= rhs
+    }
+
+    fn sub_u128(self, rhs: u128) -> Self {
+        let (lo, borrow) = self.lo.overflowing_sub(rhs);
+        Self {
+            hi: self.hi - u128::from(borrow),
+            lo,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FixedError {
     DivisionByZero,
     Domain,
@@ -174,38 +268,10 @@ impl FixedU64x64 {
             .ok_or(FixedError::Domain)
     }
     pub fn checked_mul(self, rhs: Self) -> Result<Self, FixedError> {
-        let a_hi = self.0 >> FRAC_BITS;
-        let a_lo = self.0 & (ONE_RAW - 1);
-        let b_hi = rhs.0 >> FRAC_BITS;
-        let b_lo = rhs.0 & (ONE_RAW - 1);
-
-        let whole = a_hi
-            .checked_mul(b_hi)
-            .and_then(|v| v.checked_shl(FRAC_BITS))
-            .ok_or(FixedError::Overflow)?;
-        let cross_ab = a_hi.checked_mul(b_lo).ok_or(FixedError::Overflow)?;
-        let cross_ba = b_hi.checked_mul(a_lo).ok_or(FixedError::Overflow)?;
-        let frac = a_lo
-            .checked_mul(b_lo)
-            .and_then(|v| v.checked_add(ONE_RAW - 1))
-            .ok_or(FixedError::Overflow)?
-            >> FRAC_BITS;
-        whole
-            .checked_add(cross_ab)
-            .and_then(|v| v.checked_add(cross_ba))
-            .and_then(|v| v.checked_add(frac))
-            .map(Self)
-            .ok_or(FixedError::Overflow)
+        U256::mul_u128(self.0, rhs.0).shr64_to_u128().map(Self)
     }
     pub fn checked_div(self, rhs: Self) -> Result<Self, FixedError> {
-        if rhs.0 == 0 {
-            return Err(FixedError::DivisionByZero);
-        }
-        if self.0 <= u128::MAX >> FRAC_BITS {
-            Ok(Self((self.0 << FRAC_BITS) / rhs.0))
-        } else {
-            Self::from_f64(self.to_f64() / rhs.to_f64())
-        }
+        U256::shl64(self.0).div_u128(rhs.0).map(Self)
     }
 
     /// Convert to a nearest `f64` for deterministic transcendental kernels and tests.
@@ -586,6 +652,30 @@ mod tests {
             .unwrap(),
             other => panic!("unknown corpus row: {other}"),
         }
+    }
+
+    #[test]
+    fn checked_arithmetic_uses_two_limb_intermediates() {
+        let large = FixedU64x64::from_integer(1_000_000_000);
+        let half = FixedU64x64::from_f64(0.5).unwrap();
+        assert_eq!(
+            large.checked_mul(half).unwrap(),
+            FixedU64x64::from_integer(500_000_000)
+        );
+
+        let max_scaled = FixedU64x64::from_raw(u128::MAX >> 1);
+        assert_eq!(
+            max_scaled
+                .checked_div(FixedU64x64::from_integer(2))
+                .unwrap()
+                .raw(),
+            max_scaled.raw() / 2
+        );
+
+        assert_eq!(
+            FixedU64x64::from_raw(u128::MAX).checked_mul(FixedU64x64::from_integer(2)),
+            Err(FixedError::Overflow)
+        );
     }
 
     #[test]
