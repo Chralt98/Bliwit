@@ -452,6 +452,15 @@ mod tests {
         );
     }
 
+    fn assert_raw_within(actual: FixedU64x64, expected_raw: u128, max_raw_error: u128) {
+        let actual_raw = actual.raw();
+        let diff = actual_raw.abs_diff(expected_raw);
+        assert!(
+            diff <= max_raw_error,
+            "actual_raw={actual_raw} expected_raw={expected_raw} diff={diff} max={max_raw_error}"
+        );
+    }
+
     fn corpus_value(name: &str) -> FixedU64x64 {
         match name {
             "cost_0_0" => lmsr_cost(
@@ -587,9 +596,13 @@ mod tests {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            let (name, expected) = line.split_once(',').unwrap();
-            let expected = expected.parse::<f64>().unwrap();
-            approx(corpus_value(name), expected, 1e-8);
+            let mut fields = line.split(',');
+            let name = fields.next().unwrap();
+            let expected = fields.next().unwrap().parse::<f64>().unwrap();
+            let expected_raw = fields.next().unwrap().parse::<u128>().unwrap();
+            let actual = corpus_value(name);
+            approx(actual, expected, 1e-8);
+            assert_raw_within(actual, expected_raw, 200_000_000_000);
             checked += 1;
         }
         assert_eq!(checked, 19);

@@ -8,6 +8,7 @@ normative completion gate tracked in PLAN.md.
 """
 from __future__ import annotations
 
+import argparse
 from decimal import Decimal, getcontext
 from pathlib import Path
 
@@ -35,6 +36,9 @@ def disp(p_from: Decimal, p_to: Decimal, b: Decimal = B) -> Decimal:
 def fmt(x: Decimal) -> str:
     return format(x, ".24f")
 
+def raw_64x64(x: Decimal) -> int:
+    return int((x * (1 << 64)).to_integral_value(rounding="ROUND_HALF_UP"))
+
 rows: list[tuple[str, Decimal]] = []
 rows.append(("cost_0_0", cost(Decimal(0), Decimal(0))))
 rows.append(("v1_buy_1000_long_cost", cost(Decimal(1000), Decimal(0)) - cost(Decimal(0), Decimal(0))))
@@ -49,8 +53,24 @@ for ql, qs in [(2500, 0), (0, 2500), (12345, 6789), (6789, 12345), (240000, 0), 
     rows.append((f"cost_{ql}_{qs}", cost(qld, qsd)))
     rows.append((f"price_{ql}_{qs}", price_long(qld, qsd)))
 
-OUT.write_text(
-    "# name,value\n" + "".join(f"{name},{fmt(value)}\n" for name, value in rows),
-    encoding="utf-8",
+content = (
+    "# name,value,raw_64x64_nearest\n"
+    + "".join(f"{name},{fmt(value)},{raw_64x64(value)}\n" for name, value in rows)
 )
-print(f"wrote {OUT.relative_to(ROOT)} ({len(rows)} rows)")
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument(
+    "--check",
+    action="store_true",
+    help="fail if the committed corpus differs from generated output",
+)
+args = parser.parse_args()
+
+if args.check:
+    current = OUT.read_text(encoding="utf-8") if OUT.exists() else ""
+    if current != content:
+        raise SystemExit(f"{OUT.relative_to(ROOT)} is stale; regenerate with {Path(__file__).name}")
+    print(f"{OUT.relative_to(ROOT)} is up to date ({len(rows)} rows)")
+else:
+    OUT.write_text(content, encoding="utf-8")
+    print(f"wrote {OUT.relative_to(ROOT)} ({len(rows)} rows)")

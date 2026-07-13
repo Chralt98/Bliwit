@@ -11,3 +11,7 @@ fi
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+
+if [[ -f tools/fixed/generate-lmsr-corpus.py ]]; then
+  python3 tools/fixed/generate-lmsr-corpus.py --check
+fi
