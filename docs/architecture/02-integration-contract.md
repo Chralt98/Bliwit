@@ -4,7 +4,7 @@
 
 **Boundary.** This document owns everything the chain and the canonical frontend must agree on byte-for-byte: shared SCALE types, the `FutarchyApi` runtime API and its view types, the frozen event schema, the storage items and names the frontend reads directly, chain identity constants, the constants-binding rules, the WSS bootnode chain-spec requirement, the backend-published test-artifact feed, and the `ReleaseChannel` raw storage key. It does **not** own the *semantics* behind these surfaces (ledger rules → [03](03-conditional-ledger.md), market mechanics → [04](04-markets-and-pricing.md), decision engine → [05](05-welfare-and-decision-engine.md), oracle game → [07](07-oracle-and-disputes.md), upgrade path → [09](09-execution-upgrades-and-rollout.md)) — but where a name or layout appears both here and there, **this document's spelling is canonical**. Normative language per RFC 2119.
 
-**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 1**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
+**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 2**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
 
 ---
 

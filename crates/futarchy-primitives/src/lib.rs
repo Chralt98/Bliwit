@@ -6,6 +6,9 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 
+use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
+use scale_info::TypeInfo;
+
 pub const INTEGRATION_CONTRACT_VERSION: u32 = 2;
 
 pub type Balance = u128;
@@ -21,10 +24,10 @@ pub type AccountId = [u8; 32];
 pub type H256 = [u8; 32];
 pub type BlockNumber = u32;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct FixedU64(pub u64);
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, TypeInfo)]
 pub struct BoundedVec<T, const N: u32>(Vec<T>);
 
 impl<T, const N: u32> BoundedVec<T, N> {
@@ -51,6 +54,32 @@ impl<T, const N: u32> BoundedVec<T, N> {
     }
 }
 
+impl<T: Encode, const N: u32> Encode for BoundedVec<T, N> {
+    fn size_hint(&self) -> usize {
+        self.0.size_hint()
+    }
+
+    fn encode_to<W: parity_scale_codec::Output + ?Sized>(&self, dest: &mut W) {
+        self.0.encode_to(dest);
+    }
+}
+
+impl<T: Decode, const N: u32> Decode for BoundedVec<T, N> {
+    fn decode<I: parity_scale_codec::Input>(
+        input: &mut I,
+    ) -> Result<Self, parity_scale_codec::Error> {
+        let value = Vec::<T>::decode(input)?;
+        Self::try_from(value).map_err(|_| "BoundedVec length exceeds declared bound".into())
+    }
+}
+
+impl<T: MaxEncodedLen, const N: u32> MaxEncodedLen for BoundedVec<T, N> {
+    fn max_encoded_len() -> usize {
+        parity_scale_codec::Compact(N).encoded_size()
+            + (N as usize).saturating_mul(T::max_encoded_len())
+    }
+}
+
 impl<T, const N: u32> Default for BoundedVec<T, N> {
     fn default() -> Self {
         Self::new()
@@ -68,28 +97,28 @@ impl<T, const N: u32> TryFrom<Vec<T>> for BoundedVec<T, N> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct BoundExceeded;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum Branch {
     Accept,
     Reject,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum ScalarSide {
     Long,
     Short,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum GateType {
     Survival,
     Security,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum PositionKind {
     BranchUsdc,
     Long,
@@ -98,7 +127,7 @@ pub enum PositionKind {
     GateNo(GateType),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum PositionId {
     Proposal {
         proposal: ProposalId,
@@ -111,7 +140,7 @@ pub enum PositionId {
     },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum VaultState {
     Open,
     Resolved(Branch),
@@ -119,7 +148,7 @@ pub enum VaultState {
     Voided,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum ProposalClass {
     Param,
     Treasury,
@@ -128,7 +157,7 @@ pub enum ProposalClass {
     Constitutional,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum RejectReason {
     NotDecisionGrade,
     GateVetoSurvival,
@@ -148,7 +177,7 @@ pub enum RejectReason {
     AttestationMissing,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum ProposalState {
     Submitted,
     Screening,
@@ -167,7 +196,7 @@ pub enum ProposalState {
     Expired,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum EpochPhase {
     Intake,
     Qualify,
@@ -179,20 +208,20 @@ pub enum EpochPhase {
     Housekeeping,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum DecisionOutcome {
     Adopt,
     Reject(RejectReason),
     Extend,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum DispatchOutcomeCode {
     Ok,
     Failed { call_index: u8, error: [u8; 4] },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum RatificationStatus {
     NotRequired,
     Pending { referendum: u32 },
@@ -200,7 +229,7 @@ pub enum RatificationStatus {
     Failed { referendum: u32 },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum TradeSide {
     BuyLong,
     BuyShort,
@@ -208,13 +237,13 @@ pub enum TradeSide {
     SellShort,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct RuntimeVersionConstraint {
     pub spec_name: BoundedVec<u8, 32>,
     pub spec_version: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct EpochStatusView {
     pub index: EpochId,
     pub phase: EpochPhase,
@@ -225,7 +254,7 @@ pub struct EpochStatusView {
     pub phase_flags: u32,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct ProposalSummaryView {
     pub id: ProposalId,
     pub class: ProposalClass,
@@ -241,7 +270,7 @@ pub struct ProposalSummaryView {
     pub ratification: RatificationStatus,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct QuoteView {
     pub cost: Balance,
     pub fee: Balance,
@@ -250,7 +279,7 @@ pub struct QuoteView {
     pub within_domain: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct DecisionStatsView {
     pub pid: ProposalId,
     pub twap_accept_1e9: FixedU64,
@@ -268,14 +297,14 @@ pub struct DecisionStatsView {
     pub in_cap_prize: Balance,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct PositionView {
     pub position: PositionId,
     pub balance: Balance,
     pub vault_state: VaultState,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct QueuedExecutionView {
     pub pid: ProposalId,
     pub class: ProposalClass,
@@ -288,7 +317,7 @@ pub struct QueuedExecutionView {
     pub meters_clear: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct WelfareView {
     pub epoch: EpochId,
     pub spec_version: MetricSpecVersion,
@@ -305,7 +334,7 @@ pub struct WelfareView {
     pub reserve_flag: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct ParamView {
     pub key: ParamKey,
     pub value: u128,
@@ -317,7 +346,7 @@ pub struct ParamView {
     pub class: ProposalClass,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct NavView {
     pub total: Balance,
     pub main: Balance,
@@ -331,7 +360,7 @@ pub struct NavView {
     pub haircut_flag: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct CohortSummary {
     pub epoch: EpochId,
     pub s_1e9: FixedU64,
@@ -342,7 +371,7 @@ pub struct CohortSummary {
 }
 pub type CohortSummaryView = CohortSummary;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct OracleRoundView {
     pub component: MetricId,
     pub epoch: EpochId,
@@ -469,6 +498,12 @@ mod tests {
     fn bounded_vec_rejects_over_bound() {
         let values = alloc::vec![1_u8, 2, 3];
         assert!(BoundedVec::<_, 2>::try_from(values).is_err());
+    }
+
+    #[test]
+    fn scale_decode_enforces_bounded_vec_limit() {
+        let encoded = alloc::vec![1_u8, 2, 3].encode();
+        assert!(BoundedVec::<u8, 2>::decode(&mut &encoded[..]).is_err());
     }
 
     #[test]
