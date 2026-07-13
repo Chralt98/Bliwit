@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/futarchy-primitives"]
+members = ["crates/futarchy-fixed", "crates/futarchy-primitives"]
 
 [workspace.package]
 edition = "2021"
