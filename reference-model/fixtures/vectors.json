@@ -1,17 +1,48 @@
 {
   "decision_scenarios": [
     {
-      "delta": "0.06",
-      "hurdle": "0.05",
+      "accept_full": "0.56",
+      "delta": "0.05",
       "name": "hurdle_met",
-      "outcome": "Adopt"
+      "outcome": "Adopt",
+      "reject_full_effective": "0.50"
     },
     {
-      "delta": "0.04",
-      "hurdle": "0.05",
+      "accept_full": "0.54",
+      "delta": "0.05",
       "name": "below_hurdle",
       "outcome": "Reject",
-      "reason": "HurdleNotMet"
+      "reason": "HurdleNotMet",
+      "reject_full_effective": "0.50"
+    },
+    {
+      "accept_full": "0.56",
+      "converged": false,
+      "delta": "0.05",
+      "name": "convergence_failed_first_decide",
+      "outcome": "Reject",
+      "reason": "ConvergenceFailed",
+      "reject_full_effective": "0.50"
+    },
+    {
+      "accept_full": "0.56",
+      "accept_trailing": "0.52",
+      "delta": "0.05",
+      "name": "window_disagreement_extends_once",
+      "outcome": "Extend",
+      "reject_full_effective": "0.50",
+      "reject_trailing_effective": "0.50"
+    },
+    {
+      "accept_full": "0.56",
+      "accept_trailing": "0.52",
+      "delta": "0.05",
+      "extended": true,
+      "name": "window_disagreement_recurs_rejects",
+      "outcome": "Reject",
+      "reason": "SecondExtensionFailed",
+      "reject_full_effective": "0.50",
+      "reject_trailing_effective": "0.50"
     }
   ],
   "high_precision_corpus": {
@@ -123,18 +154,35 @@
   },
   "precision": "Python Decimal, 90 decimal digits (>=256-bit precision target)",
   "schema": "bleavit.reference-model.v1",
-  "welfare_vectors": [
+  "twap_scenarios": [
     {
-      "name": "settlement_full",
-      "score": "1.0000000000000000000000000000000000000000000000000000000000000000000000000000000",
-      "w1": "1",
-      "w2": "1"
+      "initial": "0.500",
+      "kappa": "0.005",
+      "name": "missed_intervals_widen_clamp",
+      "obs_interval": "10",
+      "observe_block": "100",
+      "previous_quote": "0.900",
+      "recorded": "0.525570066020395321298833007812"
+    }
+  ],
+  "welfare_scenarios": [
+    {
+      "name": "equal_horizons",
+      "s": "0.800000000",
+      "w_next": "0.8",
+      "w_next_2": "0.8"
     },
     {
-      "name": "settlement_zero_floor",
-      "score": "0.000031622776601683793319988935444327185337195551393252168268575048527925944386392382",
-      "w1": "0",
-      "w2": "1"
+      "name": "mixed_horizons",
+      "s": "0.400000000",
+      "w_next": "0.64",
+      "w_next_2": "0.25"
+    },
+    {
+      "name": "zeroed_epoch_epsilon_floor",
+      "s": "0.000022360",
+      "w_next": "0",
+      "w_next_2": "0.5"
     }
   ]
 }

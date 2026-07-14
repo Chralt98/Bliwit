@@ -16,6 +16,19 @@ ROOT = Path(__file__).resolve().parents[2]
 LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
 SKIP_DIRS = {".git", "target", "node_modules"}
 
+# Declared byte-copies of docs/architecture files (see the DO-NOT-EDIT header in each):
+# their relative links are meaningful relative to the copied file's source directory,
+# so resolve them there instead of rewriting the verbatim content.
+VERBATIM_DIR = ROOT / "docs" / "design" / "claude-design-kit"
+ARCHITECTURE_DIR = ROOT / "docs" / "architecture"
+
+
+def link_base(md: Path) -> Path:
+    if md.parent == VERBATIM_DIR and md.name.endswith("-VERBATIM.md"):
+        return ARCHITECTURE_DIR
+    return md.parent
+
+
 errors: list[str] = []
 
 for md in sorted(p for p in ROOT.rglob("*.md") if not (set(p.relative_to(ROOT).parts) & SKIP_DIRS)):
@@ -32,16 +45,13 @@ for md in sorted(p for p in ROOT.rglob("*.md") if not (set(p.relative_to(ROOT).p
         path_part = unquote(parsed.path)
         if not path_part:
             continue
-        target = (md.parent / path_part).resolve()
+        target = (link_base(md) / path_part).resolve()
         try:
             target.relative_to(ROOT)
         except ValueError:
             errors.append(f"{md.relative_to(ROOT)}: link escapes repo: {raw_target}")
             continue
         if not target.exists():
-            architecture_fallback = ROOT / "docs" / "architecture" / Path(path_part).name
-            if architecture_fallback.exists():
-                continue
             line = text.count("\n", 0, match.start()) + 1
             errors.append(f"{md.relative_to(ROOT)}:{line}: missing link target: {raw_target}")
 

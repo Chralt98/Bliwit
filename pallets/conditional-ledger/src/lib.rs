@@ -97,14 +97,14 @@ pub enum Event {
     BaselineMerged(EpochId, Balance),
     VaultResolved(ProposalId, Branch),
     VaultVoided(ProposalId),
-    ScalarSettlementSet(ProposalId, FixedU64),
-    GateSettlementSet(ProposalId, GateType, bool),
+    ScalarSettlementSet(ProposalId, Branch, FixedU64),
+    GateSettled(ProposalId, Branch, GateType, bool),
     BaselineSettled(EpochId, FixedU64),
     Redeemed(ProposalId, Balance),
     ScalarRedeemed(ProposalId, ScalarSide, Balance),
     ScalarPairRedeemed(ProposalId, Balance),
     GateRedeemed(ProposalId, GateType, Balance),
-    VoidRedeemed(ProposalId, PositionKind, Balance),
+    VoidRedeemed(ProposalId, PositionKind, Balance, Balance),
     BaselineRedeemed(EpochId, ScalarSide, Balance),
     VaultReaped(ProposalId, Balance),
     BaselineVaultReaped(EpochId, Balance),
@@ -208,7 +208,183 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         }
     }
 
+    // Every mutating operation is atomic: a failure at any step (e.g. a
+    // position-cap rejection on the second leg of a split, or a capped
+    // recipient on a transfer) restores the pre-call state, so no partial
+    // vault/position mutation can ever become observable (G-1, I-1).
+    fn atomically<R>(
+        &mut self,
+        op: impl FnOnce(&mut Self) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        let snapshot = self.clone();
+        let result = op(self);
+        if result.is_err() {
+            *self = snapshot;
+        }
+        result
+    }
+
     pub fn split(
+        &mut self,
+        origin: LedgerOrigin,
+        pid: ProposalId,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.split_impl(origin, pid, who, a))
+    }
+
+    pub fn merge(
+        &mut self,
+        origin: LedgerOrigin,
+        pid: ProposalId,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.merge_impl(origin, pid, who, a))
+    }
+
+    pub fn split_scalar(
+        &mut self,
+        origin: LedgerOrigin,
+        pid: ProposalId,
+        b: Branch,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.split_scalar_impl(origin, pid, b, who, a))
+    }
+
+    pub fn merge_scalar(
+        &mut self,
+        origin: LedgerOrigin,
+        pid: ProposalId,
+        b: Branch,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.merge_scalar_impl(origin, pid, b, who, a))
+    }
+
+    pub fn split_gate(
+        &mut self,
+        origin: LedgerOrigin,
+        pid: ProposalId,
+        b: Branch,
+        g: GateType,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.split_gate_impl(origin, pid, b, g, who, a))
+    }
+
+    pub fn merge_gate(
+        &mut self,
+        origin: LedgerOrigin,
+        pid: ProposalId,
+        b: Branch,
+        g: GateType,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.merge_gate_impl(origin, pid, b, g, who, a))
+    }
+
+    pub fn transfer(
+        &mut self,
+        origin: LedgerOrigin,
+        id: PositionId,
+        from: &AccountId,
+        to: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.transfer_impl(origin, id, from, to, a))
+    }
+
+    pub fn redeem(&mut self, pid: ProposalId, who: &AccountId, a: Balance) -> Result<(), Error> {
+        self.atomically(|led| led.redeem_impl(pid, who, a))
+    }
+
+    pub fn redeem_scalar(
+        &mut self,
+        pid: ProposalId,
+        side: ScalarSide,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.redeem_scalar_impl(pid, side, who, a))
+    }
+
+    pub fn redeem_scalar_pair(
+        &mut self,
+        pid: ProposalId,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.redeem_scalar_pair_impl(pid, who, a))
+    }
+
+    pub fn redeem_gate(
+        &mut self,
+        pid: ProposalId,
+        g: GateType,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.redeem_gate_impl(pid, g, who, a))
+    }
+
+    pub fn redeem_void(
+        &mut self,
+        pid: ProposalId,
+        b: Branch,
+        kind: PositionKind,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.redeem_void_impl(pid, b, kind, who, a))
+    }
+
+    pub fn split_baseline(
+        &mut self,
+        origin: LedgerOrigin,
+        epoch: EpochId,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.split_baseline_impl(origin, epoch, who, a))
+    }
+
+    pub fn merge_baseline(
+        &mut self,
+        origin: LedgerOrigin,
+        epoch: EpochId,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.merge_baseline_impl(origin, epoch, who, a))
+    }
+
+    pub fn redeem_baseline(
+        &mut self,
+        epoch: EpochId,
+        side: ScalarSide,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.redeem_baseline_impl(epoch, side, who, a))
+    }
+
+    pub fn redeem_baseline_pair(
+        &mut self,
+        epoch: EpochId,
+        who: &AccountId,
+        a: Balance,
+    ) -> Result<(), Error> {
+        self.atomically(|led| led.redeem_baseline_pair_impl(epoch, who, a))
+    }
+
+    fn split_impl(
         &mut self,
         origin: LedgerOrigin,
         pid: ProposalId,
@@ -237,7 +413,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::Split(pid, a));
         Ok(())
     }
-    pub fn merge(
+    fn merge_impl(
         &mut self,
         origin: LedgerOrigin,
         pid: ProposalId,
@@ -284,7 +460,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::Merged(pid, a));
         Ok(())
     }
-    pub fn split_scalar(
+    fn split_scalar_impl(
         &mut self,
         origin: LedgerOrigin,
         pid: ProposalId,
@@ -309,7 +485,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::ScalarSplit(pid, b, a));
         Ok(())
     }
-    pub fn merge_scalar(
+    fn merge_scalar_impl(
         &mut self,
         origin: LedgerOrigin,
         pid: ProposalId,
@@ -342,7 +518,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::ScalarMerged(pid, b, a));
         Ok(())
     }
-    pub fn split_gate(
+    fn split_gate_impl(
         &mut self,
         origin: LedgerOrigin,
         pid: ProposalId,
@@ -368,7 +544,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::GateSplit(pid, b, g, a));
         Ok(())
     }
-    pub fn merge_gate(
+    fn merge_gate_impl(
         &mut self,
         origin: LedgerOrigin,
         pid: ProposalId,
@@ -480,7 +656,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.merge_baseline(LedgerOrigin::MarketAuthority, epoch, who, a)
     }
 
-    pub fn transfer(
+    fn transfer_impl(
         &mut self,
         origin: LedgerOrigin,
         id: PositionId,
@@ -489,7 +665,33 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         a: Balance,
     ) -> Result<(), Error> {
         ensure_signed_or_market(origin)?;
-        ensure!(a >= kernel::MIN_TRANSFER_USDC, Error::AmountTooSmall);
+        ensure!(a > 0, Error::AmountTooSmall);
+        // 03 §R-2 is two rules about deposit-backed position hygiene, not a
+        // blanket amount minimum: (a) positions cannot be created below
+        // MinTransfer, (b) a Signed transfer leaving a sub-MinTransfer
+        // remainder moves the whole balance. Market-wrapper moves
+        // (MarketAuthority) are exact by construction (04 §6.1 routes
+        // sub-MinTransfer fee legs through these same ordinary ops - 03 §R-3)
+        // and protocol accounts hold no deposits, so neither rule applies to
+        // them.
+        let mut a = a;
+        if matches!(origin, LedgerOrigin::Signed) {
+            let dest_exists = self.positions.iter().any(|p| p.id == id && &p.owner == to);
+            if !dest_exists && !self.protocol_accounts.contains(to) {
+                ensure!(a >= kernel::MIN_TRANSFER_USDC, Error::AmountTooSmall);
+            }
+            if !self.protocol_accounts.contains(from) {
+                let balance = self
+                    .positions
+                    .iter()
+                    .find(|p| p.id == id && &p.owner == from)
+                    .map_or(0, |p| p.balance);
+                let remainder = balance.saturating_sub(a);
+                if remainder > 0 && remainder < kernel::MIN_TRANSFER_USDC {
+                    a = balance;
+                }
+            }
+        }
         self.ensure_position_live(id)?;
         self.burn(id, from, a)?;
         self.mint(id, to, a)?;
@@ -539,14 +741,14 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
     ) -> Result<(), Error> {
         ensure_settle(origin)?;
         ensure_score(s)?;
-        self.with_vault_mut(pid, |v| {
+        let winner = self.with_vault_mut(pid, |v| {
             let VaultState::Resolved(w) = v.state else {
                 return Err(Error::WrongVaultState);
             };
             v.state = VaultState::ScalarSettled { winner: w, s };
-            Ok(())
+            Ok(w)
         })?;
-        self.events.push(Event::ScalarSettlementSet(pid, s));
+        self.events.push(Event::ScalarSettlementSet(pid, winner, s));
         Ok(())
     }
     pub fn settle_gate(
@@ -557,31 +759,29 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         outcome: bool,
     ) -> Result<(), Error> {
         ensure_settle(origin)?;
-        self.with_vault_mut(pid, |v| {
-            ensure!(
-                matches!(
-                    v.state,
-                    VaultState::Resolved(_) | VaultState::ScalarSettled { .. }
-                ),
-                Error::WrongVaultState
-            );
+        let winner = self.with_vault_mut(pid, |v| {
+            let w = match v.state {
+                VaultState::Resolved(w) | VaultState::ScalarSettled { winner: w, .. } => w,
+                _ => return Err(Error::WrongVaultState),
+            };
             let slot = &mut v.gate_outcomes[gix(g)];
             ensure!(slot.is_none(), Error::GateAlreadySettled);
             *slot = Some(outcome);
-            Ok(())
+            Ok(w)
         })?;
-        self.events.push(Event::GateSettlementSet(pid, g, outcome));
+        self.events
+            .push(Event::GateSettled(pid, winner, g, outcome));
         Ok(())
     }
 
-    pub fn redeem(&mut self, pid: ProposalId, who: &AccountId, a: Balance) -> Result<(), Error> {
+    fn redeem_impl(&mut self, pid: ProposalId, who: &AccountId, a: Balance) -> Result<(), Error> {
         let w = self.settled_winner(pid)?;
         self.burn(position(pid, w, PositionKind::BranchUsdc), who, a)?;
         self.pay_proposal(pid, a)?;
         self.events.push(Event::Redeemed(pid, a));
         Ok(())
     }
-    pub fn redeem_scalar(
+    fn redeem_scalar_impl(
         &mut self,
         pid: ProposalId,
         side: ScalarSide,
@@ -613,7 +813,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::ScalarRedeemed(pid, side, pay));
         Ok(())
     }
-    pub fn redeem_scalar_pair(
+    fn redeem_scalar_pair_impl(
         &mut self,
         pid: ProposalId,
         who: &AccountId,
@@ -628,7 +828,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::ScalarPairRedeemed(pid, a));
         Ok(())
     }
-    pub fn redeem_gate(
+    fn redeem_gate_impl(
         &mut self,
         pid: ProposalId,
         g: GateType,
@@ -656,7 +856,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::GateRedeemed(pid, g, a));
         Ok(())
     }
-    pub fn redeem_void(
+    fn redeem_void_impl(
         &mut self,
         pid: ProposalId,
         b: Branch,
@@ -677,11 +877,11 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
             _ => a / 4,
         };
         self.pay_proposal(pid, pay)?;
-        self.events.push(Event::VoidRedeemed(pid, kind, pay));
+        self.events.push(Event::VoidRedeemed(pid, kind, a, pay));
         Ok(())
     }
 
-    pub fn split_baseline(
+    fn split_baseline_impl(
         &mut self,
         origin: LedgerOrigin,
         epoch: EpochId,
@@ -704,7 +904,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::BaselineSplit(epoch, a));
         Ok(())
     }
-    pub fn merge_baseline(
+    fn merge_baseline_impl(
         &mut self,
         origin: LedgerOrigin,
         epoch: EpochId,
@@ -754,7 +954,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::BaselineSettled(epoch, s));
         Ok(())
     }
-    pub fn redeem_baseline(
+    fn redeem_baseline_impl(
         &mut self,
         epoch: EpochId,
         side: ScalarSide,
@@ -778,7 +978,7 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.events.push(Event::BaselineRedeemed(epoch, side, pay));
         Ok(())
     }
-    pub fn redeem_baseline_pair(
+    fn redeem_baseline_pair_impl(
         &mut self,
         epoch: EpochId,
         who: &AccountId,
@@ -824,7 +1024,150 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
                 })?;
             ensure!(actual == t.total, Error::TryStateViolation);
         }
+        self.try_state_vault_conservation()?;
         Ok(())
+    }
+
+    /// Vault conservation (03 §6, I-1..I-4): while a vault is Open or
+    /// Resolved, every branch's outstanding claims equal escrow exactly and
+    /// every paired supply matches its vault-side set counter; in terminal
+    /// states (redemptions decrement escrow only), escrow must still cover
+    /// the worst-case remaining liability computed from live supplies.
+    fn try_state_vault_conservation(&self) -> Result<(), Error> {
+        for v in &self.vaults {
+            let pid = v.proposal;
+            let info = &v.info;
+            match info.state {
+                VaultState::Open | VaultState::Resolved(_) => {
+                    for b in [Branch::Accept, Branch::Reject] {
+                        let bs = &info.branches[bix(b)];
+                        let claims = add(
+                            add(bs.usdc, bs.scalar_sets)?,
+                            add(bs.gate_sets[0], bs.gate_sets[1])?,
+                        )?;
+                        ensure!(claims == info.escrowed, Error::TryStateViolation);
+                        ensure!(
+                            self.total(position(pid, b, PositionKind::BranchUsdc)) == bs.usdc,
+                            Error::TryStateViolation
+                        );
+                        let long = self.total(position(pid, b, PositionKind::Long));
+                        let short = self.total(position(pid, b, PositionKind::Short));
+                        ensure!(
+                            long == short && long == bs.scalar_sets,
+                            Error::TryStateViolation
+                        );
+                        for g in [GateType::Survival, GateType::Security] {
+                            let yes = self.total(position(pid, b, PositionKind::GateYes(g)));
+                            let no = self.total(position(pid, b, PositionKind::GateNo(g)));
+                            ensure!(
+                                yes == no && yes == bs.gate_sets[gix(g)],
+                                Error::TryStateViolation
+                            );
+                        }
+                    }
+                }
+                VaultState::ScalarSettled { winner, s } => {
+                    let w = winner;
+                    let mut liability = self.total(position(pid, w, PositionKind::BranchUsdc));
+                    // redeem_scalar_pair pays complete pairs at par regardless
+                    // of s, so pairs must be counted exactly - flooring both
+                    // single legs undercounts by up to one unit per pair
+                    // (Codex review, PR #33).
+                    let long = self.total(position(pid, w, PositionKind::Long));
+                    let short = self.total(position(pid, w, PositionKind::Short));
+                    let pairs = long.min(short);
+                    liability = add(liability, pairs)?;
+                    liability = add(liability, mul_score(sub(long, pairs)?, s.0 as u128)?)?;
+                    liability = add(
+                        liability,
+                        mul_score(sub(short, pairs)?, SCALE_1E9 - s.0 as u128)?,
+                    )?;
+                    for g in [GateType::Survival, GateType::Security] {
+                        let yes = self.total(position(pid, w, PositionKind::GateYes(g)));
+                        let no = self.total(position(pid, w, PositionKind::GateNo(g)));
+                        let gate_liability = match info.gate_outcomes[gix(g)] {
+                            Some(true) => yes,
+                            Some(false) => no,
+                            None => yes.max(no),
+                        };
+                        liability = add(liability, gate_liability)?;
+                    }
+                    ensure!(info.escrowed >= liability, Error::TryStateViolation);
+                }
+                VaultState::Voided => {
+                    // transfer/merge/merge_scalar/merge_gate stay available in
+                    // Voided (03: the D-1 par-recovery path), so holders can
+                    // assemble complete sets into branch-USDC and complete
+                    // Accept+Reject pairs into par. Worst-case liability is
+                    // therefore pair-first (Codex review, PR #33): per branch,
+                    // scalar/gate pairs merge into effective branch-USDC;
+                    // cross-branch pairs redeem at par; only unmatched
+                    // remainders take the floor(a/2) / floor(a/4) VOID rates.
+                    let mut effective = [0u128; 2];
+                    let mut leftovers = 0u128;
+                    for b in [Branch::Accept, Branch::Reject] {
+                        let mut eff = self.total(position(pid, b, PositionKind::BranchUsdc));
+                        let long = self.total(position(pid, b, PositionKind::Long));
+                        let short = self.total(position(pid, b, PositionKind::Short));
+                        let scalar_pairs = long.min(short);
+                        eff = add(eff, scalar_pairs)?;
+                        leftovers = add(
+                            leftovers,
+                            add(sub(long, scalar_pairs)? / 4, sub(short, scalar_pairs)? / 4)?,
+                        )?;
+                        for g in [GateType::Survival, GateType::Security] {
+                            let yes = self.total(position(pid, b, PositionKind::GateYes(g)));
+                            let no = self.total(position(pid, b, PositionKind::GateNo(g)));
+                            let gate_pairs = yes.min(no);
+                            eff = add(eff, gate_pairs)?;
+                            leftovers = add(
+                                leftovers,
+                                add(sub(yes, gate_pairs)? / 4, sub(no, gate_pairs)? / 4)?,
+                            )?;
+                        }
+                        effective[bix(b)] = eff;
+                    }
+                    let cross_pairs = effective[0].min(effective[1]);
+                    let mut liability = cross_pairs;
+                    liability = add(liability, sub(effective[0], cross_pairs)? / 2)?;
+                    liability = add(liability, sub(effective[1], cross_pairs)? / 2)?;
+                    liability = add(liability, leftovers)?;
+                    ensure!(info.escrowed >= liability, Error::TryStateViolation);
+                }
+            }
+        }
+        for v in &self.baseline_vaults {
+            let epoch = v.epoch;
+            let info = &v.info;
+            let long = self.total(baseline(epoch, ScalarSide::Long));
+            let short = self.total(baseline(epoch, ScalarSide::Short));
+            match info.state {
+                BaselineState::Open => {
+                    ensure!(info.escrowed == info.sets, Error::TryStateViolation);
+                    ensure!(long == short && long == info.sets, Error::TryStateViolation);
+                }
+                BaselineState::Settled(s) => {
+                    // redeem_baseline_pair pays complete pairs at par.
+                    let pairs = long.min(short);
+                    let liability = add(
+                        pairs,
+                        add(
+                            mul_score(sub(long, pairs)?, s.0 as u128)?,
+                            mul_score(sub(short, pairs)?, SCALE_1E9 - s.0 as u128)?,
+                        )?,
+                    )?;
+                    ensure!(info.escrowed >= liability, Error::TryStateViolation);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn total(&self, id: PositionId) -> Balance {
+        self.position_totals
+            .iter()
+            .find(|t| t.id == id)
+            .map_or(0, |t| t.total)
     }
 
     fn ensure_holds(&self, id: PositionId, owner: &AccountId, a: Balance) -> Result<(), Error> {
@@ -1113,6 +1456,169 @@ mod tests {
     fn acct(n: u8) -> [u8; 32] {
         [n; 32]
     }
+    fn fill_to_cap(s: &mut LedgerState<[u8; 32]>, who: &[u8; 32], splits: u32) {
+        // Occupy 2·splits position entries via real splits so counts,
+        // deposits, totals, and vault state all stay consistent for try_state.
+        for i in 0..splits {
+            let pid = 1_000 + u64::from(i);
+            s.create_vault(pid, 0).unwrap();
+            s.split(LedgerOrigin::Signed, pid, who, kernel::MIN_SPLIT_USDC)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn split_at_position_cap_is_atomic() {
+        // Codex review, PR #16 (P1): with 63 live positions, the first split
+        // mint succeeds (64 = cap) and the second hits the cap - the vault
+        // escrow, branch supplies, and the first leg must all roll back.
+        let mut s = LedgerState::new();
+        let a = acct(1);
+        let other = acct(9);
+        fill_to_cap(&mut s, &a, 32); // 64 entries
+                                     // Move one full Reject leg away so the account holds exactly 63.
+        s.transfer(
+            LedgerOrigin::Signed,
+            position(1_000, Branch::Reject, PositionKind::BranchUsdc),
+            &a,
+            &other,
+            kernel::MIN_SPLIT_USDC,
+        )
+        .unwrap();
+        s.create_vault(1, 0).unwrap();
+        let deposits_before = s.deposits_held;
+        let positions_before = s.positions.len();
+        assert_eq!(
+            s.split(LedgerOrigin::Signed, 1, &a, 1_000_000).unwrap_err(),
+            Error::PositionCapExceeded
+        );
+        // Fully rolled back: no vault escrow, no orphan Accept leg, no count
+        // or deposit drift.
+        assert_eq!(s.vaults.last().unwrap().info.escrowed, 0);
+        assert_eq!(s.vaults.last().unwrap().info.branches[0].usdc, 0);
+        assert!(s
+            .positions
+            .iter()
+            .all(|p| !matches!(p.id, PositionId::Proposal { proposal: 1, .. })));
+        assert_eq!(s.positions.len(), positions_before);
+        assert_eq!(s.deposits_held, deposits_before);
+        s.try_state().unwrap();
+    }
+
+    #[test]
+    fn transfer_to_capped_recipient_is_atomic() {
+        // Codex review, PR #16 (P1): a failed transfer must not burn the
+        // sender's balance.
+        let mut s = LedgerState::new();
+        let sender = acct(1);
+        let capped = acct(2);
+        fill_to_cap(&mut s, &capped, 32); // exactly 64 entries
+        s.create_vault(1, 0).unwrap();
+        s.split(LedgerOrigin::Signed, 1, &sender, 1_000_000)
+            .unwrap();
+        let id = position(1, Branch::Accept, PositionKind::BranchUsdc);
+        assert_eq!(
+            s.transfer(LedgerOrigin::Signed, id, &sender, &capped, 500_000)
+                .unwrap_err(),
+            Error::PositionCapExceeded
+        );
+        let balance = s
+            .positions
+            .iter()
+            .find(|p| p.id == id && p.owner == sender)
+            .map(|p| p.balance)
+            .unwrap();
+        assert_eq!(balance, 1_000_000);
+        s.try_state().unwrap();
+    }
+
+    #[test]
+    fn try_state_alarms_on_vault_conservation_breaks() {
+        // Codex review, PR #16 (P1): corrupting escrow or branch supplies
+        // must trip try_state.
+        let mut s = LedgerState::new();
+        s.create_vault(1, 0).unwrap();
+        let a = acct(1);
+        s.split(LedgerOrigin::Signed, 1, &a, 1_000_000).unwrap();
+        s.try_state().unwrap();
+        s.vaults[0].info.escrowed += 1;
+        assert_eq!(s.try_state().unwrap_err(), Error::TryStateViolation);
+        s.vaults[0].info.escrowed -= 1;
+        s.vaults[0].info.branches[0].usdc -= 1;
+        assert_eq!(s.try_state().unwrap_err(), Error::TryStateViolation);
+        s.vaults[0].info.branches[0].usdc += 1;
+        s.try_state().unwrap();
+        // Terminal-state solvency: a settled vault whose escrow falls below
+        // the outstanding winner-side liability alarms.
+        s.resolve(LedgerOrigin::ResolveAuthority, 1, Branch::Accept)
+            .unwrap();
+        s.settle_scalar(LedgerOrigin::SettleAuthority, 1, FixedU64(500_000_000))
+            .unwrap();
+        s.try_state().unwrap();
+        s.vaults[0].info.escrowed = 0;
+        assert_eq!(s.try_state().unwrap_err(), Error::TryStateViolation);
+    }
+
+    #[test]
+    fn settled_liability_counts_complete_pairs_at_par() {
+        // Codex review, PR #33: with an odd supply and s = 0.5, flooring both
+        // single legs undercounts the pair-redemption liability by one unit.
+        let mut s = LedgerState::new();
+        s.create_vault(1, 0).unwrap();
+        let a = acct(1);
+        s.split(LedgerOrigin::Signed, 1, &a, 10_001).unwrap();
+        s.split_scalar(LedgerOrigin::Signed, 1, Branch::Accept, &a, 10_001)
+            .unwrap();
+        s.resolve(LedgerOrigin::ResolveAuthority, 1, Branch::Accept)
+            .unwrap();
+        s.settle_scalar(LedgerOrigin::SettleAuthority, 1, FixedU64(500_000_000))
+            .unwrap();
+        s.try_state().unwrap();
+        // Escrow one unit below the pair liability must alarm - the old
+        // floored-legs formula (2 x floor(10_001/2) = 10_000) accepted it.
+        s.vaults[0].info.escrowed -= 1;
+        assert_eq!(s.try_state().unwrap_err(), Error::TryStateViolation);
+    }
+
+    #[test]
+    fn void_liability_counts_par_pair_assembly() {
+        // Codex review, PR #33: merge stays available in Voided, so live
+        // Accept+Reject pairs recover par - not 2 x floor(a/2).
+        let mut s = LedgerState::new();
+        s.create_vault(1, 0).unwrap();
+        let a = acct(1);
+        s.split(LedgerOrigin::Signed, 1, &a, 10_001).unwrap();
+        s.void(LedgerOrigin::ResolveAuthority, 1).unwrap();
+        s.try_state().unwrap();
+        s.vaults[0].info.escrowed -= 1;
+        assert_eq!(s.try_state().unwrap_err(), Error::TryStateViolation);
+    }
+
+    #[test]
+    fn settlement_events_carry_the_winning_branch() {
+        // Codex review, PR #16 (P2): 02 §5 freezes
+        // ScalarSettlementSet { pid, branch, s } and
+        // GateSettled { pid, branch, gate, outcome }.
+        let mut s = LedgerState::new();
+        s.create_vault(1, 0).unwrap();
+        let a = acct(1);
+        s.split(LedgerOrigin::Signed, 1, &a, 1_000_000).unwrap();
+        s.resolve(LedgerOrigin::ResolveAuthority, 1, Branch::Accept)
+            .unwrap();
+        s.settle_gate(LedgerOrigin::SettleAuthority, 1, GateType::Survival, false)
+            .unwrap();
+        s.settle_scalar(LedgerOrigin::SettleAuthority, 1, FixedU64(700_000_000))
+            .unwrap();
+        assert!(s.events.iter().any(|e| matches!(
+            e,
+            Event::GateSettled(1, Branch::Accept, GateType::Survival, false)
+        )));
+        assert!(s.events.iter().any(|e| matches!(
+            e,
+            Event::ScalarSettlementSet(1, Branch::Accept, FixedU64(700_000_000))
+        )));
+    }
+
     #[test]
     fn split_merge_and_deposits_conserve() {
         let mut s = LedgerState::new();

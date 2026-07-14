@@ -603,6 +603,16 @@ mod tests {
         }
     }
 
+    // Corpus rows are evaluated at exactly representable 64.64 inputs, mirroring
+    // tools/fixed/generate-lmsr-corpus.py's q64() snapping, so the committed
+    // expectations measure kernel error only (never f64 input-representation error).
+    const CORPUS_RAW_HALF: u128 = 1 << 63;
+    // Nearest 64.64 to 0.6: raw_64x64(Decimal("0.6")) in the generator.
+    const CORPUS_RAW_SIX_TENTHS: u128 = 11_068_046_444_225_730_970;
+    // The generator evaluates v3_cost at the snapped V3 displacement, i.e. the
+    // committed raw of the v3_displace_0_5_to_0_6 row (cross-checked in the test).
+    const CORPUS_RAW_V3_DELTA: u128 = 74_795_110_800_902_839_805_191;
+
     fn corpus_value(name: &str) -> FixedU64x64 {
         match name {
             "cost_0_0" => lmsr_cost(
@@ -627,26 +637,18 @@ mod tests {
             .unwrap(),
             "v3_displace_0_5_to_0_6" => lmsr_displacement_between_prices(
                 FixedU64x64::from_integer(10_000),
-                FixedU64x64::from_f64(0.5).unwrap(),
-                FixedU64x64::from_f64(0.6).unwrap(),
+                FixedU64x64::from_raw(CORPUS_RAW_HALF),
+                FixedU64x64::from_raw(CORPUS_RAW_SIX_TENTHS),
             )
             .unwrap(),
-            "v3_cost_0_5_to_0_6" => {
-                let delta = lmsr_displacement_between_prices(
-                    FixedU64x64::from_integer(10_000),
-                    FixedU64x64::from_f64(0.5).unwrap(),
-                    FixedU64x64::from_f64(0.6).unwrap(),
-                )
-                .unwrap();
-                lmsr_buy_cost(
-                    FixedU64x64::ZERO,
-                    FixedU64x64::ZERO,
-                    FixedU64x64::from_integer(10_000),
-                    LmsrSide::Long,
-                    delta,
-                )
-                .unwrap()
-            }
+            "v3_cost_0_5_to_0_6" => lmsr_buy_cost(
+                FixedU64x64::ZERO,
+                FixedU64x64::ZERO,
+                FixedU64x64::from_integer(10_000),
+                LmsrSide::Long,
+                FixedU64x64::from_raw(CORPUS_RAW_V3_DELTA),
+            )
+            .unwrap(),
             "v4_worst_case_loss" => FixedU64x64::from_integer(10_000).checked_mul(LN_2).unwrap(),
             "domain_edge_cost_480000_0" => lmsr_cost(
                 FixedU64x64::from_integer(480_000),
@@ -756,6 +758,11 @@ mod tests {
 
     #[test]
     fn generated_lmsr_corpus_matches_committed_values() {
+        // 04 §4 (normative): composed cost-function error ≤ COMPOSED_COST_MAX_ULP,
+        // i.e. b-scaled evaluations (costs, displacements) admit at most
+        // 8·b·2⁻⁶⁴ USDC — 8·b raw ulps at the corpus's b = 10,000 (04 §5) —
+        // while dimensionless price rows admit 8 raw ulps outright.
+        let corpus_b = 10_000u128;
         let corpus = include_str!("../fixtures/lmsr_corpus.csv");
         let mut checked = 0u32;
         for line in corpus.lines() {
@@ -766,9 +773,18 @@ mod tests {
             let name = fields.next().unwrap();
             let expected = fields.next().unwrap().parse::<f64>().unwrap();
             let expected_raw = fields.next().unwrap().parse::<u128>().unwrap();
+            if name == "v3_displace_0_5_to_0_6" {
+                // Keeps the chained v3_cost input in lockstep with the generator.
+                assert_eq!(expected_raw, CORPUS_RAW_V3_DELTA);
+            }
+            let max_raw_error = if name.contains("price") {
+                u128::from(COMPOSED_COST_MAX_ULP)
+            } else {
+                u128::from(COMPOSED_COST_MAX_ULP) * corpus_b
+            };
             let actual = corpus_value(name);
             approx(actual, expected, 1e-8);
-            assert_raw_within(actual, expected_raw, 20_000_000);
+            assert_raw_within(actual, expected_raw, max_raw_error);
             checked += 1;
         }
         assert_eq!(checked, 19);

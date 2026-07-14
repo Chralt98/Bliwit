@@ -160,7 +160,7 @@ Related frozen values: measurement horizon k = 2 epochs; settlement at e+3; ≤ 
 | V3 | displace 0.5 → 0.6 | Δ = 4,054.65108108… LONG; cost = 2,231.43551314… USDC |
 | V4 | worst-case loss | 6,931.47180560… USDC |
 | V5 | V1 round trip net of 2 × 30 bps fees | net = **−3.074969…** USDC (**corrected** from −3.077552) |
-| V6 | domain edge `q_L − q_S = 48·b` | MUST reject |
+| V6 | domain edge | a buy pushing `q_L − q_S > 48·b` MUST be rejected (`PriceBoundExceeded`); the state at exactly `48·b` is in-domain per [04](04-markets-and-pricing.md) §4 |
 
 On-chain results MUST match within the §2 error bound plus one base unit of rounding.
 

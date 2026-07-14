@@ -68,8 +68,15 @@ impl<T: Decode, const N: u32> Decode for BoundedVec<T, N> {
     fn decode<I: parity_scale_codec::Input>(
         input: &mut I,
     ) -> Result<Self, parity_scale_codec::Error> {
-        let value = Vec::<T>::decode(input)?;
-        Self::try_from(value).map_err(|_| "BoundedVec length exceeds declared bound".into())
+        // Enforce the bound at the decode boundary: reject an oversized advertised
+        // length before allocating or decoding any element, so untrusted input
+        // cannot force work above the declared bound.
+        let len = <parity_scale_codec::Compact<u32>>::decode(input)?.0;
+        if len > N {
+            return Err("BoundedVec length exceeds declared bound".into());
+        }
+        let items = parity_scale_codec::decode_vec_with_len(input, len as usize)?;
+        Ok(Self(items))
     }
 }
 
@@ -504,6 +511,63 @@ mod tests {
     fn scale_decode_enforces_bounded_vec_limit() {
         let encoded = alloc::vec![1_u8, 2, 3].encode();
         assert!(BoundedVec::<u8, 2>::decode(&mut &encoded[..]).is_err());
+    }
+
+    struct CountingInput<'a> {
+        data: &'a [u8],
+        read: usize,
+        alloc_mem: usize,
+    }
+
+    impl parity_scale_codec::Input for CountingInput<'_> {
+        fn remaining_len(&mut self) -> Result<Option<usize>, parity_scale_codec::Error> {
+            Ok(Some(self.data.len().saturating_sub(self.read)))
+        }
+
+        fn read(&mut self, into: &mut [u8]) -> Result<(), parity_scale_codec::Error> {
+            let end = self
+                .read
+                .checked_add(into.len())
+                .filter(|end| *end <= self.data.len())
+                .ok_or_else(|| parity_scale_codec::Error::from("unexpected end of input"))?;
+            into.copy_from_slice(&self.data[self.read..end]);
+            self.read = end;
+            Ok(())
+        }
+
+        fn on_before_alloc_mem(&mut self, size: usize) -> Result<(), parity_scale_codec::Error> {
+            self.alloc_mem = self.alloc_mem.saturating_add(size);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn scale_decode_rejects_oversized_length_before_reading_elements() {
+        // 1000 advertised elements against a bound of 4: the decoder must fail
+        // after the compact length prefix, without consuming element bytes.
+        let encoded = alloc::vec![7_u8; 1000].encode();
+        let prefix_len = parity_scale_codec::Compact(1000_u32).encoded_size();
+        let mut input = CountingInput {
+            data: &encoded,
+            read: 0,
+            alloc_mem: 0,
+        };
+        assert!(BoundedVec::<u8, 4>::decode(&mut input).is_err());
+        assert_eq!(input.read, prefix_len);
+        assert_eq!(input.alloc_mem, 0);
+    }
+
+    #[test]
+    fn scale_decode_charges_allocation_for_in_bound_length() {
+        let encoded = alloc::vec![7_u8; 4].encode();
+        let mut input = CountingInput {
+            data: &encoded,
+            read: 0,
+            alloc_mem: 0,
+        };
+        let decoded = BoundedVec::<u8, 4>::decode(&mut input).unwrap();
+        assert_eq!(decoded.as_slice(), &[7, 7, 7, 7]);
+        assert_eq!(input.alloc_mem, 4);
     }
 
     #[test]

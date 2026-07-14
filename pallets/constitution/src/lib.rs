@@ -66,13 +66,27 @@ pub enum ParamClass {
     MetaAndValues,
 }
 
+/// Per-decision rate limit for a constitution key, mirroring the three
+/// Max Δ/decision semantics of the 13 §1 table: absolute steps in the key's
+/// own unit (e.g. `2`, `5`), steps relative to the current value (e.g. `10%`),
+/// and multiplicative bounds (e.g. `×2`).
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+pub enum MaxDelta {
+    /// Absolute bound in the parameter's own unit.
+    Absolute(ParamValue),
+    /// Bound relative to the current value, in percent of it.
+    Percent(u8),
+    /// Multiplicative bound: `next ∈ [value / factor, value × factor]`.
+    Factor(u8),
+}
+
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct ParamRecord {
     pub key: ParamKey,
     pub value: ParamValue,
     pub min: ParamValue,
     pub max: ParamValue,
-    pub max_delta: Option<ParamValue>,
+    pub max_delta: Option<MaxDelta>,
     pub cooldown_epochs: u32,
     pub last_changed_epoch: u32,
     pub class: ParamClass,
@@ -91,10 +105,35 @@ impl ParamRecord {
             epoch >= self.last_changed_epoch.saturating_add(self.cooldown_epochs),
             Error::CooldownActive
         );
-        if let Some(max_delta) = self.max_delta {
-            ensure!(max_delta.same_kind(next), Error::WrongType);
-            let delta = self.value.as_u128().abs_diff(next.as_u128());
-            ensure!(delta <= max_delta.as_u128(), Error::DeltaTooLarge);
+        match self.max_delta {
+            None => {}
+            Some(MaxDelta::Absolute(bound)) => {
+                ensure!(bound.same_kind(next), Error::WrongType);
+                let delta = self.value.as_u128().abs_diff(next.as_u128());
+                ensure!(delta <= bound.as_u128(), Error::DeltaTooLarge);
+            }
+            Some(MaxDelta::Percent(percent)) => {
+                // Allowance is recomputed from the current value on every
+                // decision; flooring keeps the limit conservative.
+                let allowed = self
+                    .value
+                    .as_u128()
+                    .saturating_mul(u128::from(percent))
+                    .checked_div(100)
+                    .unwrap_or(0);
+                let delta = self.value.as_u128().abs_diff(next.as_u128());
+                ensure!(delta <= allowed, Error::DeltaTooLarge);
+            }
+            Some(MaxDelta::Factor(factor)) => {
+                let factor = u128::from(factor);
+                let value = self.value.as_u128();
+                let next_raw = next.as_u128();
+                ensure!(
+                    next_raw <= value.saturating_mul(factor)
+                        && next_raw.saturating_mul(factor) >= value,
+                    Error::DeltaTooLarge
+                );
+            }
         }
         Ok(Self {
             value: next,
@@ -401,8 +440,17 @@ impl ConstitutionState {
                 record.value.as_u128() <= record.max.as_u128(),
                 Error::AboveMax
             );
-            if let Some(max_delta) = record.max_delta {
-                ensure!(record.value.same_kind(max_delta), Error::WrongType);
+            match record.max_delta {
+                None => {}
+                Some(MaxDelta::Absolute(bound)) => {
+                    ensure!(record.value.same_kind(bound), Error::WrongType);
+                }
+                Some(MaxDelta::Percent(percent)) => {
+                    ensure!((1..=100).contains(&percent), Error::WrongType);
+                }
+                Some(MaxDelta::Factor(factor)) => {
+                    ensure!(factor >= 1, Error::WrongType);
+                }
             }
         }
         for meter in &self.meters {
@@ -502,7 +550,8 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             value: ParamValue::U32(302_400),
             min: ParamValue::U32(201_600),
             max: ParamValue::U32(604_800),
-            max_delta: Some(ParamValue::U32(30_240)),
+            // 13 §1: Max Δ/decision = 10% — relative to the current value.
+            max_delta: Some(MaxDelta::Percent(10)),
             cooldown_epochs: 2,
             last_changed_epoch: 0,
             class: ParamClass::Meta
@@ -512,7 +561,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             value: ParamValue::U8(5),
             min: ParamValue::U8(1),
             max: ParamValue::U8(12),
-            max_delta: Some(ParamValue::U8(2)),
+            max_delta: Some(MaxDelta::Absolute(ParamValue::U8(2))),
             cooldown_epochs: 1,
             last_changed_epoch: 0,
             class: ParamClass::Meta
@@ -522,17 +571,17 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             value: ParamValue::U32(10),
             min: ParamValue::U32(5),
             max: ParamValue::U32(50),
-            max_delta: Some(ParamValue::U32(5)),
+            max_delta: Some(MaxDelta::Absolute(ParamValue::U32(5))),
             cooldown_epochs: 1,
             last_changed_epoch: 0,
             class: ParamClass::Param
         },
         ParamRecord {
-            key: key16(b"intake.max_acct"),
+            key: key16(b"intake.max_per_account"),
             value: ParamValue::U8(4),
             min: ParamValue::U8(2),
             max: ParamValue::U8(8),
-            max_delta: Some(ParamValue::U8(2)),
+            max_delta: Some(MaxDelta::Absolute(ParamValue::U8(2))),
             cooldown_epochs: 2,
             last_changed_epoch: 0,
             class: ParamClass::Meta
@@ -548,11 +597,12 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             class: ParamClass::Meta
         },
         ParamRecord {
-            key: key16(b"keeper.budget"),
+            key: key16(b"keeper.budget_epoch"),
             value: ParamValue::Balance(12_000_000_000),
             min: ParamValue::Balance(kernel::KEEPER_BUDGET_EPOCH_FLOOR_USDC),
             max: ParamValue::Balance(60_000_000_000),
-            max_delta: Some(ParamValue::Balance(12_000_000_000)),
+            // 13 §1: Max Δ/decision = ×2.
+            max_delta: Some(MaxDelta::Factor(2)),
             cooldown_epochs: 1,
             last_changed_epoch: 0,
             class: ParamClass::Param
@@ -622,6 +672,70 @@ mod tests {
         );
         rec = rec.checked_update(ParamValue::U32(310_000), 2).unwrap();
         assert_eq!(rec.value, ParamValue::U32(310_000));
+    }
+
+    #[test]
+    fn percent_delta_is_recomputed_from_the_current_value() {
+        // 13 §1: epoch.length Max Δ/decision = 10%. A fixed absolute step
+        // would let a lowered value be raised by more than 10% per decision.
+        let mut rec = genesis_params()[0];
+        assert_eq!(rec.max_delta, Some(MaxDelta::Percent(10)));
+        rec = rec.checked_update(ParamValue::U32(275_000), 2).unwrap();
+        rec = rec.checked_update(ParamValue::U32(250_000), 4).unwrap();
+        rec = rec.checked_update(ParamValue::U32(226_000), 6).unwrap();
+        rec = rec.checked_update(ParamValue::U32(204_000), 8).unwrap();
+        rec = rec.checked_update(ParamValue::U32(201_600), 10).unwrap();
+        // At 201,600 the 10% allowance is 20,160 — a 30,240 raise (15%) that
+        // the old absolute bound accepted must now fail.
+        assert_eq!(
+            rec.checked_update(ParamValue::U32(231_840), 12),
+            Err(Error::DeltaTooLarge)
+        );
+        rec = rec.checked_update(ParamValue::U32(221_760), 12).unwrap();
+        assert_eq!(rec.value, ParamValue::U32(221_760));
+    }
+
+    #[test]
+    fn factor_delta_bounds_both_directions() {
+        // 13 §1: keeper.budget_epoch Max Δ/decision = ×2.
+        let mut rec = genesis_params()
+            .into_iter()
+            .find(|record| record.key == key16(b"keeper.budget_epoch"))
+            .unwrap();
+        assert_eq!(rec.max_delta, Some(MaxDelta::Factor(2)));
+        assert_eq!(
+            rec.checked_update(ParamValue::Balance(24_000_000_001), 1),
+            Err(Error::DeltaTooLarge)
+        );
+        rec = rec
+            .checked_update(ParamValue::Balance(24_000_000_000), 1)
+            .unwrap();
+        assert_eq!(
+            rec.checked_update(ParamValue::Balance(11_999_999_999), 2),
+            Err(Error::DeltaTooLarge)
+        );
+        rec = rec
+            .checked_update(ParamValue::Balance(12_000_000_000), 2)
+            .unwrap();
+        assert_eq!(rec.value, ParamValue::Balance(12_000_000_000));
+    }
+
+    #[test]
+    fn genesis_param_keys_are_canonical_and_distinct() {
+        let params = genesis_params();
+        // 13 §1 canonical spellings (Codex review, PR #14): the seeded keys
+        // must match the names downstream binders derive with key16.
+        assert!(params
+            .iter()
+            .any(|record| record.key == key16(b"intake.max_per_account")));
+        assert!(params
+            .iter()
+            .any(|record| record.key == key16(b"keeper.budget_epoch")));
+        for (index, record) in params.iter().enumerate() {
+            for other in params.iter().skip(index + 1) {
+                assert_ne!(record.key, other.key, "duplicate ParamKey after key16");
+            }
+        }
     }
 
     #[test]

@@ -39,12 +39,21 @@ def fmt(x: Decimal) -> str:
 def raw_64x64(x: Decimal) -> int:
     return int((x * (1 << 64)).to_integral_value(rounding="ROUND_HALF_UP"))
 
+def q64(x: Decimal) -> Decimal:
+    """Snap an input to its exact 64.64 representation.
+
+    Corpus rows are evaluated at exactly representable 64.64 inputs (the
+    on-chain input domain) so the committed expectations measure kernel error
+    only, never input-representation error.
+    """
+    return Decimal(raw_64x64(x)) / Decimal(1 << 64)
+
 rows: list[tuple[str, Decimal]] = []
 rows.append(("cost_0_0", cost(Decimal(0), Decimal(0))))
 rows.append(("v1_buy_1000_long_cost", cost(Decimal(1000), Decimal(0)) - cost(Decimal(0), Decimal(0))))
 rows.append(("v2_price_after_v1", price_long(Decimal(1000), Decimal(0))))
-rows.append(("v3_displace_0_5_to_0_6", disp(Decimal("0.5"), Decimal("0.6"))))
-v3_delta = rows[-1][1]
+rows.append(("v3_displace_0_5_to_0_6", disp(q64(Decimal("0.5")), q64(Decimal("0.6")))))
+v3_delta = q64(rows[-1][1])
 rows.append(("v3_cost_0_5_to_0_6", cost(v3_delta, Decimal(0)) - cost(Decimal(0), Decimal(0))))
 rows.append(("v4_worst_case_loss", B * LN2))
 rows.append(("domain_edge_cost_480000_0", cost(Decimal(480000), Decimal(0))))

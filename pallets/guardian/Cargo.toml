@@ -1,0 +1,16 @@
+[package]
+name = "pallet-guardian"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
+parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive"] }
+scale-info = { version = "2.11.6", default-features = false, features = ["derive"] }
+
+[features]
+default = ["std"]
+std = ["futarchy-primitives/std", "parity-scale-codec/std", "scale-info/std"]
+runtime-benchmarks = []

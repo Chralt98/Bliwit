@@ -29,6 +29,11 @@ pub const WT_QUORUM: u8 = 2;
 pub const RES_FAIL_THRESHOLD: u8 = 2;
 pub const RES_RECOVER_THRESHOLD: u8 = 3;
 pub const RES_PROBE_AMOUNT: Balance = 100_000;
+/// 13 §5 `orc.max_proof_bytes` (K): 256 KiB per `recompute_proof` submission.
+pub const ORC_MAX_PROOF_BYTES: usize = 262_144;
+/// Component values are FixedU64 (1e9 scale) in [0, 1] before aggregation
+/// (05 §4.4 determinism rule 1).
+pub const COMPONENT_VALUE_MAX: u64 = 1_000_000_000;
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct ReporterInfo {
@@ -217,6 +222,10 @@ pub enum Error {
     ProbeTooEarly,
     UnknownQuery,
     Overflow,
+    NotRecomputable,
+    ProofTooLarge,
+    EvidenceMismatch,
+    BadProof,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -242,6 +251,10 @@ pub struct Oracle {
     pub reserve_health: ReserveHealth,
     pub events: Vec<Event>,
     ack_records: Vec<(MetricId, EpochId, u8, AccountId, H256)>,
+    /// Components whose frozen `MetricSpec` declares the value deterministically
+    /// recomputable from committed evidence (07 §9). Populated from spec
+    /// registration; `recompute_proof` fails closed for anything else.
+    pub recomputable_components: Vec<MetricId>,
 }
 
 impl Oracle {
@@ -310,6 +323,15 @@ impl Oracle {
         );
         ensure!(
             self.find_round(input.component, input.epoch).is_none(),
+            Error::AlreadyFinal
+        );
+        // A settled `(component, epoch)` is final (I-18): a fresh report must
+        // not reopen a round and shadow the stored ComponentValues entry.
+        ensure!(
+            !self
+                .component_values
+                .iter()
+                .any(|((c, e), _)| *c == input.component && *e == input.epoch),
             Error::AlreadyFinal
         );
         ensure!(self.rounds.len() < MAX_ROUNDS, Error::RoundLimit);
@@ -389,6 +411,7 @@ impl Oracle {
     pub fn ack_observed(
         &mut self,
         who: AccountId,
+        now: BlockNumber,
         component: MetricId,
         epoch: EpochId,
         round: u8,
@@ -403,6 +426,10 @@ impl Oracle {
             r.round == round && r.report_hash == report_hash,
             Error::RoundNotFound
         );
+        // Quorum proves observability during the live challenge window (07 §4):
+        // an acknowledgment after the window (or its single extension) closed
+        // must not retro-finalize a value whose challenge surface was gone.
+        ensure!(now <= r.challenge_deadline, Error::WindowClosed);
         ensure!(
             !self
                 .ack_records
@@ -495,16 +522,42 @@ impl Oracle {
         Ok(())
     }
 
+    /// Permissionless mechanical resolution (07 §9): the submitted proof is the
+    /// committed content-addressed evidence payload; the settled value is
+    /// derived from it, never taken from the caller. Only components whose
+    /// frozen spec declares them deterministically recomputable are eligible;
+    /// everything else fails closed and resolves by counter-report or
+    /// adjudication. (Narrowing: the proof must match the round's reporter
+    /// commitment — a reporter whose own committed data contradicts the claimed
+    /// value is resolved against, per the 07 §5 worked example.)
     pub fn recompute_proof(
         &mut self,
         prover: AccountId,
         component: MetricId,
         epoch: EpochId,
-        value: FixedU64,
+        proof: &[u8],
     ) -> Result<(), Error> {
+        ensure!(proof.len() <= ORC_MAX_PROOF_BYTES, Error::ProofTooLarge);
+        ensure!(
+            self.recomputable_components.contains(&component),
+            Error::NotRecomputable
+        );
         let idx = self
             .find_round(component, epoch)
             .ok_or(Error::RoundNotFound)?;
+        ensure!(
+            hash_evidence(proof) == self.rounds[idx].evidence_hash,
+            Error::EvidenceMismatch
+        );
+        let value = recompute_value(proof)?;
+        if value != self.rounds[idx].value {
+            // The committed data disproves the reported value: the reporter's
+            // full bond stack is forfeit per the 07 §5 slashing rule.
+            self.record_reporter_offense(
+                self.rounds[idx].reporter,
+                self.rounds[idx].cumulative_reporter_bond,
+            )?;
+        }
         self.events.push(Event::RecomputeProven {
             component,
             epoch,
@@ -584,6 +637,13 @@ impl Oracle {
             query_id == self.reserve_health.last_query_id,
             Error::UnknownQuery
         );
+        // Each probe outcome counts exactly once toward the consecutive
+        // thresholds: a replayed or post-timeout response for an already
+        // consumed query must not move the fail-static state.
+        ensure!(
+            self.reserve_health.pending_since.is_some(),
+            Error::UnknownQuery
+        );
         self.apply_probe_result(query_id, passed);
         Ok(())
     }
@@ -618,10 +678,26 @@ impl Oracle {
                 r.bond >= round_bond(r.stake_at_risk, r.round)?,
                 Error::BondBelowMinimum
             );
+            // A live round for an already settled key would let a second
+            // settlement shadow the final ComponentValues entry (I-18).
             ensure!(
-                r.challenger.is_some() || r.acks < WT_QUORUM || r.round >= 1,
-                Error::QuorumPending
+                !self
+                    .component_values
+                    .iter()
+                    .any(|((c, e), _)| *c == r.component && *e == r.epoch),
+                Error::AlreadyFinal
             );
+            let recorded_acks = self
+                .ack_records
+                .iter()
+                .filter(|(c, e, round, _, hash)| {
+                    *c == r.component
+                        && *e == r.epoch
+                        && *round == r.round
+                        && *hash == r.report_hash
+                })
+                .count();
+            ensure!(usize::from(r.acks) == recorded_acks, Error::QuorumPending);
         }
         Ok(())
     }
@@ -746,6 +822,36 @@ pub fn round_bond(stake_at_risk: Balance, round: u8) -> Result<Balance, Error> {
 pub fn can_admit_attested_component(delta_s_max_bps: u32) -> bool {
     let coverage_bps = ((1u32 << ORC_ROUNDS) - 1).saturating_mul(ORC_BOND_BPS);
     coverage_bps >= delta_s_max_bps
+}
+
+/// Deterministic content hash for committed evidence payloads (the model
+/// stand-in for the content-addressing of 07 §9, in the same idiom as
+/// [`hash_report`]).
+pub fn hash_evidence(payload: &[u8]) -> H256 {
+    let mut out = [0u8; 32];
+    let len = (payload.len() as u64).to_le_bytes();
+    for (i, b) in len.iter().enumerate() {
+        out[24 + i] ^= *b;
+    }
+    for (i, b) in payload.iter().enumerate() {
+        out[i % 24] ^= b.rotate_left((i / 24 % 8) as u32);
+    }
+    out
+}
+
+/// Deterministic recomputation of a component value from its committed
+/// evidence payload — the stand-in for evaluating the frozen MetricSpec
+/// `formula_ref` (the real engine arrives with the A7 spec registry): the
+/// payload's first eight little-endian bytes are the FixedU64 value, which
+/// must lie on the [0, 1] 1e9 grid per 05 §4.4 determinism rule 1.
+pub fn recompute_value(proof: &[u8]) -> Result<FixedU64, Error> {
+    let bytes: [u8; 8] = proof
+        .get(..8)
+        .and_then(|slice| slice.try_into().ok())
+        .ok_or(Error::BadProof)?;
+    let raw = u64::from_le_bytes(bytes);
+    ensure!(raw <= COMPONENT_VALUE_MAX, Error::BadProof);
+    Ok(FixedU64(raw))
 }
 
 pub fn hash_report(
@@ -907,8 +1013,8 @@ mod tests {
         )
         .unwrap();
         let rh = o.rounds[0].report_hash;
-        o.ack_observed(acct(2), 7, 41, 1, rh).unwrap();
-        o.ack_observed(acct(3), 7, 41, 1, rh).unwrap();
+        o.ack_observed(acct(2), 5, 7, 41, 1, rh).unwrap();
+        o.ack_observed(acct(3), 6, 7, 41, 1, rh).unwrap();
         o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1, FixedU64(50))
             .unwrap();
         assert_eq!(o.component_values[0].1.path, SettlePath::Unchallenged);
@@ -939,7 +1045,13 @@ mod tests {
     #[test]
     fn recompute_and_adjudication_close_rounds_with_origin_check_and_offense_discipline() {
         let mut o = Oracle::default();
+        o.recomputable_components.push(7);
         o.register_reporter(acct(1), 0).unwrap();
+        // The committed evidence payload recomputes to 0.44-style FixedU64(44),
+        // contradicting the reported 62: recompute must settle at 44 and record
+        // a reporter offense.
+        let mut proof = alloc::vec![0u8; 24];
+        proof[..8].copy_from_slice(&44u64.to_le_bytes());
         report!(
             o,
             acct(1),
@@ -948,15 +1060,17 @@ mod tests {
             41,
             3,
             FixedU64(62),
-            h(9),
+            hash_evidence(&proof),
             400_000_000_000,
             10,
             3,
         )
         .unwrap();
         o.challenge(acct(4), 2, 7, 41, FixedU64(44), h(10)).unwrap();
-        o.recompute_proof(acct(5), 7, 41, FixedU64(44)).unwrap();
+        o.recompute_proof(acct(5), 7, 41, &proof).unwrap();
         assert_eq!(o.component_values[0].1.path, SettlePath::Recomputed);
+        assert_eq!(o.component_values[0].1.value, FixedU64(44));
+        assert_eq!(o.reporters[0].1.offenses, 1);
 
         let mut o = Oracle::default();
         o.register_reporter(acct(1), 0).unwrap();
@@ -1015,6 +1129,184 @@ mod tests {
             .events
             .iter()
             .any(|e| matches!(e, Event::ReserveRecovered)));
+    }
+
+    #[test]
+    fn recompute_proof_is_mechanical_and_fail_closed() {
+        let mut o = Oracle::default();
+        o.recomputable_components.push(7);
+        o.register_reporter(acct(1), 0).unwrap();
+        let mut proof = alloc::vec![0u8; 24];
+        proof[..8].copy_from_slice(&62u64.to_le_bytes());
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(62),
+            hash_evidence(&proof),
+            400_000_000_000,
+            10,
+            3,
+        )
+        .unwrap();
+        // Component not declared recomputable in the frozen spec: fail closed.
+        assert_eq!(
+            o.recompute_proof(acct(5), 9, 41, &proof),
+            Err(Error::NotRecomputable)
+        );
+        // Oversized proof.
+        assert_eq!(
+            o.recompute_proof(acct(5), 7, 41, &alloc::vec![0u8; ORC_MAX_PROOF_BYTES + 1]),
+            Err(Error::ProofTooLarge)
+        );
+        // Payload that does not match the committed evidence.
+        assert_eq!(
+            o.recompute_proof(acct(5), 7, 41, &alloc::vec![1u8; 24]),
+            Err(Error::EvidenceMismatch)
+        );
+        // Committed payload agreeing with the report settles without offense.
+        o.recompute_proof(acct(5), 7, 41, &proof).unwrap();
+        assert_eq!(o.component_values[0].1.value, FixedU64(62));
+        assert_eq!(o.reporters[0].1.offenses, 0);
+
+        // A committed payload too short to decode, or off the [0,1] 1e9 grid,
+        // is a bad proof even when the hash matches.
+        let mut o = Oracle::default();
+        o.recomputable_components.push(7);
+        o.register_reporter(acct(1), 0).unwrap();
+        let short = alloc::vec![3u8; 4];
+        let mut off_grid = alloc::vec![0u8; 24];
+        off_grid[..8].copy_from_slice(&(COMPONENT_VALUE_MAX + 1).to_le_bytes());
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(62),
+            hash_evidence(&short),
+            400_000_000_000,
+            10,
+            3,
+        )
+        .unwrap();
+        assert_eq!(
+            o.recompute_proof(acct(5), 7, 41, &short),
+            Err(Error::BadProof)
+        );
+        assert_eq!(
+            o.recompute_proof(acct(5), 7, 41, &off_grid),
+            Err(Error::EvidenceMismatch)
+        );
+        assert_eq!(recompute_value(&off_grid), Err(Error::BadProof));
+    }
+
+    #[test]
+    fn late_watchtower_acks_cannot_retro_finalize() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.register_watchtower(acct(2), 0).unwrap();
+        o.register_watchtower(acct(3), 0).unwrap();
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            10,
+            3,
+        )
+        .unwrap();
+        let rh = o.rounds[0].report_hash;
+        let deadline = o.rounds[0].challenge_deadline;
+        // Acknowledgment after the challenge window closed is rejected.
+        assert_eq!(
+            o.ack_observed(acct(2), deadline + 1, 7, 41, 1, rh),
+            Err(Error::WindowClosed)
+        );
+        // The uncranked round then extends rather than finalizing.
+        o.crank_round_close(deadline + 2, 1, FixedU64(50)).unwrap();
+        assert!(matches!(
+            o.events.last(),
+            Some(Event::WindowExtended { .. })
+        ));
+        // Acks inside the live extension window still count toward quorum.
+        let extended_deadline = o.rounds[0].challenge_deadline;
+        o.ack_observed(acct(2), extended_deadline, 7, 41, 1, rh)
+            .unwrap();
+        o.ack_observed(acct(3), extended_deadline, 7, 41, 1, rh)
+            .unwrap();
+        o.crank_round_close(extended_deadline + 1, 1, FixedU64(50))
+            .unwrap();
+        assert_eq!(o.component_values[0].1.path, SettlePath::Unchallenged);
+    }
+
+    #[test]
+    fn settled_components_cannot_be_reopened_by_a_new_report() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            10,
+            3,
+        )
+        .unwrap();
+        o.adjudicate(Origin::OracleResolution, 7, 41, FixedU64(44), false)
+            .unwrap();
+        assert_eq!(o.component_values.len(), 1);
+        assert_eq!(
+            report!(
+                o,
+                acct(1),
+                2,
+                7,
+                41,
+                3,
+                FixedU64(99),
+                h(9),
+                400_000_000_000,
+                10,
+                3,
+            ),
+            Err(Error::AlreadyFinal)
+        );
+        assert_eq!(o.component_values.len(), 1);
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn reserve_probe_results_count_once() {
+        let mut o = Oracle::default();
+        assert_eq!(o.crank_reserve_probe(RES_PROBE_INTERVAL), Ok(1));
+        o.reserve_probe_result(1, false).unwrap();
+        // Replaying the consumed query must not add a second consecutive fail.
+        assert_eq!(o.reserve_probe_result(1, false), Err(Error::UnknownQuery));
+        assert!(!o.reserve_health.unhealthy);
+        assert_eq!(o.reserve_health.consecutive_fails, 1);
+        // A response landing after the timeout already consumed the query is
+        // rejected too.
+        assert_eq!(o.crank_reserve_probe(RES_PROBE_INTERVAL * 2), Ok(2));
+        o.crank_probe_timeout(RES_PROBE_INTERVAL * 2 + RES_PROBE_TIMEOUT)
+            .unwrap();
+        assert!(o.reserve_health.unhealthy);
+        assert_eq!(o.reserve_probe_result(2, true), Err(Error::UnknownQuery));
+        assert_eq!(o.reserve_health.consecutive_passes, 0);
     }
 
     #[test]

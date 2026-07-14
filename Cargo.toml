@@ -1,6 +1,19 @@
 [workspace]
 resolver = "2"
-members = ["crates/futarchy-fixed", "crates/futarchy-primitives", "pallets/constitution", "pallets/conditional-ledger", "pallets/market", "pallets/origins", "pallets/oracle", "pallets/registry", "pallets/welfare"]
+members = [
+  "crates/futarchy-fixed",
+  "crates/futarchy-primitives",
+  "pallets/constitution",
+  "pallets/conditional-ledger",
+  "pallets/market",
+  "pallets/origins",
+  "pallets/oracle",
+  "pallets/registry",
+  "pallets/futarchy-treasury",
+  "pallets/guardian",
+  "pallets/attestor",
+  "pallets/welfare",
+]
 
 [workspace.package]
 edition = "2021"
