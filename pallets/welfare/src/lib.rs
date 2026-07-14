@@ -136,6 +136,7 @@ pub enum Error {
     ValueOutOfRange,
     MissingComponent,
     DuplicateComponent,
+    DuplicateSnapshot,
     ArithmeticOverflow,
     TryStateViolation,
 }
@@ -247,6 +248,13 @@ impl WelfareState {
             components.len() <= MAX_COMPONENTS_PER_SPEC,
             Error::TooManyComponents
         );
+        ensure!(incident_multiplier.0 <= ONE, Error::ValueOutOfRange);
+        ensure!(
+            self.snapshots
+                .iter()
+                .all(|s| s.epoch != epoch || s.spec_version != spec_version),
+            Error::DuplicateSnapshot
+        );
         let specs = self.spec(spec_version)?.to_vec();
         let pillars = compute_pillars(&specs, &components, incident_multiplier)?;
         let welfare = compute_welfare(pillars.s, pillars.c_settlement, pillars.p, pillars.a)?;
@@ -280,9 +288,9 @@ impl WelfareState {
     ) -> Result<GateBreachFlags, Error> {
         ensure!(day < 64, Error::ValueOutOfRange);
         let specs = self.spec(spec_version)?.to_vec();
-        let pillars = compute_pillars(&specs, &components, FixedU64(ONE))?;
-        let s_breach = pillars.s.0 < THETA_S_LO.0;
-        let c_breach = pillars.c_daily.0 < THETA_C_LO.0;
+        let (s_daily, c_daily) = compute_daily_gates(&specs, &components)?;
+        let s_breach = s_daily.0 < THETA_S_LO.0;
+        let c_breach = c_daily.0 < THETA_C_LO.0;
         let idx = self.gate_flags.iter().position(|(e, _)| *e == epoch);
         let mut flags = idx
             .map(|i| self.gate_flags[i].1)
@@ -415,7 +423,6 @@ struct Pillars {
     s: FixedU64,
     c_onchain: FixedU64,
     c_attested: FixedU64,
-    c_daily: FixedU64,
     c_settlement: FixedU64,
     p: FixedU64,
     a: FixedU64,
@@ -433,7 +440,6 @@ fn compute_pillars(
             Ok(FixedU64(acc.0.min(value_for(m.id, components)?.0)))
         })?;
     let c_onchain = weighted_geo(specs, components, Pillar::COnchain, true)?;
-    let c_daily = c_onchain;
     let c_attested_geo = weighted_geo(specs, components, Pillar::CAttested, false)?;
     let c_attested = mul_down(incident, c_attested_geo)?;
     let c_settlement = mul_down(c_onchain, c_attested)?;
@@ -443,11 +449,24 @@ fn compute_pillars(
         s,
         c_onchain,
         c_attested,
-        c_daily,
         c_settlement,
         p,
         a,
     })
+}
+
+fn compute_daily_gates(
+    specs: &[MetricSpec],
+    components: &[ComponentValue],
+) -> Result<(FixedU64, FixedU64), Error> {
+    let s = specs
+        .iter()
+        .filter(|m| m.pillar == Pillar::S)
+        .try_fold(FixedU64(ONE), |acc, m| {
+            Ok(FixedU64(acc.0.min(value_for(m.id, components)?.0)))
+        })?;
+    let c_onchain = weighted_geo(specs, components, Pillar::COnchain, true)?;
+    Ok((s, c_onchain))
 }
 
 fn weighted_geo(
@@ -639,7 +658,7 @@ mod tests {
         assert_eq!(w.register_metric_spec(0, 1, default_specs(1)), Ok(()));
     }
     #[test]
-    fn daily_gate_uses_only_onchain_c_not_attested_incident() {
+    fn daily_gate_uses_only_s_and_onchain_c_components() {
         let mut w = WelfareState::new();
         w.register_metric_spec(0, 1, default_specs(1)).unwrap();
         let flags = w
@@ -656,19 +675,46 @@ mod tests {
                         id: 2,
                         value: FixedU64(ONE),
                     },
-                    ComponentValue {
-                        id: 3,
-                        value: FixedU64(ONE),
-                    },
-                    ComponentValue {
-                        id: 4,
-                        value: FixedU64(ONE),
-                    },
                 ],
             )
             .unwrap();
+        assert!(!flags.s_breached);
         assert!(!flags.c_breached);
     }
+    #[test]
+    fn snapshot_rejects_duplicate_epoch_spec_and_bad_incident_multiplier() {
+        let mut w = WelfareState::new();
+        w.register_metric_spec(0, 1, default_specs(1)).unwrap();
+        let comps = vec![
+            ComponentValue {
+                id: 1,
+                value: FixedU64(ONE),
+            },
+            ComponentValue {
+                id: 2,
+                value: FixedU64(ONE),
+            },
+            ComponentValue {
+                id: 3,
+                value: FixedU64(ONE),
+            },
+            ComponentValue {
+                id: 4,
+                value: FixedU64(ONE),
+            },
+        ];
+        assert_eq!(
+            w.record_snapshot(7, 1, comps.clone(), FixedU64(ONE + 1)),
+            Err(Error::ValueOutOfRange)
+        );
+        w.record_snapshot(7, 1, comps.clone(), FixedU64(ONE))
+            .unwrap();
+        assert_eq!(
+            w.record_snapshot(7, 1, comps, FixedU64(ONE)),
+            Err(Error::DuplicateSnapshot)
+        );
+    }
+
     #[test]
     fn snapshots_and_settlement_bind_creation_time_spec_version() {
         let mut w = WelfareState::new();
