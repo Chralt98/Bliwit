@@ -22,6 +22,7 @@ pub const EPSILON: FixedU64 = FixedU64(1);
 pub const EPSILON_PILLAR: FixedU64 = FixedU64(10_000_000);
 pub const MAX_METRIC_SPECS: usize = 16;
 pub const MAX_SNAPSHOTS: usize = 20;
+pub const MAX_GATE_FLAGS: usize = MAX_SNAPSHOTS;
 pub const MAX_COMPONENTS_PER_SPEC: usize = 16;
 pub const HISTORY_PRIORS: usize = 12;
 pub const THETA_S_LO: FixedU64 = FixedU64(900_000_000);
@@ -128,6 +129,7 @@ pub enum Error {
     TooManyMetricSpecs,
     TooManySnapshots,
     TooManyComponents,
+    TooManyGateFlags,
     DuplicateSpecVersion,
     SpecNotFound,
     BadActivationEpoch,
@@ -307,6 +309,10 @@ impl WelfareState {
         if let Some(i) = idx {
             self.gate_flags[i].1 = flags;
         } else {
+            ensure!(
+                self.gate_flags.len() < MAX_GATE_FLAGS,
+                Error::TooManyGateFlags
+            );
             self.gate_flags.push((epoch, flags));
         }
         self.events.push(Event::GateBreachRecorded {
@@ -374,16 +380,41 @@ impl WelfareState {
 
     pub fn try_state(&self) -> Result<(), Error> {
         ensure!(
-            self.specs.len() <= MAX_METRIC_SPECS && self.snapshots.len() <= MAX_SNAPSHOTS,
+            self.specs.len() <= MAX_METRIC_SPECS
+                && self.snapshots.len() <= MAX_SNAPSHOTS
+                && self.gate_flags.len() <= MAX_GATE_FLAGS,
             Error::TryStateViolation
         );
-        for (_, specs) in &self.specs {
+        for (index, (version, specs)) in self.specs.iter().enumerate() {
             ensure!(
-                specs.len() <= MAX_COMPONENTS_PER_SPEC,
+                self.specs[..index].iter().all(|(seen, _)| seen != version),
                 Error::TryStateViolation
             );
+            ensure!(
+                !specs.is_empty() && specs.len() <= MAX_COMPONENTS_PER_SPEC,
+                Error::TryStateViolation
+            );
+            let mut prev = None;
+            for spec in specs {
+                ensure!(
+                    spec.version == *version
+                        && spec.weight.0 <= ONE
+                        && spec.epsilon_floor.0 <= ONE
+                        && spec.sanity_min.0 <= spec.sanity_max.0
+                        && spec.sanity_max.0 <= ONE
+                        && prev.replace(spec.id).is_none_or(|p| p < spec.id),
+                    Error::TryStateViolation
+                );
+            }
         }
-        for s in &self.snapshots {
+        for (index, s) in self.snapshots.iter().enumerate() {
+            ensure!(
+                self.snapshots[..index]
+                    .iter()
+                    .all(|seen| seen.epoch != s.epoch || seen.spec_version != s.spec_version)
+                    && s.components.len() <= MAX_COMPONENTS_PER_SPEC,
+                Error::TryStateViolation
+            );
             ensure!(
                 [
                     s.s_pillar,
@@ -397,6 +428,15 @@ impl WelfareState {
                 ]
                 .iter()
                 .all(|v| v.0 <= ONE),
+                Error::TryStateViolation
+            );
+        }
+        for (index, (epoch, flags)) in self.gate_flags.iter().enumerate() {
+            ensure!(
+                self.gate_flags[..index]
+                    .iter()
+                    .all(|(seen, _)| seen != epoch)
+                    && flags.day_bitmap.len() == 2,
                 Error::TryStateViolation
             );
         }
@@ -681,6 +721,31 @@ mod tests {
         assert!(!flags.s_breached);
         assert!(!flags.c_breached);
     }
+    #[test]
+    fn try_state_rejects_corrupt_duplicate_storage() {
+        let mut w = WelfareState::new();
+        w.specs.push((1, default_specs(1)));
+        w.specs.push((1, default_specs(1)));
+        assert_eq!(w.try_state(), Err(Error::TryStateViolation));
+
+        let mut w = WelfareState::new();
+        w.snapshots.push(Snapshot {
+            epoch: 1,
+            spec_version: 1,
+            s_pillar: FixedU64(ONE),
+            c_onchain: FixedU64(ONE),
+            c_attested: FixedU64(ONE),
+            p_pillar: FixedU64(ONE),
+            a_pillar: FixedU64(ONE),
+            gate_s: FixedU64(ONE),
+            gate_c: FixedU64(ONE),
+            welfare: FixedU64(ONE),
+            components: Vec::new(),
+        });
+        w.snapshots.push(w.snapshots[0].clone());
+        assert_eq!(w.try_state(), Err(Error::TryStateViolation));
+    }
+
     #[test]
     fn snapshot_rejects_duplicate_epoch_spec_and_bad_incident_multiplier() {
         let mut w = WelfareState::new();
