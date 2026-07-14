@@ -1,0 +1,24 @@
+[package]
+name = "pallet-epoch"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
+pallet-conditional-ledger = { path = "../conditional-ledger", default-features = false }
+pallet-welfare = { path = "../welfare", default-features = false }
+parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "max-encoded-len"] }
+scale-info = { version = "2.11.6", default-features = false, features = ["derive"] }
+
+[features]
+default = ["std"]
+std = [
+  "futarchy-primitives/std",
+  "pallet-conditional-ledger/std",
+  "pallet-welfare/std",
+  "parity-scale-codec/std",
+  "scale-info/std",
+]
+runtime-benchmarks = []

@@ -13,6 +13,7 @@ members = [
   "pallets/guardian",
   "pallets/attestor",
   "pallets/welfare",
+  "pallets/epoch",
 ]
 
 [workspace.package]

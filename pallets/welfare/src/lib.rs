@@ -351,16 +351,7 @@ impl WelfareState {
         reserve_flag: bool,
     ) -> Result<WelfareView, Error> {
         let s = self.snapshot(epoch, spec_version)?;
-        let flags = self
-            .gate_flags
-            .iter()
-            .find(|(e, _)| *e == epoch)
-            .map(|(_, f)| *f)
-            .unwrap_or(GateBreachFlags {
-                s_breached: false,
-                c_breached: false,
-                day_bitmap: [0; 2],
-            });
+        let flags = self.gate_breach(epoch);
         Ok(WelfareView {
             epoch,
             spec_version,
@@ -376,6 +367,22 @@ impl WelfareState {
             c_breached: flags.c_breached,
             reserve_flag,
         })
+    }
+
+    /// Daily gate-breach flags recorded for `epoch` (05 §4.7). Absent epochs read
+    /// as unbreached — the deterministic default before any daily counter lands.
+    /// This is the sole source for gate-market settlement (05 §4.7, §6): no
+    /// attested value can flip a gate flag.
+    pub fn gate_breach(&self, epoch: EpochId) -> GateBreachFlags {
+        self.gate_flags
+            .iter()
+            .find(|(e, _)| *e == epoch)
+            .map(|(_, f)| *f)
+            .unwrap_or(GateBreachFlags {
+                s_breached: false,
+                c_breached: false,
+                day_bitmap: [0; 2],
+            })
     }
 
     pub fn try_state(&self) -> Result<(), Error> {

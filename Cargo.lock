@@ -173,6 +173,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-epoch"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "pallet-conditional-ledger",
+ "pallet-welfare",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
 name = "pallet-futarchy-treasury"
 version = "0.1.0"
 dependencies = [
