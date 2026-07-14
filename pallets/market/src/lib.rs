@@ -68,12 +68,13 @@ pub struct MarketBook<AccountId> {
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
-pub enum Event {
+pub enum Event<AccountId> {
     MarketCreated(MarketId),
     BaselineMarketMapped(EpochId, MarketId),
     Seeded(MarketId, Balance),
     Traded {
         market: MarketId,
+        who: AccountId,
         side: TradeSide,
         amount: Balance,
         cost: Balance,
@@ -107,7 +108,7 @@ pub enum Error {
 pub struct MarketState<AccountId> {
     pub markets: Vec<MarketBook<AccountId>>,
     pub baseline_market_of: Vec<(EpochId, MarketId)>,
-    pub events: Vec<Event>,
+    pub events: Vec<Event<AccountId>>,
 }
 
 impl<AccountId: Clone + Eq> MarketState<AccountId> {
@@ -276,7 +277,6 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
                 &m.account,
                 amount,
                 cost.checked_add(fee).ok_or(Error::ArithmeticOverflow)?,
-                cost,
             )?,
         }
         match side {
@@ -292,6 +292,7 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
         }
         self.events.push(Event::Traded {
             market: id,
+            who: who.clone(),
             side: if matches!(side, ScalarSide::Long) {
                 TradeSide::BuyLong
             } else {
@@ -360,7 +361,7 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
                 fee,
             )?,
             BookKind::Baseline { epoch } => {
-                sell_baseline(ledger, epoch, side, who, &m.account, amount, proceeds)?
+                sell_baseline(ledger, epoch, side, who, &m.account, amount, net)?
             }
         }
         match side {
@@ -376,6 +377,7 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
         }
         self.events.push(Event::Traded {
             market: id,
+            who: who.clone(),
             side: if matches!(side, ScalarSide::Long) {
                 TradeSide::SellLong
             } else {
@@ -538,16 +540,18 @@ fn buy_baseline<A: Clone + Eq>(
     book: &A,
     amount: Balance,
     total: Balance,
-    cost: Balance,
 ) -> Result<(), Error> {
+    // 04 §6.1 Baseline degenerate wrapper: cost + fee pays in directly and
+    // there is no mirror credit - the buyer must not retain a fee-sized
+    // set pair, so both full legs move to the book.
     ledger
         .do_split_baseline(epoch, who, total)
         .map_err(|_| Error::Ledger)?;
     ledger
-        .do_transfer(baseline(epoch, ScalarSide::Long), who, book, cost)
+        .do_transfer(baseline(epoch, ScalarSide::Long), who, book, total)
         .map_err(|_| Error::Ledger)?;
     ledger
-        .do_transfer(baseline(epoch, ScalarSide::Short), who, book, cost)
+        .do_transfer(baseline(epoch, ScalarSide::Short), who, book, total)
         .map_err(|_| Error::Ledger)?;
     ledger
         .do_transfer(baseline(epoch, side), book, who, amount)
@@ -588,6 +592,7 @@ fn sell_branch<A: Clone + Eq>(
             net,
         )
         .map_err(|_| Error::Ledger)?;
+    merge_net_with_mirror(ledger, pid, branch, who, net)?;
     Ok(())
 }
 fn sell_gate<A: Clone + Eq>(
@@ -630,6 +635,33 @@ fn sell_gate<A: Clone + Eq>(
             net,
         )
         .map_err(|_| Error::Ledger)?;
+    merge_net_with_mirror(ledger, pid, branch, who, net)?;
+    Ok(())
+}
+
+/// 04 §6.1 sell wrapper, final step: automatically merge the net
+/// target-branch proceeds with the seller's mirror-branch branch-USDC
+/// balance - up to min(net, mirror balance) - into USDC; any unmatched
+/// remainder stays with the seller as target-branch branch-USDC.
+fn merge_net_with_mirror<A: Clone + Eq>(
+    ledger: &mut LedgerState<A>,
+    pid: ProposalId,
+    branch: Branch,
+    who: &A,
+    net: Balance,
+) -> Result<(), Error> {
+    let mirror = other(branch);
+    let mirror_balance = ledger
+        .positions
+        .iter()
+        .find(|p| p.id == position(pid, mirror, PositionKind::BranchUsdc) && &p.owner == who)
+        .map_or(0, |p| p.balance);
+    let merge_amount = net.min(mirror_balance);
+    if merge_amount > 0 {
+        ledger
+            .do_merge(pid, who, merge_amount)
+            .map_err(|_| Error::Ledger)?;
+    }
     Ok(())
 }
 fn sell_baseline<A: Clone + Eq>(
@@ -639,8 +671,11 @@ fn sell_baseline<A: Clone + Eq>(
     who: &A,
     book: &A,
     amount: Balance,
-    proceeds: Balance,
+    net: Balance,
 ) -> Result<(), Error> {
+    // The 30 bps fee is withheld from the payout (04 §6.1): the seller
+    // receives net-of-fee value; the withheld remainder stays with the book
+    // against the fees_accrued meter.
     ledger
         .do_transfer(baseline(epoch, side), who, book, amount)
         .map_err(|_| Error::Ledger)?;
@@ -648,7 +683,7 @@ fn sell_baseline<A: Clone + Eq>(
         .do_merge_baseline(epoch, book, amount)
         .map_err(|_| Error::Ledger)?;
     ledger
-        .do_split_baseline(epoch, who, proceeds)
+        .do_split_baseline(epoch, who, net)
         .map_err(|_| Error::Ledger)?;
     Ok(())
 }
@@ -656,7 +691,7 @@ fn sell_baseline<A: Clone + Eq>(
 fn observe_if_due<A: Clone + Eq>(
     m: &mut MarketBook<A>,
     block: u64,
-) -> Result<Option<Event>, Error> {
+) -> Result<Option<Event<A>>, Error> {
     if block < m.last_observed_block.saturating_add(OBS_INTERVAL) {
         return Ok(None);
     }
@@ -666,8 +701,11 @@ fn observe_if_due<A: Clone + Eq>(
     }
     let prev = m.last_quote_1e9.0;
     let old = m.last_observation_1e9.0;
-    let low = old.saturating_mul(PRICE_ONE_1E9 - KAPPA_1E9) / PRICE_ONE_1E9;
-    let high = old.saturating_mul(PRICE_ONE_1E9 + KAPPA_1E9) / PRICE_ONE_1E9;
+    // 04 §7: over k missed observation intervals the slew clamp widens to
+    // (1±kappa)^k; flooring the interval count is the conservative reading.
+    let intervals = (elapsed / OBS_INTERVAL).max(1);
+    let low = mul_1e9(old, pow_1e9(PRICE_ONE_1E9 - KAPPA_1E9, intervals));
+    let high = mul_1e9(old, pow_1e9(PRICE_ONE_1E9 + KAPPA_1E9, intervals));
     let capped = prev.clamp(low, high);
     m.cumulative_price_blocks = add(
         m.cumulative_price_blocks,
@@ -681,6 +719,29 @@ fn observe_if_due<A: Clone + Eq>(
         market: m.id,
         o_t: FixedU64(capped),
     }))
+}
+/// Saturating 1e9-scale multiply; results are only consumed clamped to the
+/// price range, so capping intermediates at 2e9 keeps every product exact
+/// where it matters and overflow-free.
+fn mul_1e9(a: u64, b: u64) -> u64 {
+    ((u128::from(a) * u128::from(b)) / u128::from(PRICE_ONE_1E9)).min(u128::from(u64::MAX)) as u64
+}
+/// 1e9-scale integer power by squaring, saturating at 2e9 (any factor at or
+/// above 2x already admits the full [0, 1] price band after one clamp).
+fn pow_1e9(base: u64, mut exp: u64) -> u64 {
+    const CAP: u64 = 2 * PRICE_ONE_1E9;
+    let mut result = PRICE_ONE_1E9;
+    let mut factor = base.min(CAP);
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = mul_1e9(result, factor).min(CAP);
+        }
+        exp >>= 1;
+        if exp > 0 {
+            factor = mul_1e9(factor, factor).min(CAP);
+        }
+    }
+    result
 }
 fn price_1e9<A>(m: &MarketBook<A>) -> Result<FixedU64, Error> {
     let p = lmsr_price_long(fx(m.q_long)?, fx(m.q_short)?, fx(m.b)?).map_err(map_fixed)?;
@@ -869,6 +930,295 @@ mod tests {
         ledger.try_state().unwrap();
         m.try_state().unwrap();
     }
+    #[test]
+    fn traded_events_carry_the_trader() {
+        // Codex review, PR #17 (P1): 02 §6 freezes
+        // Traded { market, who, side, amount, cost, p_after }.
+        let mut ledger = LedgerState::new();
+        ledger.create_vault(1, 0).unwrap();
+        let mut m = MarketState::new();
+        m.create_market(
+            7,
+            BookKind::Decision {
+                proposal: 1,
+                branch: Branch::Accept,
+            },
+            a(9),
+            a(8),
+            B,
+        )
+        .unwrap();
+        m.seed(&mut ledger, 7, &a(1)).unwrap();
+        m.buy(
+            &mut ledger,
+            7,
+            &a(2),
+            ScalarSide::Long,
+            1_000_000_000,
+            600_000_000,
+            10,
+        )
+        .unwrap();
+        assert!(matches!(
+            m.events.last().unwrap(),
+            Event::Traded { who, side: TradeSide::BuyLong, .. } if *who == a(2)
+        ));
+    }
+
+    #[test]
+    fn decision_sell_round_trip_releases_usdc_via_mirror_merge() {
+        // Codex review, PR #17 (P1): after a buy-then-sell round trip the
+        // wrapper must merge the net target-branch proceeds with the seller's
+        // mirror-branch balance into USDC, not strand them as branch-USDC.
+        let mut ledger = LedgerState::new();
+        ledger.create_vault(1, 0).unwrap();
+        let mut m = MarketState::new();
+        m.create_market(
+            7,
+            BookKind::Decision {
+                proposal: 1,
+                branch: Branch::Accept,
+            },
+            a(9),
+            a(8),
+            B,
+        )
+        .unwrap();
+        m.seed(&mut ledger, 7, &a(1)).unwrap();
+        let trader = a(2);
+        m.buy(
+            &mut ledger,
+            7,
+            &trader,
+            ScalarSide::Long,
+            1_000_000_000,
+            600_000_000,
+            10,
+        )
+        .unwrap();
+        let escrow_before_sell = ledger.vaults[0].info.escrowed;
+        let mirror_before = balance_of(
+            &ledger,
+            position(1, Branch::Reject, PositionKind::BranchUsdc),
+            &trader,
+        );
+        assert!(mirror_before > 0);
+        m.sell(
+            &mut ledger,
+            7,
+            &trader,
+            ScalarSide::Long,
+            1_000_000_000,
+            1,
+            20,
+        )
+        .unwrap();
+        // All net target-branch proceeds were merged against the mirror leg:
+        // nothing strands as Accept-branch branch-USDC...
+        assert_eq!(
+            balance_of(
+                &ledger,
+                position(1, Branch::Accept, PositionKind::BranchUsdc),
+                &trader
+            ),
+            0
+        );
+        // ...the mirror balance shrank by the merged net, and the vault
+        // escrow released that USDC to the seller.
+        let mirror_after = balance_of(
+            &ledger,
+            position(1, Branch::Reject, PositionKind::BranchUsdc),
+            &trader,
+        );
+        let released = escrow_before_sell - ledger.vaults[0].info.escrowed;
+        assert!(released > 0);
+        assert_eq!(mirror_before - mirror_after, released);
+        ledger.try_state().unwrap();
+        m.try_state().unwrap();
+    }
+
+    #[test]
+    fn baseline_fees_are_withheld_on_both_sides() {
+        // Codex review, PR #17 (P2): the buyer must not retain a fee-sized
+        // complete pair, and sells must pay out net of the 30 bps fee.
+        let mut ledger = LedgerState::new();
+        ledger.create_baseline_vault(3).unwrap();
+        let mut m = MarketState::new();
+        m.create_market(11, BookKind::Baseline { epoch: 3 }, a(9), a(8), B)
+            .unwrap();
+        m.seed(&mut ledger, 11, &a(1)).unwrap();
+        let trader = a(2);
+        m.buy(
+            &mut ledger,
+            11,
+            &trader,
+            ScalarSide::Long,
+            1_000_000_000,
+            600_000_000,
+            10,
+        )
+        .unwrap();
+        // Exactly the bought LONG leg - no residual SHORT (fee pair) with the
+        // buyer.
+        assert_eq!(
+            balance_of(&ledger, baseline(3, ScalarSide::Long), &trader),
+            1_000_000_000
+        );
+        assert_eq!(
+            balance_of(&ledger, baseline(3, ScalarSide::Short), &trader),
+            0
+        );
+        let buy_fee = m.markets[0].fees_accrued;
+        assert!(buy_fee > 0);
+        m.sell(
+            &mut ledger,
+            11,
+            &trader,
+            ScalarSide::Long,
+            1_000_000_000,
+            1,
+            20,
+        )
+        .unwrap();
+        // The seller's payout pair equals proceeds net of fee: total fees
+        // accrued grew by the sell fee and the payout reflects it.
+        assert!(m.markets[0].fees_accrued > buy_fee);
+        let payout_pair = balance_of(&ledger, baseline(3, ScalarSide::Long), &trader);
+        assert_eq!(
+            payout_pair,
+            balance_of(&ledger, baseline(3, ScalarSide::Short), &trader)
+        );
+        assert!(payout_pair > 0);
+        ledger.try_state().unwrap();
+        m.try_state().unwrap();
+    }
+
+    #[test]
+    fn minimum_trades_with_dust_fees_are_admissible() {
+        // Codex review, PR #17 (P2): a valid 1 USDC minimum trade near p=0.5
+        // carries a 30 bps fee below MinTransfer; the wrapper's exact
+        // MarketAuthority moves must still route it (03 R-2/R-3).
+        let mut ledger = LedgerState::new();
+        ledger.create_vault(1, 0).unwrap();
+        let mut m = MarketState::new();
+        m.create_market(
+            7,
+            BookKind::Decision {
+                proposal: 1,
+                branch: Branch::Accept,
+            },
+            a(9),
+            a(8),
+            B,
+        )
+        .unwrap();
+        m.seed(&mut ledger, 7, &a(1)).unwrap();
+        m.buy(
+            &mut ledger,
+            7,
+            &a(2),
+            ScalarSide::Long,
+            1_000_000,
+            600_000,
+            10,
+        )
+        .unwrap();
+        let fee = m.markets[0].fees_accrued;
+        assert!(fee > 0 && fee < 10_000, "fee {fee} should be dust-sized");
+        // The fee pair actually reached the fees account.
+        assert_eq!(
+            balance_of(
+                &ledger,
+                position(1, Branch::Accept, PositionKind::BranchUsdc),
+                &a(8)
+            ),
+            fee
+        );
+        assert_eq!(
+            balance_of(
+                &ledger,
+                position(1, Branch::Reject, PositionKind::BranchUsdc),
+                &a(8)
+            ),
+            fee
+        );
+        ledger.try_state().unwrap();
+    }
+
+    #[test]
+    fn twap_clamp_widens_over_missed_intervals() {
+        // Codex review, PR #17 (P2): 04 §7 widens the clamp to (1±kappa)^k
+        // over k missed observation intervals.
+        assert_eq!(pow_1e9(PRICE_ONE_1E9, 100), PRICE_ONE_1E9);
+        let up = pow_1e9(PRICE_ONE_1E9 + KAPPA_1E9, 10);
+        assert!((1_051_100_000..1_051_200_000).contains(&up), "up {up}");
+        let down = pow_1e9(PRICE_ONE_1E9 - KAPPA_1E9, 10);
+        assert!((951_100_000..951_200_000).contains(&down), "down {down}");
+        // End to end: a quote jump after ten missed intervals records at the
+        // widened bound rather than one kappa step.
+        let mut ledger = LedgerState::new();
+        ledger.create_vault(1, 0).unwrap();
+        let mut m = MarketState::new();
+        m.create_market(
+            7,
+            BookKind::Decision {
+                proposal: 1,
+                branch: Branch::Accept,
+            },
+            a(9),
+            a(8),
+            B,
+        )
+        .unwrap();
+        m.seed(&mut ledger, 7, &a(1)).unwrap();
+        // Move the quote sharply at block 10 (the observation there records
+        // the pre-trade 0.5 quote per 04 §7), then trade again after ten
+        // missed intervals so the stored post-move quote is observed.
+        m.buy(
+            &mut ledger,
+            7,
+            &a(2),
+            ScalarSide::Long,
+            2_500_000_000,
+            2_000_000_000,
+            10,
+        )
+        .unwrap();
+        m.buy(
+            &mut ledger,
+            7,
+            &a(2),
+            ScalarSide::Long,
+            1_000_000,
+            600_000,
+            110,
+        )
+        .unwrap();
+        let observed = m.markets[0].last_observation_1e9.0;
+        let single_step = mul_1e9(500_000_000, PRICE_ONE_1E9 + KAPPA_1E9);
+        let widened = mul_1e9(500_000_000, pow_1e9(PRICE_ONE_1E9 + KAPPA_1E9, 10));
+        assert!(
+            observed > single_step,
+            "observed {observed} vs single-step {single_step}"
+        );
+        assert!(
+            observed <= widened,
+            "observed {observed} vs widened {widened}"
+        );
+    }
+
+    fn balance_of(
+        ledger: &LedgerState<[u8; 32]>,
+        id: futarchy_primitives::PositionId,
+        who: &[u8; 32],
+    ) -> Balance {
+        ledger
+            .positions
+            .iter()
+            .find(|p| p.id == id && &p.owner == who)
+            .map_or(0, |p| p.balance)
+    }
+
     #[test]
     fn slippage_phase_and_trade_bounds_are_enforced() {
         let mut ledger = LedgerState::new();

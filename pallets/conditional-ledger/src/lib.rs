@@ -665,7 +665,33 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         a: Balance,
     ) -> Result<(), Error> {
         ensure_signed_or_market(origin)?;
-        ensure!(a >= kernel::MIN_TRANSFER_USDC, Error::AmountTooSmall);
+        ensure!(a > 0, Error::AmountTooSmall);
+        // 03 §R-2 is two rules about deposit-backed position hygiene, not a
+        // blanket amount minimum: (a) positions cannot be created below
+        // MinTransfer, (b) a Signed transfer leaving a sub-MinTransfer
+        // remainder moves the whole balance. Market-wrapper moves
+        // (MarketAuthority) are exact by construction (04 §6.1 routes
+        // sub-MinTransfer fee legs through these same ordinary ops - 03 §R-3)
+        // and protocol accounts hold no deposits, so neither rule applies to
+        // them.
+        let mut a = a;
+        if matches!(origin, LedgerOrigin::Signed) {
+            let dest_exists = self.positions.iter().any(|p| p.id == id && &p.owner == to);
+            if !dest_exists && !self.protocol_accounts.contains(to) {
+                ensure!(a >= kernel::MIN_TRANSFER_USDC, Error::AmountTooSmall);
+            }
+            if !self.protocol_accounts.contains(from) {
+                let balance = self
+                    .positions
+                    .iter()
+                    .find(|p| p.id == id && &p.owner == from)
+                    .map_or(0, |p| p.balance);
+                let remainder = balance.saturating_sub(a);
+                if remainder > 0 && remainder < kernel::MIN_TRANSFER_USDC {
+                    a = balance;
+                }
+            }
+        }
         self.ensure_position_live(id)?;
         self.burn(id, from, a)?;
         self.mint(id, to, a)?;
