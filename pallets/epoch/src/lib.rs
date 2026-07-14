@@ -166,6 +166,10 @@ pub enum Event {
     RerunScheduled(ProposalId),
     RerunOpened(ProposalId),
     MandateExpired(ProposalId),
+    ExecutionFailed {
+        pid: ProposalId,
+        reason: RejectReason,
+    },
     MeasurementStarted {
         cohort: EpochId,
     },
@@ -558,6 +562,42 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             .map_err(|_| Error::Ledger)?;
         self.start_measurement(pid)
     }
+    /// T18 (05 §2.1): `execute` dispatched but the payload atomically reverted.
+    /// The proposal advances `Queued → FailedExecuted`; the ACCEPT branch stays
+    /// live (no vault resolve here) so a retry (T23) can still succeed within the
+    /// 72 h window, and `DecisionRecord` carries `PayloadReverted`. Bond-slash
+    /// accounting (50%, proposer owns executability) is owned by 06/08.
+    pub fn mark_failed_executed(&mut self, origin: Origin, pid: ProposalId) -> Result<(), Error> {
+        ensure!(matches!(origin, Origin::ExecutionGuard), Error::BadOrigin);
+        let p = self.proposal_mut(pid)?;
+        ensure!(p.state == ProposalState::Queued, Error::BadState);
+        p.state = ProposalState::FailedExecuted;
+        self.events.push(Event::ExecutionFailed {
+            pid,
+            reason: RejectReason::PayloadReverted,
+        });
+        Ok(())
+    }
+    /// T22 (05 §2.1): the 72 h retry window opened at T18 is exhausted. The
+    /// proposal is measured as **executed-with-failure** — vault `resolve(Accept)`
+    /// (the adopted world, including the failure's consequences, is what W
+    /// measures) then `FailedExecuted → Measuring`.
+    pub fn retry_exhausted_to_measurement(
+        &mut self,
+        origin: Origin,
+        ledger: &mut LedgerState<AccountId>,
+        pid: ProposalId,
+    ) -> Result<(), Error> {
+        ensure!(matches!(origin, Origin::ExecutionGuard), Error::BadOrigin);
+        ensure!(
+            self.proposal(pid)?.state == ProposalState::FailedExecuted,
+            Error::BadState
+        );
+        ledger
+            .resolve(LedgerOrigin::ResolveAuthority, pid, Branch::Accept)
+            .map_err(|_| Error::Ledger)?;
+        self.start_measurement(pid)
+    }
     pub fn expire_or_stale_queue(
         &mut self,
         origin: Origin,
@@ -572,9 +612,15 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         let p = self.proposal_mut(pid)?;
         ensure!(p.state == ProposalState::Queued, Error::BadState);
         match reason {
-            Some(r @ (RejectReason::StaleQueue | RejectReason::NotRatified)) => {
-                self.reject_to_measurement(ledger, pid, r)
-            }
+            // 09 §1.2(3)/(4)/(5): dispatch-time rejections that carry a live vault
+            // to the REJECT branch (T16/T21). `AttestationMissing` is the §1.2(5)
+            // post-queue revocation case; without it the guard's rejection would
+            // strand the proposal `Queued` in the epoch (BadDecisionInput).
+            Some(
+                r @ (RejectReason::StaleQueue
+                | RejectReason::NotRatified
+                | RejectReason::AttestationMissing),
+            ) => self.reject_to_measurement(ledger, pid, r),
             None => {
                 self.proposal_mut(pid)?.state = ProposalState::Expired;
                 self.events.push(Event::MandateExpired(pid));

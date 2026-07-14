@@ -184,6 +184,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-execution-guard"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "pallet-attestor",
+ "pallet-conditional-ledger",
+ "pallet-epoch",
+ "pallet-guardian",
+ "pallet-origins",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
 name = "pallet-futarchy-treasury"
 version = "0.1.0"
 dependencies = [

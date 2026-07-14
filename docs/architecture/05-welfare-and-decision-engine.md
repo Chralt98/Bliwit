@@ -48,7 +48,7 @@ pub enum RejectReason {
 }
 ```
 
-**Every variant now has exactly one producing site** (B-med: RejectReason). The producer map is normative — an implementation MUST NOT emit a variant from any other site:
+**Every variant has exactly one producing site, with one deliberate exception** (B-med: RejectReason; SQ-3): `AttestationMissing` is produced at **two** sites — `decide()` step 10 at decide time (T10) and the execution guard's dispatch-time re-check (T16) — because a queue-time `AttestationRecord` can be revoked or challenge-upheld *after* queue time, which [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5) and [doc 15](./15-invariants-and-testing.md) I-19 require the guard to catch at `execute`. The producer map is otherwise normative — an implementation MUST NOT emit a variant from any site not listed below:
 
 | Variant | Producer | Transition |
 |---|---|---|
@@ -61,7 +61,7 @@ pub enum RejectReason {
 | `ConstitutionViolation` | `decide()` step 1 (preimage mismatch at decide time) | T10 |
 | `ResourceConflict` | `decide()` step 1 (locks lost) | T10 |
 | `SecuritySizing` | `decide()` step 9 | T10 |
-| `AttestationMissing` | `decide()` step 10 (CODE/META) | T10 |
+| `AttestationMissing` | `decide()` step 10 (CODE/META) at decide time; **and** the execution guard's dispatch-time re-check when the queue-time `AttestationRecord` was revoked/challenge-upheld post-queue ([doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5), [doc 15](./15-invariants-and-testing.md) I-19) | T10, T16 |
 | `RateLimited` | `decide()` step 10 (constitutional meters/spacing) | T10 |
 | `NotRatified` | execution guard: ratification referendum concluded **Failed**, or grace end reached unratified ([doc 06](./06-governance-and-guardians.md) mechanics, [doc 09](./09-execution-upgrades-and-rollout.md) dispatch check) | T16 |
 | `StaleQueue` | execution guard: version-constraint mismatch; meter contention past grace | T16 |
@@ -74,7 +74,7 @@ pub enum RejectReason {
 
 ### 2.1 Transition table (normative; anything absent is impossible and MUST error)
 
-Changes vs. the superseded table (B-12): **T21/T22/T23 added**, **T13 restructured** so a guardian rerun re-enters `Extended` (satisfying `decide()`'s `is_trading_or_extended` precondition), **T24 added** to wire `VetoUpheldByReview`, T16 generalized to carry `NotRatified`, T20 gains its event (X-11f), Emergency triggers deleted (D-7).
+Changes vs. the superseded table (B-12): **T21/T22/T23 added**, **T13 restructured** so a guardian rerun re-enters `Extended` (satisfying `decide()`'s `is_trading_or_extended` precondition), **T24 added** to wire `VetoUpheldByReview`, T16 generalized to carry `NotRatified` (and, per SQ-3, `AttestationMissing` from the guard's dispatch-time re-check), T20 gains its event (X-11f), Emergency triggers deleted (D-7).
 
 | # | From → To | Trigger (call) | Origin | Timing / guard | Deposit / slash | Events |
 |---|---|---|---|---|---|---|
@@ -93,7 +93,7 @@ Changes vs. the superseded table (B-12): **T21/T22/T23 added**, **T13 restructur
 | T13 | Rerun → Extended | `tick` at the next epoch's Seed phase: books **reopen at 2× POL**, hurdle **δ+1 pp**, TWAP accumulators reset, positions intact; sets `extended := true`, `rerun := true`, `decide_at := reopen_block + dec.extension` (3 d) | keeper | next epoch's Seed | 2× POL committed | `RerunOpened` |
 | T14 | Queued → Executed | `execution_guard.execute` | Signed (keeper) | `maturity ≤ now ≤ maturity + grace(class)`; all [doc 09](./09-execution-upgrades-and-rollout.md) dispatch re-validations pass **including ratification Passed for CODE/META (D-5)** | — | `Executed { record }` |
 | T15 | Queued → Expired | `tick` | keeper | grace elapsed with no execute attempt succeeding | bond refunded; then T21 fires | `MandateExpired` |
-| T16 | Queued → Rejected(r) | `tick` / `execute` failure paths; r ∈ { `StaleQueue` (version-constraint mismatch after an intervening upgrade; repeated meter contention past grace), `NotRatified` (ratification referendum concluded Failed, or grace end reached with no Passed referendum) } | keeper | — | refund; then T21 fires | `ProposalRejected(r)` |
+| T16 | Queued → Rejected(r) | `tick` / `execute` failure paths; r ∈ { `StaleQueue` (version-constraint mismatch after an intervening upgrade; repeated meter contention past grace), `NotRatified` (ratification referendum concluded Failed, or grace end reached with no Passed referendum), `AttestationMissing` (the queue-time `AttestationRecord` was revoked or a late challenge upheld post-queue — [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5), [doc 15](./15-invariants-and-testing.md) I-19) } | keeper | — | refund; then T21 fires | `ProposalRejected(r)` |
 | T17 | Executed → Measuring | automatic in T14; vault `resolve(Accept)` | — | — | proposer reward paid | `MeasurementStarted(cohort)` |
 | T18 | Queued → FailedExecuted | `execute` payload dispatch error (payload atomically reverted; proposal state advances) | — | retry window **72 h**, then T22; ACCEPT branch stays live | 50% bond slash (proposer owns executability) | `ExecutionFailed { reason: PayloadReverted }` |
 | T19 | Measuring → Settled | `settle_cohort` (§7) | keeper | cohort epoch e+2 snapshot finalized + challenge closed; settlement at e+3 Housekeeping | — | `CohortSettled { s }` |
@@ -131,7 +131,7 @@ stateDiagram-v2
     Rerun --> Extended: T13 reopen 3d, 2xPOL
     Queued --> Executed: T14 execute (ratified)
     Queued --> Expired: T15 grace missed
-    Queued --> Rejected: T16 stale / not ratified
+    Queued --> Rejected: T16 stale / not ratified / attestation revoked
     Queued --> FailedExecuted: T18 payload revert
     FailedExecuted --> Executed: T23 retry ok
     FailedExecuted --> Measuring: T22 retry exhausted
@@ -457,6 +457,7 @@ TWAPs are the slew-capped accumulator means of [doc 04](./04-markets-and-pricing
 | Constitutional violation (preimage) | ✘ | – | – | – | – | – | – | – | – | – | – | Reject(ConstitutionViolation) |
 | Guardian hold at decide time | ✔ | ✘ | – | – | – | – | – | – | – | – | – | Reject(ProcessHold)† |
 | Ratification failed / absent at execute | (post-queue) | | | | | | | | | | | T16 Rejected(NotRatified)‡ |
+| Attestation revoked / challenge upheld at execute | (post-queue) | | | | | | | | | | | T16 Rejected(AttestationMissing)‡ |
 
 † A guardian hold on a *queued* item suspends via T11 instead; a hold active at decision time rejects, refundable and resubmittable.
 ‡ Not a `decide()` outcome: the single ratification deadline is execute-time (D-5); the row is included so the table remains the complete reason-code map.
@@ -560,7 +561,7 @@ No other pallet, origin, playbook, or values track can invoke any settlement cal
 | B-med: collator-D cap | §4.5: phase-scheduled `n_cap` ∈ {5, 6, 7, 8} in `D_eff`; monotone, phase-gate-stepped, creation-time-frozen per cohort (D-15) |
 | B-med: C/P/A aggregation | §4.4: full weighted-geometric formulas with ε-floors, weights/pillar/ε carried in MetricSpec, normative evaluation order and rounding — two conforming implementations compute identical W_e and s (G-7) |
 | B-med: decide() fields | §1.2/§1.3: `Proposal` gains `ask`, `decide_at` (+ `rerun`); canonical `DecisionOutcome` defined (name per [doc 02](./02-integration-contract.md)) |
-| B-med: RejectReason | §1.3: `NotRatified`, `SecuritySizing`, `AttestationMissing` added; `VetoUpheldByReview` (T24, guardian review flow), `PayloadReverted` (T18/T22 execution-failure recording), `SecondExtensionFailed` (§5.4 extension match) all wired to unique producers |
+| B-med: RejectReason | §1.3: `NotRatified`, `SecuritySizing`, `AttestationMissing` added; `VetoUpheldByReview` (T24, guardian review flow), `PayloadReverted` (T18/T22 execution-failure recording), `SecondExtensionFailed` (§5.4 extension match) wired to their producers — each single-sited except `AttestationMissing`, which is dual-sited by design (T10 decide-time + T16 dispatch-time re-check, SQ-3) |
 | B-med: Emergency class | Same as D-7 above |
 | B-11/D-5 (interface) | §5.4 step 10 + §5.5‡ + T14/T16: attestation presence checked in `decide()`; single ratification deadline at `execute()` dispatch producing `NotRatified` — mechanics owned by [doc 06](./06-governance-and-guardians.md)/[doc 09](./09-execution-upgrades-and-rollout.md) |
 | B-med: force_rerun / rerun integration | §2.1 T12–T13 + §5.4: TWAP reset, books reopen 2× POL for a 3-day Extended window, positions intact, one final decide; guardian-side definition in [doc 06](./06-governance-and-guardians.md) |
