@@ -173,7 +173,7 @@ Gate splitting is economically meaningful only for gate-book classes; the ledger
 | `resolve(pid, w)` | `ResolveAuthority` | vault `Open`; exactly once (I-3) | state → `Resolved(w)`; losing-branch positions frozen (not burned) | `VaultResolved` | O(1) |
 | `void(pid)` | `ResolveAuthority` | vault `Open` or `Resolved`; **not** `ScalarSettled`; once | state → `Voided`; all positions (both branches) unfrozen for merge/`redeem_void` | `VaultVoided` | O(1) |
 | `settle_scalar(pid, s)` | `SettleAuthority` | vault `Resolved(w)`; `s ∈ [0,1]` (FixedU64, 1e9) | state → `ScalarSettled{winner: w, s}` | `ScalarSettlementSet` | O(1) |
-| `settle_gate(pid, g, outcome)` | `SettleAuthority` | vault `Resolved` or `ScalarSettled`; `gate_outcomes[g]` unset | record winning-branch breach outcome for gate `g` | `GateSettlementSet` | O(1) |
+| `settle_gate(pid, g, outcome)` | `SettleAuthority` | vault `Resolved` or `ScalarSettled`; `gate_outcomes[g]` unset | record winning-branch breach outcome for gate `g` | `GateSettled` | O(1) |
 | `settle_baseline(epoch, s)` | `SettleAuthority` | Baseline vault `Open`; once | state → `Settled(s)` | `BaselineSettled` | O(1) |
 
 - `void` is entered on the fail-static paths of BE §15.2(7)/PB-ORACLE-VOID and D-9 outcomes: pre-decision (from `Open`) or during measurement (from `Resolved`, when a disputed gate-input component voids the cohort). `void` from `ScalarSettled` MUST error (`WrongVaultState`): redemptions at `s` may already have paid out, and a retroactive VOID would break conservation. The `VaultVoided` event is the `Voided`/T20 event frozen in [`02-integration-contract.md`](./02-integration-contract.md) (X-11f).
