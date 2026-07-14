@@ -227,6 +227,30 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
         max_cost: Balance,
         block: u64,
     ) -> Result<(), Error> {
+        // 04 §6.4: buy/sell are atomic with all ledger moves - a failure at
+        // any wrapper step restores both the book and the ledger
+        // (Codex review, PR #34).
+        let market_snapshot = self.clone();
+        let ledger_snapshot = ledger.clone();
+        let result = self.buy_inner(ledger, id, who, side, amount, max_cost, block);
+        if result.is_err() {
+            *self = market_snapshot;
+            *ledger = ledger_snapshot;
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn buy_inner(
+        &mut self,
+        ledger: &mut LedgerState<AccountId>,
+        id: MarketId,
+        who: &AccountId,
+        side: ScalarSide,
+        amount: Balance,
+        max_cost: Balance,
+        block: u64,
+    ) -> Result<(), Error> {
         let m = self.market_mut(id)?;
         ensure_trading(m.phase)?;
         ensure_trade_bounds(m.b, amount)?;
@@ -306,6 +330,30 @@ impl<AccountId: Clone + Eq> MarketState<AccountId> {
     }
 
     pub fn sell(
+        &mut self,
+        ledger: &mut LedgerState<AccountId>,
+        id: MarketId,
+        who: &AccountId,
+        side: ScalarSide,
+        amount: Balance,
+        min_proceeds: Balance,
+        block: u64,
+    ) -> Result<(), Error> {
+        // See buy(): the sell wrapper is equally atomic across its ledger
+        // moves, so e.g. a net Baseline payout below the split floor cannot
+        // strand the seller's already-merged leg (Codex review, PR #34).
+        let market_snapshot = self.clone();
+        let ledger_snapshot = ledger.clone();
+        let result = self.sell_inner(ledger, id, who, side, amount, min_proceeds, block);
+        if result.is_err() {
+            *self = market_snapshot;
+            *ledger = ledger_snapshot;
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn sell_inner(
         &mut self,
         ledger: &mut LedgerState<AccountId>,
         id: MarketId,
@@ -726,10 +774,12 @@ fn observe_if_due<A: Clone + Eq>(
 fn mul_1e9(a: u64, b: u64) -> u64 {
     ((u128::from(a) * u128::from(b)) / u128::from(PRICE_ONE_1E9)).min(u128::from(u64::MAX)) as u64
 }
-/// 1e9-scale integer power by squaring, saturating at 2e9 (any factor at or
-/// above 2x already admits the full [0, 1] price band after one clamp).
+/// 1e9-scale integer power by squaring. Saturates at 1e18 so that even the
+/// smallest representable observation (one raw unit) widens to the full
+/// [0, 1] price band under a long enough gap - a 2x cap would under-widen
+/// low observations (Codex review, PR #34).
 fn pow_1e9(base: u64, mut exp: u64) -> u64 {
-    const CAP: u64 = 2 * PRICE_ONE_1E9;
+    const CAP: u64 = PRICE_ONE_1E9 * PRICE_ONE_1E9;
     let mut result = PRICE_ONE_1E9;
     let mut factor = base.min(CAP);
     while exp > 0 {
@@ -885,6 +935,7 @@ pub mod benchmarking {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pallet_conditional_ledger::LedgerOrigin;
     fn a(n: u8) -> [u8; 32] {
         [n; 32]
     }
@@ -1205,6 +1256,112 @@ mod tests {
             observed <= widened,
             "observed {observed} vs widened {widened}"
         );
+    }
+
+    #[test]
+    fn wrapper_payouts_to_users_respect_the_creation_floor_atomically() {
+        // Codex review, PR #34: MarketAuthority moves are floor-exempt only
+        // toward protocol destinations - a payout that would create a
+        // sub-MinTransfer deposit-backed user position is rejected at the
+        // ledger.
+        let mut ledger: LedgerState<[u8; 32]> = LedgerState::new();
+        ledger.create_vault(1, 0).unwrap();
+        ledger
+            .split(LedgerOrigin::Signed, 1, &a(4), 1_000_000)
+            .unwrap();
+        assert_eq!(
+            ledger.transfer(
+                LedgerOrigin::MarketAuthority,
+                position(1, Branch::Accept, PositionKind::BranchUsdc),
+                &a(4),
+                &a(5),
+                9_999,
+            ),
+            Err(pallet_conditional_ledger::Error::AmountTooSmall)
+        );
+
+        // And a wrapper step failing mid-sell rolls the whole trade back
+        // instead of stranding the seller's already-moved leg: the seller is
+        // at the position cap and sells only part of the LONG, so the net
+        // payout needs a fresh target-branch entry and hits the cap after the
+        // leg transfer and merge already ran.
+        let mut ledger = LedgerState::new();
+        ledger.create_vault(1, 0).unwrap();
+        let mut m = MarketState::new();
+        m.create_market(
+            7,
+            BookKind::Decision {
+                proposal: 1,
+                branch: Branch::Accept,
+            },
+            a(9),
+            a(8),
+            B,
+        )
+        .unwrap();
+        m.seed(&mut ledger, 7, &a(1)).unwrap();
+        let trader = a(2);
+        m.buy(
+            &mut ledger,
+            7,
+            &trader,
+            ScalarSide::Long,
+            2_000_000_000,
+            1_500_000_000,
+            10,
+        )
+        .unwrap();
+        // Fill the remaining 62 slots (the trader holds LONG + mirror bUSDC).
+        for i in 0..31u64 {
+            let pid = 1_000 + i;
+            ledger.create_vault(pid, 0).unwrap();
+            ledger
+                .split(LedgerOrigin::Signed, pid, &trader, 1_000_000)
+                .unwrap();
+        }
+        let held = balance_of(
+            &ledger,
+            position(1, Branch::Accept, PositionKind::Long),
+            &trader,
+        );
+        assert_eq!(held, 2_000_000_000);
+        let q_long_before = m.markets[0].q_long;
+        let escrow_before = ledger.vaults[0].info.escrowed;
+        assert_eq!(
+            m.sell(
+                &mut ledger,
+                7,
+                &trader,
+                ScalarSide::Long,
+                1_000_000_000,
+                1,
+                20
+            )
+            .unwrap_err(),
+            Error::Ledger
+        );
+        assert_eq!(
+            balance_of(
+                &ledger,
+                position(1, Branch::Accept, PositionKind::Long),
+                &trader
+            ),
+            held
+        );
+        assert_eq!(m.markets[0].q_long, q_long_before);
+        assert_eq!(ledger.vaults[0].info.escrowed, escrow_before);
+        ledger.try_state().unwrap();
+        m.try_state().unwrap();
+    }
+
+    #[test]
+    fn twap_widening_reaches_the_full_band_from_low_observations() {
+        // Codex review, PR #34: a 2x pow cap under-widened low observations
+        // (old = 0.10 with (1.005)^k > 10 must admit 1.0).
+        let widened = mul_1e9(100_000_000, pow_1e9(PRICE_ONE_1E9 + KAPPA_1E9, 462));
+        assert!(widened >= PRICE_ONE_1E9, "widened {widened}");
+        let from_dust = mul_1e9(1, pow_1e9(PRICE_ONE_1E9 + KAPPA_1E9, 10_000));
+        assert!(from_dust >= PRICE_ONE_1E9, "from_dust {from_dust}");
     }
 
     fn balance_of(

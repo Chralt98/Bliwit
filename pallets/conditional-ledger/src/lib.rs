@@ -669,27 +669,28 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         // 03 §R-2 is two rules about deposit-backed position hygiene, not a
         // blanket amount minimum: (a) positions cannot be created below
         // MinTransfer, (b) a Signed transfer leaving a sub-MinTransfer
-        // remainder moves the whole balance. Market-wrapper moves
-        // (MarketAuthority) are exact by construction (04 §6.1 routes
-        // sub-MinTransfer fee legs through these same ordinary ops - 03 §R-3)
-        // and protocol accounts hold no deposits, so neither rule applies to
-        // them.
+        // remainder moves the whole balance. The creation floor binds every
+        // deposit-backed (non-protocol) destination regardless of origin -
+        // market-wrapper payouts included (Codex review, PR #34) - while
+        // protocol book/fee destinations hold no deposits and are exempt,
+        // which is what lets the sub-MinTransfer fee legs of 03 §R-3 route
+        // through these same ordinary ops. The remainder sweep applies to
+        // Signed calls only: MarketAuthority moves are exact by construction
+        // (04 §6.1).
         let mut a = a;
-        if matches!(origin, LedgerOrigin::Signed) {
-            let dest_exists = self.positions.iter().any(|p| p.id == id && &p.owner == to);
-            if !dest_exists && !self.protocol_accounts.contains(to) {
-                ensure!(a >= kernel::MIN_TRANSFER_USDC, Error::AmountTooSmall);
-            }
-            if !self.protocol_accounts.contains(from) {
-                let balance = self
-                    .positions
-                    .iter()
-                    .find(|p| p.id == id && &p.owner == from)
-                    .map_or(0, |p| p.balance);
-                let remainder = balance.saturating_sub(a);
-                if remainder > 0 && remainder < kernel::MIN_TRANSFER_USDC {
-                    a = balance;
-                }
+        let dest_exists = self.positions.iter().any(|p| p.id == id && &p.owner == to);
+        if !dest_exists && !self.protocol_accounts.contains(to) {
+            ensure!(a >= kernel::MIN_TRANSFER_USDC, Error::AmountTooSmall);
+        }
+        if matches!(origin, LedgerOrigin::Signed) && !self.protocol_accounts.contains(from) {
+            let balance = self
+                .positions
+                .iter()
+                .find(|p| p.id == id && &p.owner == from)
+                .map_or(0, |p| p.balance);
+            let remainder = balance.saturating_sub(a);
+            if remainder > 0 && remainder < kernel::MIN_TRANSFER_USDC {
+                a = balance;
             }
         }
         self.ensure_position_live(id)?;
