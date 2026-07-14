@@ -150,36 +150,41 @@ impl SafetyFilter {
 
     pub fn validate(origin: Option<Origin>, call: &RuntimeCall) -> Result<(), Error> {
         let mut budget = Budget::root();
-        Self::validate_inner(origin, call, &mut budget)
+        Self::validate_inner(origin, call, &mut budget, false)
     }
 
+    // `in_proxyish_wrapper` marks that the walk crossed a proxy/multisig
+    // wrapper (06 §3.3: those are denied when the inner call is
+    // privileged-domain). The flag makes the check recursive — a privileged
+    // leaf hidden under batch/with_weight/sudo layers inside the wrapper is
+    // still denied — within the same depth/call budget as the ordinary walk.
     fn validate_inner(
         origin: Option<Origin>,
         call: &RuntimeCall,
         budget: &mut Budget,
+        in_proxyish_wrapper: bool,
     ) -> Result<(), Error> {
         budget.count_call()?;
         match call {
             RuntimeCall::Leaf(domain) => match domain {
                 CallDomain::Nobody => Err(Error::NobodyCall),
+                _ if domain.is_privileged() && in_proxyish_wrapper => Err(Error::PrivilegedWrapper),
                 _ if domain.allowed_for(origin) => Ok(()),
                 _ => Err(Error::BadOrigin),
             },
             RuntimeCall::UtilityBatch(calls)
             | RuntimeCall::UtilityBatchAll(calls)
-            | RuntimeCall::UtilityForceBatch(calls) => Self::validate_many(origin, calls, budget),
+            | RuntimeCall::UtilityForceBatch(calls) => {
+                Self::validate_many(origin, calls, budget, in_proxyish_wrapper)
+            }
             RuntimeCall::UtilityWithWeight(inner) => {
-                Self::validate_wrapped(origin, &inner.0, budget)
+                Self::validate_wrapped(origin, &inner.0, budget, in_proxyish_wrapper)
             }
             RuntimeCall::Proxy(inner)
             | RuntimeCall::ProxyAnnounced(inner)
             | RuntimeCall::MultisigAsMulti(inner)
             | RuntimeCall::MultisigAsMultiThreshold1(inner) => {
-                ensure!(
-                    !inner.0.static_domain().is_privileged(),
-                    Error::PrivilegedWrapper
-                );
-                Self::validate_wrapped(origin, &inner.0, budget)
+                Self::validate_wrapped(origin, &inner.0, budget, true)
             }
             RuntimeCall::MultisigApproveAsMulti => Ok(()),
             RuntimeCall::UtilityDispatchAs(_) | RuntimeCall::UtilityAsDerivative(_) => {
@@ -193,9 +198,11 @@ impl SafetyFilter {
                     ),
                     Error::SchedulerDenied
                 );
-                Self::validate_wrapped(Some(*origin), &call.0, budget)
+                Self::validate_wrapped(Some(*origin), &call.0, budget, in_proxyish_wrapper)
             }
-            RuntimeCall::Sudo(inner) => Self::validate_wrapped(origin, &inner.0, budget),
+            RuntimeCall::Sudo(inner) => {
+                Self::validate_wrapped(origin, &inner.0, budget, in_proxyish_wrapper)
+            }
         }
     }
 
@@ -203,10 +210,11 @@ impl SafetyFilter {
         origin: Option<Origin>,
         calls: &[RuntimeCall],
         budget: &mut Budget,
+        in_proxyish_wrapper: bool,
     ) -> Result<(), Error> {
         budget.enter()?;
         for call in calls {
-            Self::validate_inner(origin, call, budget)?;
+            Self::validate_inner(origin, call, budget, in_proxyish_wrapper)?;
         }
         budget.leave();
         Ok(())
@@ -216,9 +224,10 @@ impl SafetyFilter {
         origin: Option<Origin>,
         call: &RuntimeCall,
         budget: &mut Budget,
+        in_proxyish_wrapper: bool,
     ) -> Result<(), Error> {
         budget.enter()?;
-        let result = Self::validate_inner(origin, call, budget);
+        let result = Self::validate_inner(origin, call, budget, in_proxyish_wrapper);
         budget.leave();
         result
     }
@@ -227,25 +236,6 @@ impl SafetyFilter {
 impl RuntimeCall {
     pub const fn leaf(domain: CallDomain) -> Self {
         Self::Leaf(domain)
-    }
-
-    pub fn static_domain(&self) -> CallDomain {
-        match self {
-            Self::Leaf(domain) => *domain,
-            Self::UtilityBatch(_)
-            | Self::UtilityBatchAll(_)
-            | Self::UtilityForceBatch(_)
-            | Self::UtilityWithWeight(_)
-            | Self::Scheduler { .. }
-            | Self::Sudo(_) => CallDomain::Public,
-            Self::Proxy(inner)
-            | Self::ProxyAnnounced(inner)
-            | Self::MultisigAsMulti(inner)
-            | Self::MultisigAsMultiThreshold1(inner)
-            | Self::UtilityDispatchAs(inner)
-            | Self::UtilityAsDerivative(inner) => inner.0.static_domain(),
-            Self::MultisigApproveAsMulti => CallDomain::Public,
-        }
     }
 }
 
@@ -345,6 +335,52 @@ mod tests {
                 Err(Error::PrivilegedWrapper)
             );
         }
+    }
+
+    #[test]
+    fn proxy_multisig_deny_privileged_leaves_through_any_nesting() {
+        // Codex review, PR #18: a batch (or any other wrapper) between the
+        // proxy/multisig wrapper and a privileged leaf must not launder the
+        // 06 §3.3 privileged-wrapper denial - even when the payload would
+        // match the class origin being validated.
+        let laundered = [
+            RuntimeCall::Proxy(boxed(RuntimeCall::UtilityBatch(vec![RuntimeCall::leaf(
+                CallDomain::Param,
+            )]))),
+            RuntimeCall::ProxyAnnounced(boxed(RuntimeCall::UtilityWithWeight(boxed(
+                RuntimeCall::leaf(CallDomain::Meta),
+            )))),
+            RuntimeCall::MultisigAsMulti(boxed(RuntimeCall::UtilityBatchAll(vec![
+                RuntimeCall::leaf(CallDomain::Code),
+            ]))),
+            RuntimeCall::MultisigAsMultiThreshold1(boxed(RuntimeCall::UtilityForceBatch(vec![
+                RuntimeCall::leaf(CallDomain::Treasury),
+            ]))),
+            RuntimeCall::Proxy(boxed(RuntimeCall::Sudo(boxed(RuntimeCall::leaf(
+                CallDomain::Param,
+            ))))),
+        ];
+        for call in laundered {
+            assert_eq!(
+                SafetyFilter::validate(None, &call),
+                Err(Error::PrivilegedWrapper)
+            );
+            assert!(!SafetyFilter::contains_for(Origin::FutarchyParam, &call));
+            assert!(!SafetyFilter::contains_for(Origin::FutarchyCode, &call));
+        }
+        // Public payloads under the same shapes stay admissible.
+        let public = RuntimeCall::Proxy(boxed(RuntimeCall::UtilityBatch(vec![RuntimeCall::leaf(
+            CallDomain::Public,
+        )])));
+        assert!(SafetyFilter::contains(&public));
+        // The nobody row still wins over the wrapper denial error inside a proxy.
+        let nobody = RuntimeCall::Proxy(boxed(RuntimeCall::UtilityBatch(vec![RuntimeCall::leaf(
+            CallDomain::Nobody,
+        )])));
+        assert_eq!(
+            SafetyFilter::validate(None, &nobody),
+            Err(Error::NobodyCall)
+        );
     }
 
     #[test]
