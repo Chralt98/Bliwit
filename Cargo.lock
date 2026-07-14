@@ -175,6 +175,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-oracle"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+ "pallet-origins",
+ "parity-scale-codec",
+ "scale-info",
+]
+
+[[package]]
 name = "pallet-origins"
 version = "0.1.0"
 dependencies = [

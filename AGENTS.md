@@ -136,7 +136,7 @@ per milestone):
 | `.codex/` | living | Codex session playbooks mirroring the skills |
 | `Cargo.toml`, `rust-toolchain.toml`, `.github/workflows/ci.yml`, `tools/ci/` | scaffold | M0 workspace/toolchain/CI and local gate scripts |
 | `crates/` | scaffold | Placeholder root; `futarchy-primitives` (M1) and `futarchy-fixed` (M2) land here |
-| `pallets/` | scaffold (Track A) | Placeholder root for the 12 custom pallets (01 §5.1) |
+| `pallets/` | partial (Track A) | Custom pallet crates implemented so far: `constitution`, `conditional-ledger`, `market`, `origins`, `oracle`; remaining Track A pallets land by milestone |
 | `runtime/`, `node/` | scaffold (Track B) | Placeholder roots for runtime assembly and collator node; `runtime-api/` is created in B2 |
 | `reference-model/` | scaffold (M3) | Placeholder root for independent Python executable spec + vector corpus |
 | `frontend/` | scaffold (Track F) | Placeholder root for monorepo per 10 §10 (`apps/web`, `packages/*`, `tools/*`) |
