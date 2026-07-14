@@ -157,6 +157,7 @@ pub enum Error {
     BatchTooLarge,
     InvalidClass,
     Overflow,
+    NotRegistered,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -199,6 +200,12 @@ impl Registry {
         ensure!(
             input.spec_version == input.expected_spec,
             Error::SpecVersionMismatch
+        );
+        // A closed-out epoch's aggregate is terminal (07 §7): late filings
+        // must not land behind an already-derived welfare input.
+        ensure!(
+            self.aggregates.iter().all(|(e, _)| *e != input.epoch),
+            Error::AlreadyFinal
         );
         self.validate_class(input.class)?;
         let bond = self.required_bond();
@@ -254,22 +261,37 @@ impl Registry {
         Ok(filing_id)
     }
 
+    /// Watchtower acknowledgment (07 §4 quorum rule, inherited by the registry
+    /// per 07 §7). `is_registered_watchtower` is resolved by the runtime
+    /// against the oracle pallet's bonded watchtower registry — only bonded,
+    /// slashable seats may count toward `WT_QUORUM`.
     pub fn ack_observed(
         &mut self,
         who: AccountId,
+        now: BlockNumber,
+        is_registered_watchtower: bool,
         epoch: EpochId,
         filing_id: FilingId,
     ) -> Result<(), Error> {
+        ensure!(is_registered_watchtower, Error::NotRegistered);
         ensure!(
             !self.ack_records.contains(&(epoch, filing_id, who)),
             Error::DuplicateAck
         );
         let filing = self.filing_mut(epoch, filing_id)?;
         match &mut filing.state {
-            FilingState::Filed { acks, .. } => {
+            FilingState::Filed {
+                window_end, acks, ..
+            } => {
+                // Quorum proves observability during the live challenge
+                // window; late acknowledgments must not retro-uphold a filing
+                // whose challenge surface already closed.
+                ensure!(now <= *window_end, Error::WindowClosed);
                 *acks = acks.saturating_add(1);
             }
-            FilingState::Challenged { .. } => {}
+            FilingState::Challenged { window_end, .. } => {
+                ensure!(now <= *window_end, Error::WindowClosed);
+            }
             _ => return Err(Error::AlreadyFinal),
         }
         self.ack_records.push((epoch, filing_id, who));
@@ -407,7 +429,22 @@ impl Registry {
         Ok(())
     }
 
-    pub fn close_epoch(&mut self, epoch: EpochId) -> Result<FixedU64, Error> {
+    /// Close-out (07 §7): derives the epoch's aggregate exactly once, only
+    /// after the filing window has ended and every filing is terminal. The
+    /// `FilingCount` entry is reaped here — it exists to allocate ids and
+    /// enforce the per-epoch cap during the window, and holding it past
+    /// close-out would wedge the ≤ 4-live-epoch bound permanently.
+    pub fn close_epoch(
+        &mut self,
+        epoch: EpochId,
+        now: BlockNumber,
+        filing_window_end: BlockNumber,
+    ) -> Result<FixedU64, Error> {
+        ensure!(now > filing_window_end, Error::WindowOpen);
+        ensure!(
+            self.aggregates.iter().all(|(e, _)| *e != epoch),
+            Error::AlreadyFinal
+        );
         ensure!(
             self.filings
                 .iter()
@@ -419,19 +456,33 @@ impl Registry {
             RegistryKind::Incident => self.incident_aggregate(epoch),
             RegistryKind::Milestone => self.milestone_aggregate(epoch),
         };
-        if self.aggregates.iter().all(|(e, _)| *e != epoch) {
-            ensure!(
-                self.aggregates.len() < MAX_AGGREGATES,
-                Error::TooManyAggregates
-            );
-            self.aggregates.push((epoch, aggregate));
-        }
+        ensure!(
+            self.aggregates.len() < MAX_AGGREGATES,
+            Error::TooManyAggregates
+        );
+        self.aggregates.push((epoch, aggregate));
+        self.filing_count.retain(|(e, _)| *e != epoch);
         self.events.push(Event::RegistryEpochClosed {
             kind: self.kind,
             epoch,
             aggregate,
         });
         Ok(aggregate)
+    }
+
+    /// Reap a closed epoch's records. 07 §7: closed epochs are reaped at
+    /// cohort settlement + archive delay — the caller (welfare/epoch wiring)
+    /// enforces that timing; the registry only requires that the epoch was
+    /// closed out first.
+    pub fn reap_epoch(&mut self, epoch: EpochId) -> Result<(), Error> {
+        ensure!(
+            self.aggregates.iter().any(|(e, _)| *e == epoch),
+            Error::WindowOpen
+        );
+        self.filings.retain(|((e, _), _)| *e != epoch);
+        self.ack_records.retain(|(e, _, _)| *e != epoch);
+        self.aggregates.retain(|(e, _)| *e != epoch);
+        Ok(())
     }
 
     pub fn try_state(&self) -> Result<(), Error> {
@@ -448,9 +499,21 @@ impl Registry {
             let actual = self.filings.iter().filter(|((e, _), _)| e == epoch).count() as u32;
             ensure!(actual <= *count, Error::Overflow);
         }
-        for (_, f) in &self.filings {
+        for ((epoch, _), f) in &self.filings {
             ensure!(f.bond >= self.required_bond(), Error::BondBelowMinimum);
             self.validate_class(f.class)?;
+            // Every retained filing belongs to exactly one lifecycle stage:
+            // a live epoch (counted) or a closed epoch awaiting reap
+            // (aggregated) - never both, never neither.
+            let live = self.filing_count.iter().any(|(e, _)| e == epoch);
+            let closed = self.aggregates.iter().any(|(e, _)| e == epoch);
+            ensure!(live != closed, Error::Overflow);
+            if closed {
+                ensure!(
+                    matches!(f.state, FilingState::Upheld | FilingState::Rejected),
+                    Error::WindowOpen
+                );
+            }
         }
         Ok(())
     }
@@ -648,7 +711,7 @@ mod tests {
                 FilingClass::S2,
             ))
             .unwrap();
-        r.ack_observed(acct(2), 5, id).unwrap();
+        r.ack_observed(acct(2), 5, true, 5, id).unwrap();
         r.crank_close(REG_WINDOW_BLOCKS + 2, REG_CLOSE_BATCH)
             .unwrap();
         assert!(matches!(
@@ -678,12 +741,15 @@ mod tests {
                 FilingClass::S2,
             ))
             .unwrap();
-        r.ack_observed(acct(2), 5, id).unwrap();
-        r.ack_observed(acct(3), 5, id).unwrap();
+        r.ack_observed(acct(2), 5, true, 5, id).unwrap();
+        r.ack_observed(acct(3), 6, true, 5, id).unwrap();
         r.crank_close(REG_WINDOW_BLOCKS + 2, REG_CLOSE_BATCH)
             .unwrap();
         assert!(matches!(r.filings[0].1.state, FilingState::Upheld));
-        assert_eq!(r.close_epoch(5), Ok(FixedU64(600_000_000)));
+        assert_eq!(
+            r.close_epoch(5, REG_WINDOW_BLOCKS + 3, 10),
+            Ok(FixedU64(600_000_000))
+        );
     }
 
     #[test]
@@ -712,6 +778,111 @@ mod tests {
     }
 
     #[test]
+    fn acks_require_registered_watchtowers_and_a_live_window() {
+        // Codex review, PR #20: two arbitrary accounts must not satisfy the
+        // bonded watchtower quorum of 07 §4/§7.
+        let mut r = Registry::new(RegistryKind::Incident);
+        let id = r
+            .file(file_input(
+                RegistryKind::Incident,
+                acct(1),
+                5,
+                FilingClass::S2,
+            ))
+            .unwrap();
+        assert_eq!(
+            r.ack_observed(acct(2), 5, false, 5, id),
+            Err(Error::NotRegistered)
+        );
+        assert_eq!(
+            r.ack_observed(acct(3), 5, false, 5, id),
+            Err(Error::NotRegistered)
+        );
+        // Late acknowledgments past the live window are rejected too.
+        assert_eq!(
+            r.ack_observed(acct(4), REG_WINDOW_BLOCKS + 2, true, 5, id),
+            Err(Error::WindowClosed)
+        );
+        // With no countable acks the filing extends, then rejects.
+        r.crank_close(REG_WINDOW_BLOCKS + 2, REG_CLOSE_BATCH)
+            .unwrap();
+        assert!(matches!(
+            r.filings[0].1.state,
+            FilingState::Filed { extended: true, .. }
+        ));
+        r.crank_close(
+            REG_WINDOW_BLOCKS + REG_EXT_WINDOW_BLOCKS + 3,
+            REG_CLOSE_BATCH,
+        )
+        .unwrap();
+        assert!(matches!(r.filings[0].1.state, FilingState::Rejected));
+        r.try_state().unwrap();
+    }
+
+    #[test]
+    fn close_epoch_waits_for_the_filing_window_and_is_terminal() {
+        // Codex review, PR #20: an empty epoch must not close (recording the
+        // "no filings => 1" aggregate) while its filing window is still open.
+        let mut r = Registry::new(RegistryKind::Incident);
+        assert_eq!(r.close_epoch(7, 5, 10), Err(Error::WindowOpen));
+        assert_eq!(r.close_epoch(7, 11, 10), Ok(FixedU64(ONE)));
+        assert_eq!(r.close_epoch(7, 12, 10), Err(Error::AlreadyFinal));
+        // A late filing for the closed epoch is rejected even inside an
+        // apparently open window.
+        let mut input = file_input(RegistryKind::Incident, acct(1), 7, FilingClass::S3);
+        input.now = 5;
+        assert_eq!(r.file(input), Err(Error::AlreadyFinal));
+        r.try_state().unwrap();
+    }
+
+    #[test]
+    fn closed_epochs_free_the_live_epoch_cap_and_reap_frees_aggregates() {
+        // Codex review, PR #20: after MAX_LIVE_EPOCHS distinct epochs have
+        // ever filed, new epochs must still be admissible once the old ones
+        // closed out.
+        let mut r = Registry::new(RegistryKind::Incident);
+        for epoch in 1..=(MAX_LIVE_EPOCHS as EpochId) {
+            r.file(file_input(
+                RegistryKind::Incident,
+                acct(epoch as u8),
+                epoch,
+                FilingClass::S3,
+            ))
+            .unwrap();
+        }
+        assert_eq!(
+            r.file(file_input(
+                RegistryKind::Incident,
+                acct(9),
+                99,
+                FilingClass::S3
+            )),
+            Err(Error::TooManyLiveEpochs)
+        );
+        // Resolve and close epoch 1; its filing_count slot must free up.
+        r.challenge_filing(acct(8), 2, 1, 0, h(7)).unwrap();
+        r.resolve_challenge(1, 0, true).unwrap();
+        r.close_epoch(1, 11, 10).unwrap();
+        let id = r
+            .file(file_input(
+                RegistryKind::Incident,
+                acct(9),
+                99,
+                FilingClass::S3,
+            ))
+            .unwrap();
+        assert_eq!(id, 0);
+        r.try_state().unwrap();
+        // Reaping (cohort settlement + archive delay, enforced by the caller)
+        // releases the aggregate slot and the archived filings.
+        assert_eq!(r.reap_epoch(2), Err(Error::WindowOpen));
+        r.reap_epoch(1).unwrap();
+        assert_eq!(r.aggregate(1), None);
+        assert!(r.filings.iter().all(|((e, _), _)| *e != 1));
+        r.try_state().unwrap();
+    }
+
+    #[test]
     fn close_epoch_requires_terminal_filings_and_computes_milestones() {
         let mut r = Registry::new(RegistryKind::Milestone);
         let id = r
@@ -722,12 +893,15 @@ mod tests {
                 FilingClass::Scope(1),
             ))
             .unwrap();
-        assert_eq!(r.close_epoch(3), Err(Error::WindowOpen));
-        r.ack_observed(acct(2), 3, id).unwrap();
-        r.ack_observed(acct(3), 3, id).unwrap();
+        assert_eq!(r.close_epoch(3, 2, 10), Err(Error::WindowOpen));
+        r.ack_observed(acct(2), 5, true, 3, id).unwrap();
+        r.ack_observed(acct(3), 6, true, 3, id).unwrap();
         r.crank_close(REG_WINDOW_BLOCKS + 2, REG_CLOSE_BATCH)
             .unwrap();
-        assert_eq!(r.close_epoch(3), Ok(FixedU64(250_000_000)));
+        assert_eq!(
+            r.close_epoch(3, REG_WINDOW_BLOCKS + 3, 10),
+            Ok(FixedU64(250_000_000))
+        );
         assert_eq!(r.aggregate(3), Some(FixedU64(250_000_000)));
     }
 }
