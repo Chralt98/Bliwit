@@ -212,24 +212,24 @@ impl WelfareState {
                 Error::DuplicateComponent
             );
         }
-        for pillar in [
-            Pillar::S,
-            Pillar::COnchain,
-            Pillar::CAttested,
-            Pillar::P,
-            Pillar::A,
-        ] {
-            let sum = specs
+        // 05 §4.4: every weight vector sums to 1 exactly, checked here. S is
+        // min-aggregated (no weights); the C vector is one vector across
+        // C_onchain and C_attested jointly - C_daily then renormalizes over
+        // the on-chain subset, which is only meaningful for a joint vector.
+        let weight_sum = |pillars: &[Pillar]| -> Result<u64, Error> {
+            specs
                 .iter()
-                .filter(|s| s.pillar == pillar)
+                .filter(|s| pillars.contains(&s.pillar))
                 .try_fold(0u64, |acc, s| {
                     acc.checked_add(s.weight.0).ok_or(Error::ArithmeticOverflow)
-                })?;
-            if pillar == Pillar::CAttested && sum == 0 {
-                continue;
-            }
-            ensure!(sum == ONE, Error::BadWeightSum);
-        }
+                })
+        };
+        ensure!(
+            weight_sum(&[Pillar::COnchain, Pillar::CAttested])? == ONE,
+            Error::BadWeightSum
+        );
+        ensure!(weight_sum(&[Pillar::P])? == ONE, Error::BadWeightSum);
+        ensure!(weight_sum(&[Pillar::A])? == ONE, Error::BadWeightSum);
         self.specs.push((version, specs));
         self.events.push(Event::MetricSpecRegistered { version });
         Ok(())
@@ -479,12 +479,22 @@ fn compute_pillars(
         .try_fold(FixedU64(ONE), |acc, m| {
             Ok(FixedU64(acc.0.min(value_for(m.id, components)?.0)))
         })?;
-    let c_onchain = weighted_geo(specs, components, Pillar::COnchain, true)?;
-    let c_attested_geo = weighted_geo(specs, components, Pillar::CAttested, false)?;
+    // View partials (per sub-pillar, spec weights as registered)...
+    let c_onchain = weighted_geo(specs, components, &[Pillar::COnchain], None)?;
+    let c_attested_geo = weighted_geo(specs, components, &[Pillar::CAttested], None)?;
     let c_attested = mul_down(incident, c_attested_geo)?;
-    let c_settlement = mul_down(c_onchain, c_attested)?;
-    let p = weighted_geo(specs, components, Pillar::P, true)?;
-    let a = weighted_geo(specs, components, Pillar::A, true)?;
+    // ...while the settlement C_e evaluates the joint weight vector as ONE
+    // exp2(sum(w * log2(max(c, eps)))) composite (05 §4.4 (2)), incident-
+    // multiplied (05 §4.4: I is a pure multiplier).
+    let c_joint = weighted_geo(
+        specs,
+        components,
+        &[Pillar::COnchain, Pillar::CAttested],
+        None,
+    )?;
+    let c_settlement = mul_down(incident, c_joint)?;
+    let p = weighted_geo(specs, components, &[Pillar::P], None)?;
+    let a = weighted_geo(specs, components, &[Pillar::A], None)?;
     Ok(Pillars {
         s,
         c_onchain,
@@ -505,28 +515,83 @@ fn compute_daily_gates(
         .try_fold(FixedU64(ONE), |acc, m| {
             Ok(FixedU64(acc.0.min(value_for(m.id, components)?.0)))
         })?;
-    let c_onchain = weighted_geo(specs, components, Pillar::COnchain, true)?;
-    Ok((s, c_onchain))
+    // C_daily renormalizes the joint C weight vector over the on-chain
+    // subset (05 §4.4): w_j / sum_onchain(w). No attested term, ever.
+    let onchain_sum = specs
+        .iter()
+        .filter(|m| m.pillar == Pillar::COnchain)
+        .try_fold(0u64, |acc, m| {
+            acc.checked_add(m.weight.0).ok_or(Error::ArithmeticOverflow)
+        })?;
+    let c_daily = weighted_geo(specs, components, &[Pillar::COnchain], Some(onchain_sum))?;
+    Ok((s, c_daily))
 }
 
+/// Weighted geometric composite per the 05 §4.4 determinism discipline:
+/// evaluated in ascending `MetricId` order (specs are stored sorted) as one
+/// `exp2(sum(w_i * log2(max(x_i, eps))))` in 64.64. Every true product
+/// `w_i * log2(x_i)` is <= 0 and must round toward negative infinity, which
+/// in the inverse domain used here (`log2(1/x) >= 0`) is a ceiling. With
+/// `renormalize = Some(total)`, each weight is divided by `total` first
+/// (the C_daily rule).
 fn weighted_geo(
     specs: &[MetricSpec],
     components: &[ComponentValue],
-    pillar: Pillar,
-    empty_one: bool,
+    pillars: &[Pillar],
+    renormalize: Option<u64>,
 ) -> Result<FixedU64, Error> {
-    let mut out = FixedU64(ONE);
-    let mut found = false;
-    for m in specs.iter().filter(|m| m.pillar == pillar) {
-        found = true;
+    let mut exponent = FixedU64x64::ZERO;
+    for m in specs.iter().filter(|m| pillars.contains(&m.pillar)) {
         let v = value_for(m.id, components)?;
-        out = mul_down(out, pow_unit(v.0.max(m.epsilon_floor.0), m.weight.0)?)?;
+        let value = v.0.max(m.epsilon_floor.0);
+        if m.weight.0 == 0 || value >= ONE {
+            continue;
+        }
+        ensure!(value > 0, Error::ValueOutOfRange);
+        let inv = FixedU64x64::ONE
+            .checked_div(q64_from_1e9(value)?)
+            .map_err(|_| Error::ArithmeticOverflow)?;
+        let log = inv.log2().map_err(|_| Error::ArithmeticOverflow)?;
+        let mut weight = q64_from_1e9(m.weight.0)?;
+        if let Some(total) = renormalize {
+            ensure!(total > 0, Error::BadWeightSum);
+            weight = weight
+                .checked_div(q64_from_1e9(total)?)
+                .map_err(|_| Error::ArithmeticOverflow)?;
+        }
+        exponent = exponent
+            .checked_add(mul_ceil_q64(log, weight)?)
+            .map_err(|_| Error::ArithmeticOverflow)?;
     }
-    if found || empty_one {
-        Ok(out)
+    exp2_inverse_down(exponent)
+}
+
+/// `ceil(a * b)` at 64.64 raw granularity. The low 64 bits of the full
+/// 256-bit raw product are exactly `a.raw() as u64 * b.raw() as u64`
+/// (wrapping), so they detect whether the crate's flooring multiply
+/// truncated.
+fn mul_ceil_q64(a: FixedU64x64, b: FixedU64x64) -> Result<FixedU64x64, Error> {
+    let floor = a.checked_mul(b).map_err(|_| Error::ArithmeticOverflow)?;
+    let truncated = (a.raw() as u64).wrapping_mul(b.raw() as u64) != 0;
+    if truncated {
+        floor
+            .checked_add(FixedU64x64::from_raw(1))
+            .map_err(|_| Error::ArithmeticOverflow)
     } else {
-        Ok(FixedU64(ONE))
+        Ok(floor)
     }
+}
+
+/// `2^(-exponent)` floored to the 1e9 grid (the composite's closing step).
+fn exp2_inverse_down(exponent: FixedU64x64) -> Result<FixedU64, Error> {
+    if exponent.raw() == 0 {
+        return Ok(FixedU64(ONE));
+    }
+    let denom = exponent.exp2().map_err(|_| Error::ArithmeticOverflow)?;
+    let term = FixedU64x64::ONE
+        .checked_div(denom)
+        .map_err(|_| Error::ArithmeticOverflow)?;
+    q64_to_1e9_down(term)
 }
 
 fn value_for(id: MetricId, components: &[ComponentValue]) -> Result<FixedU64, Error> {
@@ -541,25 +606,26 @@ fn value_for(id: MetricId, components: &[ComponentValue]) -> Result<FixedU64, Er
     found.ok_or(Error::MissingComponent)
 }
 
-fn pow_unit(value_1e9: u64, weight_1e9: u64) -> Result<FixedU64, Error> {
-    if weight_1e9 == 0 || value_1e9 >= ONE {
-        return Ok(FixedU64(ONE));
+/// `x1^w1 * x2^w2` as one exp2/log2 composite (the P/A GeoComposite of the
+/// W product, same discipline as [`weighted_geo`]).
+fn geo_pair(first: (FixedU64, FixedU64), second: (FixedU64, FixedU64)) -> Result<FixedU64, Error> {
+    let mut exponent = FixedU64x64::ZERO;
+    for (value, weight) in [first, second] {
+        if weight.0 == 0 || value.0 >= ONE {
+            continue;
+        }
+        if value.0 == 0 {
+            return Ok(FixedU64(0));
+        }
+        let inv = FixedU64x64::ONE
+            .checked_div(q64_from_1e9(value.0)?)
+            .map_err(|_| Error::ArithmeticOverflow)?;
+        let log = inv.log2().map_err(|_| Error::ArithmeticOverflow)?;
+        exponent = exponent
+            .checked_add(mul_ceil_q64(log, q64_from_1e9(weight.0)?)?)
+            .map_err(|_| Error::ArithmeticOverflow)?;
     }
-    if value_1e9 == 0 {
-        return Ok(FixedU64(0));
-    }
-    let x = q64_from_1e9(value_1e9)?;
-    let inv = FixedU64x64::ONE
-        .checked_div(x)
-        .map_err(|_| Error::ArithmeticOverflow)?;
-    let log = inv.log2().map_err(|_| Error::ArithmeticOverflow)?;
-    let w = q64_from_1e9(weight_1e9)?;
-    let exponent = log.checked_mul(w).map_err(|_| Error::ArithmeticOverflow)?;
-    let denom = exponent.exp2().map_err(|_| Error::ArithmeticOverflow)?;
-    let term = FixedU64x64::ONE
-        .checked_div(denom)
-        .map_err(|_| Error::ArithmeticOverflow)?;
-    q64_to_1e9_down(term)
+    exp2_inverse_down(exponent)
 }
 
 pub fn compute_welfare(
@@ -570,40 +636,30 @@ pub fn compute_welfare(
 ) -> Result<FixedU64, Error> {
     let gs = gate(s, THETA_S_LO, THETA_S_HI)?;
     let gc = gate(c, THETA_C_LO, THETA_C_HI)?;
-    let pa = mul_down(pow_unit(p.0, W_P.0)?, pow_unit(a.0, W_A.0)?)?;
+    let pa = geo_pair((p, W_P), (a, W_A))?;
     mul_down(mul_down(gs, gc)?, pa)
 }
 
+/// 05 §4.4 (4): `s = exp2((log2 max(W1, eps_W) + log2 max(W2, eps_W)) / 2)`,
+/// eps_W = 1e-9, rounded down to the FixedU64 grid. Evaluated through the
+/// prescribed exp2/log2 pipeline (in the inverse domain, with the halving
+/// ceiled so the score itself rounds down).
 pub fn settlement_score(w1: FixedU64, w2: FixedU64) -> Result<FixedU64, Error> {
-    let a = w1.0.max(EPSILON.0);
-    let b = w2.0.max(EPSILON.0);
-    q64_to_1e9_down(
-        q64_from_1e9(a)?
-            .checked_mul(q64_from_1e9(b)?)
-            .map_err(|_| Error::ArithmeticOverflow)?
-            .sqrt_floor(),
-    )
-}
-
-trait SqrtFloor {
-    fn sqrt_floor(self) -> Self;
-}
-impl SqrtFloor for FixedU64x64 {
-    fn sqrt_floor(self) -> Self {
-        let mut lo = 0u128;
-        let mut hi = 1u128 << 64;
-        let target = self.raw();
-        while lo < hi {
-            let mid = (lo + hi).div_ceil(2);
-            let sq = mid.saturating_mul(mid);
-            if sq <= target {
-                lo = mid;
-            } else {
-                hi = mid - 1;
-            }
+    let mut exponent = FixedU64x64::ZERO;
+    for value in [w1.0.max(EPSILON.0), w2.0.max(EPSILON.0)] {
+        if value >= ONE {
+            continue;
         }
-        FixedU64x64::from_raw(lo << 32)
+        let inv = FixedU64x64::ONE
+            .checked_div(q64_from_1e9(value)?)
+            .map_err(|_| Error::ArithmeticOverflow)?;
+        let log = inv.log2().map_err(|_| Error::ArithmeticOverflow)?;
+        exponent = exponent
+            .checked_add(log)
+            .map_err(|_| Error::ArithmeticOverflow)?;
     }
+    let half = FixedU64x64::from_raw(exponent.raw().div_ceil(2));
+    exp2_inverse_down(half)
 }
 
 pub fn gate(x: FixedU64, lo: FixedU64, hi: FixedU64) -> Result<FixedU64, Error> {
@@ -721,6 +777,103 @@ mod tests {
         assert!(!flags.s_breached);
         assert!(!flags.c_breached);
     }
+    #[test]
+    fn c_weight_vector_is_joint_across_onchain_and_attested() {
+        // 05 §4.4: one C weight vector across C_onchain and C_attested,
+        // summing to 1 - which is what makes C_daily's renormalization over
+        // the on-chain subset meaningful. Per-sub-pillar sums of 1 (joint 2)
+        // must reject.
+        let mut w = WelfareState::new();
+        let mut specs = default_specs(1);
+        specs.push(spec(5, Pillar::CAttested, ONE, 1));
+        specs.sort_by_key(|s| s.id);
+        assert_eq!(
+            w.register_metric_spec(0, 1, specs),
+            Err(Error::BadWeightSum)
+        );
+        // A split joint vector (0.8 on-chain + 0.2 attested) registers.
+        let mut specs = default_specs(1);
+        specs[1].weight = FixedU64(800_000_000);
+        specs.push(spec(5, Pillar::CAttested, 200_000_000, 1));
+        specs.sort_by_key(|s| s.id);
+        assert_eq!(w.register_metric_spec(0, 1, specs), Ok(()));
+    }
+
+    #[test]
+    fn daily_c_renormalizes_over_the_onchain_subset() {
+        // 05 §4.4: C_daily = product over C_onchain of max(c, eps)^(w / sum_onchain w).
+        // With the on-chain share at weight 0.8 of the joint vector, a daily
+        // value of 0.84 renormalizes to 0.84^1 = 0.84 < theta_C_lo = 0.85
+        // (breach); unrenormalized it would be 0.84^0.8 ~= 0.87 (no breach).
+        let mut w = WelfareState::new();
+        let mut specs = default_specs(1);
+        specs[1].weight = FixedU64(800_000_000);
+        specs.push(spec(5, Pillar::CAttested, 200_000_000, 1));
+        specs.sort_by_key(|s| s.id);
+        w.register_metric_spec(0, 1, specs).unwrap();
+        let flags = w
+            .record_daily_gate(
+                2,
+                0,
+                1,
+                vec![
+                    ComponentValue {
+                        id: 1,
+                        value: FixedU64(ONE),
+                    },
+                    ComponentValue {
+                        id: 2,
+                        value: FixedU64(840_000_000),
+                    },
+                ],
+            )
+            .unwrap();
+        assert!(flags.c_breached);
+        assert!(!flags.s_breached);
+    }
+
+    #[test]
+    fn composites_follow_the_normative_exp2_log2_pipeline() {
+        // 05 §4.4 (2)/(4): weighted geometric terms evaluate as one
+        // exp2(sum(w * log2(...))) and the settlement score as
+        // exp2((log2 + log2)/2); the crate primitives are <= 2 ulp, so the
+        // 1e9-grid results sit within a couple of units of the exact values.
+        let within = |actual: FixedU64, expected: u64, tol: u64| {
+            assert!(
+                actual.0.abs_diff(expected) <= tol,
+                "actual {} expected {expected}",
+                actual.0
+            );
+        };
+        // geo: 0.25^0.5 * 1^0.5 = 0.5
+        within(
+            geo_pair(
+                (FixedU64(250_000_000), FixedU64(500_000_000)),
+                (FixedU64(ONE), FixedU64(500_000_000)),
+            )
+            .unwrap(),
+            500_000_000,
+            2,
+        );
+        // settlement: geomean(1, 1) = 1 exactly; geomean(0.64, 0.25) = 0.4.
+        assert_eq!(
+            settlement_score(FixedU64(ONE), FixedU64(ONE)).unwrap(),
+            FixedU64(ONE)
+        );
+        within(
+            settlement_score(FixedU64(640_000_000), FixedU64(250_000_000)).unwrap(),
+            400_000_000,
+            2,
+        );
+        // The eps_W floor keeps a zeroed epoch's log finite:
+        // geomean(1e-9, 0.5) ~= 2.2360679e-5.
+        within(
+            settlement_score(FixedU64(0), FixedU64(500_000_000)).unwrap(),
+            22_360,
+            2,
+        );
+    }
+
     #[test]
     fn try_state_rejects_corrupt_duplicate_storage() {
         let mut w = WelfareState::new();
