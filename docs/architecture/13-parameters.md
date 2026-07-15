@@ -8,11 +8,13 @@ Normative language: RFC 2119. Blocks at 6 s (14,400/day); USDC 6 decimals, VIT 1
 
 **Reading rules (X-11e/X-11h — no hardcoding, anywhere):**
 
-1. **K** = kernel constant: compile-time in `futarchy-primitives`, no storage representation, changeable only by a Wasm upgrade that the attestation regime surfaces ([09](09-execution-upgrades-and-rollout.md)).
-2. Everything not marked K lives in `pallet-constitution::Params` as a typed record `{ value, min, max, max_delta_per_decision, cooldown, class }`; min/max/max-delta/cooldown/class are genesis-fixed for kernel-bounded keys and META-amendable within compile-time meta-bounds otherwise.
+1. **K** = kernel constant: compile-time in `futarchy-primitives`, no storage representation, changeable only by a Wasm upgrade that the attestation regime surfaces ([09](09-execution-upgrades-and-rollout.md)). **Boundary of the primitives home:** every K-marked numeric value in this document — the LMSR domain bound and error-bound constants included, which `futarchy-fixed` imports and asserts rather than re-declares — lives in `futarchy-primitives::kernel`; sibling crates MUST import it, never re-declare it. Two carve-outs: per-pallet **storage-bound arguments** (§4) live with their owning pallets ([02 §7](02-integration-contract.md)), and pallet-internal implementation constants with no row in this document need no primitives home. Contract-surface **types** — every type named in 02 §§2–7, event-field enums such as `MarketKind` included — likewise live in `futarchy-primitives` (02 §2).
+2. Everything not marked K lives in `pallet-constitution::Params` as a typed record `{ value, min, max, max_delta_per_decision, cooldown, last_change, class, kernel_bounded }`; min/max/max-delta/cooldown/class are genesis-fixed for kernel-bounded keys and META-amendable within compile-time meta-bounds otherwise.
 3. **Every value in this document — K constants included — is machine-readable by clients** via the runtime **constants API** (metadata) or the named storage item, per the [02](02-integration-contract.md) contract. The frontend MUST read, never hardcode (this closes X-11h's backend side: there is no value the FE re-checks that the chain does not expose).
 4. Every default is a **simulation hypothesis** unless marked frozen; Phase 0–3 calibration obligations are tagged *sim-gated*.
 5. `ProposalClass::Emergency` is deleted (D-7): no row in this document carries an EMERGENCY value, and none may be added without reopening D-7.
+6. **`ParamKey` encoding (canonical).** The on-chain `ParamKey` ([02](02-integration-contract.md) §2, `[u8; 16]`) is the row's dotted name, UTF-8-encoded and zero-padded to 16 bytes. Names longer than 16 bytes carry an explicit canonical key, written `key:` in their row — truncation is forbidden (the encoder rejects over-long names). **Per-class rows** (`dec.delta`, `dec.sigma`, `dec.v_min`, `prop.bond`, `pol.b`, `exec.timelock` → base `exec.lock`, `trs.proposer_reward` → base `trs.reward`) materialize as four keys with the class suffixes `.param` / `.trs` / `.code` / `.meta`.
+7. **Record classes and the view projection.** `ParamRecord.class` uses the six-class set {PARAM, TREASURY, META, CONST, entrenched, META+values}; `ParamView.class: ProposalClass` ([02](02-integration-contract.md) §4) projects CONST and entrenched onto `Constitutional` and META+values onto `Meta`. Rows whose min or max is a kernel floor/ceiling are marked `kernel-bounded`: per rule 2 their **entire** governance-metadata tuple (min/max/max-Δ/cooldown/class) is genesis-fixed and `amend_registry` refuses them outright; all other rows are META-amendable within the compile-time meta-bounds (the amendment must keep `min ≤ value ≤ max`, preserve the value kind, and keep `cooldown ≤ 8` epochs). The kernel-bounded set is, normatively and exhaustively (per-row K/floor/ceiling markers plus the §1 safety rationale; conservative where a bound is cross-key-derived or marked "never lowered"/"down only"): `att.window`, `code.spacing`, `dec.delta.code`, `dec.delta.meta`, `dec.delta.param`, `dec.delta.trs`, `dec.sigma.code`, `dec.sigma.meta`, `dec.sigma.param`, `dec.sigma.trs`, `dec.window`, `epoch.length`, `exec.grace`, `exec.lock.code`, `exec.lock.meta`, `exec.lock.param`, `exec.lock.trs`, `gate.eps`, `gate.p_max`, `intake.slash_pct`, `iss.inflation`, `keeper.budget`, `ledger.min_split`, `ledger.pos_dep`, `mkt.kappa`, `orc.bond_bps`, `orc.n_min`, `orc.window`, `pol.budget_epoch`, `trs.cap_180d`, `trs.cap_30d`, `trs.cap_proposal`, `welfare.thC_lo`, `welfare.thS_lo`, `wt.quorum`. Cross-key couplings that a static record cannot express (`dec.sigma ≤ δ/2`, `gate.eps ≤ p_max/2`, `welfare.wP + wA = 1`, `gate.v_min = 0.1 × dec.v_min(class)`) bind at the consuming engine; the seeded static bounds are conservative over-approximations.
 
 ---
 
@@ -40,56 +42,56 @@ Per-class value lists are ordered **PARAM / TREASURY / CODE / META** unless stat
 | `gate.nb_coverage` (GB-NB near-boundary coverage) | Percent | % | 98 | 95 | 100 | — | 2 | META | [05](05-welfare-and-decision-engine.md) §5.2 |
 | `gate.nb_conv` (GB-NB spot-vs-TWAP bound) | Fixed | — | 0.01 | 0.005 | 0.02 | — | 2 | META | [05](05-welfare-and-decision-engine.md) §5.2 |
 | `gate.eps` ε | Fixed | prob | 0.02 | 0.005 | p_max/2 | — | 2 | META | [05](05-welfare-and-decision-engine.md) |
-| `welfare.thetaS` lo/hi | Fixed | — | 0.90 / 0.98 | **lo floor K-entrenched** | — | 0.01 | 4 | CONST (loosen: entrenched) | [05](05-welfare-and-decision-engine.md) |
-| `welfare.thetaC` lo/hi | Fixed | — | 0.85 / 0.95 | lo floor K | — | 0.01 | 4 | CONST | [05](05-welfare-and-decision-engine.md) |
-| `welfare.wP/wA` | Fixed | — | 0.60 / 0.40 | 0.30 | 0.70 | 0.05 | 4 | CONST | [05](05-welfare-and-decision-engine.md) |
+| `welfare.thetaS` lo/hi (keys: `welfare.thS_lo` / `welfare.thS_hi`) | Fixed | — | 0.90 / 0.98 | **lo floor K-entrenched** | — | 0.01 | 4 | CONST (loosen: entrenched) | [05](05-welfare-and-decision-engine.md) |
+| `welfare.thetaC` lo/hi (keys: `welfare.thC_lo` / `welfare.thC_hi`) | Fixed | — | 0.85 / 0.95 | lo floor K | — | 0.01 | 4 | CONST | [05](05-welfare-and-decision-engine.md) |
+| `welfare.wP/wA` (keys: `welfare.wP` / `welfare.wA`) | Fixed | — | 0.60 / 0.40 | 0.30 | 0.70 | 0.05 | 4 | CONST | [05](05-welfare-and-decision-engine.md) |
 | `prop.bond` per class | Balance | USDC | 1k / 5k + 0.5%·Ask / 25k / 50k | ×0.1 | ×10 | ×2 | 2 | META | [06](06-governance-and-guardians.md) |
-| `intake.max_per_account` | u8 | entries/epoch | **4** (frozen, Part 3) | 2 | 8 | 2 | 2 | META | [06](06-governance-and-guardians.md), [08](08-treasury-and-economics.md) §7 |
-| `intake.slash_fraction` (slashed to INSURANCE, never burned) | Percent | % of bond | **10** (frozen, Part 3) | 5 (K floor) | 25 | 5 pp | 2 | META | [06](06-governance-and-guardians.md), [08](08-treasury-and-economics.md) §7 |
+| `intake.max_per_account` (key: `intake.max_acct`) | u8 | entries/epoch | **4** (frozen, Part 3) | 2 | 8 | 2 | 2 | META | [06](06-governance-and-guardians.md), [08](08-treasury-and-economics.md) §7 |
+| `intake.slash_fraction` (key: `intake.slash_pct`; slashed to INSURANCE, never burned) | Percent | % of bond | **10** (frozen, Part 3) | 5 (K floor) | 25 | 5 pp | 2 | META | [06](06-governance-and-guardians.md), [08](08-treasury-and-economics.md) §7 |
 | `pol.b` decision, per branch, per class | Balance | USDC | 10k / 25k / 60k / 100k — **floors of the Ask-scaled schedule** | budget-capped | — | 25% | 1 | TREASURY | [04](04-markets-and-pricing.md), [08](08-treasury-and-economics.md) |
 | `pol.b_gate` | Balance | USDC | 7,500 | — | — | 25% | 1 | TREASURY | [04](04-markets-and-pricing.md) |
 | `pol.b_baseline` | Balance | USDC | **25,000** *(sim-gated — [VERIFY via Phase-0/3 calibration])*; funded from `POL_BASELINE`, **outside** `pol.budget_epoch` | 10,000 | 100,000 | 25% | 1 | TREASURY | [04](04-markets-and-pricing.md), [08](08-treasury-and-economics.md) §4.3 |
-| `pol.budget_epoch` | Percent | NAV | 0.75% | — | **1.5% K** | — | 2 | META | [08](08-treasury-and-economics.md) |
+| `pol.budget_epoch` | Perbill | NAV | 0.75% | — | **1.5% K** | — | 2 | META | [08](08-treasury-and-economics.md) |
 | `exec.timelock` per class | u32 | blocks | 2 d / 3 d / 7 d / 14 d | **24 h K floor** | 30 d | ×2 | 2 | META | [09](09-execution-upgrades-and-rollout.md) |
 | `exec.grace` | u32 | blocks | 14 d | **7 d K floor** | 30 d | — | 2 | META | [09](09-execution-upgrades-and-rollout.md) |
 | `trs.cap_proposal` | Percent | NAV | 5% | — | **10% K** | 1 pp | 2 | META | [08](08-treasury-and-economics.md) |
 | `trs.cap_30d` / `trs.cap_180d` | Percent | NAV | 10% / 30% | — | 15% / 40% K | — | 2 | META | [08](08-treasury-and-economics.md) |
-| `trs.stream_threshold` | Percent | NAV | 1% | 0.5% | 5% | — | 2 | META | [08](08-treasury-and-economics.md) |
+| `trs.stream_threshold` (key: `trs.stream_thr`) | Perbill | NAV | 1% | 0.5% | 5% | — | 2 | META | [08](08-treasury-and-economics.md) |
 | `trs.proposer_reward` | Balance | USDC | PARAM 500; TREASURY/CODE min(0.05%·Ask, 25k); META 25k | ×0.1 | ×10 | ×2 | 2 | META | [08](08-treasury-and-economics.md) |
-| `iss.inflation_cap` | Percent | /yr | 2% | — | amendable **down only** (K) | — | — | CONST | [08](08-treasury-and-economics.md) §2.3 |
-| `fee.vit_usdc_rate` | Fixed | USDC/VIT | 1.0 × `fee.vit_usdc_rate_ref` (ref is K, set at genesis from launch price — **[VERIFY at TGE; placeholder ref 0.05 USDC/VIT]**) | **0.1 × ref (K)** | **10 × ref (K)** | ×2 | 1 | PARAM | [08](08-treasury-and-economics.md) §9 |
+| `iss.inflation_cap` (key: `iss.inflation`) | Percent | /yr | 2% | — | amendable **down only** (K) | — | — | CONST | [08](08-treasury-and-economics.md) §2.3 |
+| `fee.vit_usdc_rate` (key: `fee.vit_usdc`) | Fixed | USDC/VIT | 1.0 × `fee.vit_usdc_rate_ref` (ref is K, set at genesis from launch price — **[VERIFY at TGE; placeholder ref 0.05 USDC/VIT]**) | **0.1 × ref (K)** | **10 × ref (K)** | ×2 | 1 | PARAM | [08](08-treasury-and-economics.md) §9 |
 | `code.spacing` | u32 | blocks | 30 d | **14 d K floor** | — | — | 2 | META | [09](09-execution-upgrades-and-rollout.md) |
 | `orc.bond_floor` (round-1 floor) | Balance | USDC | 10k | 2.5k | 100k | — | 2 | META | [07](07-oracle-and-disputes.md) §6 |
 | `orc.bond_bps` (value scaling: `B_1 = max(orc.bond_floor, orc.bond_bps × StakeAtRisk)`; `B_r = B_1·2^(r−1)` — [07](07-oracle-and-disputes.md) §6.1) | Perbill | bps | **250** | **150** (hard min — keeps the §6.3 coverage rule ≥ 10.5%) | 1,000 | ×2 | 2 | META | [07](07-oracle-and-disputes.md) §6 |
 | `orc.rounds` R_max | u8 | — | 3 | 2 | 4 | — | 2 | META | [07](07-oracle-and-disputes.md) |
 | `orc.window` (challenge) | u32 | blocks | **43,200 (72 h — frozen, D-18)** | 43,200 (72 h kernel floor — never lowered) | 72,000 (120 h) | — | 2 | META | [07](07-oracle-and-disputes.md) §5 |
-| `orc.reporter_stake` | Balance | USDC | 100k | 25k | 500k | ×2 | 2 | META | [07](07-oracle-and-disputes.md) |
+| `orc.reporter_stake` (key: `orc.rep_stake`) | Balance | USDC | 100k | 25k | 500k | ×2 | 2 | META | [07](07-oracle-and-disputes.md) |
 | `dis.merit_min` (ProcessHold dispute-bond threshold) | Balance | USDC | **= `B_1(c, m)` (value-scaled per [07](07-oracle-and-disputes.md) §6.1; default equality)** | floor: `orc.bond_floor` | — | ×2 | 2 | META | [07](07-oracle-and-disputes.md) §12 |
 | `wt.quorum` (watchtower ack) | u8 | of N registered | 2 | 2 (kernel floor) | 5 | 1 | 2 | META | [07](07-oracle-and-disputes.md) §4 |
 | `wt.stake` (watchtower bond) | Balance | USDC | 25,000 | 10k | 100k | ×2 | 2 | META | [07](07-oracle-and-disputes.md) §4 |
 | `orc.n_min` (reporters before attested admission / Phase-3 arming) | u8 | — | 3 | 3 (K floor) | 16 | 1 | 2 | META | [07](07-oracle-and-disputes.md) §3, [05](05-welfare-and-decision-engine.md) §4.3.1 |
-| `reg.bond_incident` / `reg.bond_milestone` | Balance | USDC | 5,000 / 2,500 | ×0.5 | ×10 | ×2 | 2 | META | [07](07-oracle-and-disputes.md) §7 |
-| `res.probe_interval` / `res.probe_timeout` | u32 | blocks | 14,400 / 600 | — | — | — | 1 | PARAM | [07](07-oracle-and-disputes.md) §8 |
+| `reg.bond_incident` / `reg.bond_milestone` (keys: `reg.bond_inc` / `reg.bond_mile`) | Balance | USDC | 5,000 / 2,500 | ×0.5 | ×10 | ×2 | 2 | META | [07](07-oracle-and-disputes.md) §7 |
+| `res.probe_interval` / `res.probe_timeout` (keys: `res.probe_int` / `res.probe_to`) | u32 | blocks | 14,400 / 600 | — | — | — | 1 | PARAM | [07](07-oracle-and-disputes.md) §8 |
 | `res.probe_amount` | Balance | USDC | 0.10 (10 USDC-cents) | — | — | — | 1 | PARAM | [07](07-oracle-and-disputes.md) §8 |
-| `res.fail_threshold` / `res.recover_threshold` | u8 | consecutive probes | 2 / 3 | — | — | — | 2 | META | [07](07-oracle-and-disputes.md) §8 |
+| `res.fail_threshold` / `res.recover_threshold` (keys: `res.fail_thr` / `res.recover_thr`) | u8 | consecutive probes | 2 / 3 | — | — | — | 2 | META | [07](07-oracle-and-disputes.md) §8 |
 | `grd.bond` / allowances | — | — | 50k VIT / [06](06-governance-and-guardians.md) table | — | scope K | — | — | entrenched | [06](06-governance-and-guardians.md) |
 | `keeper.rebate` | Balance | USDC | ≈3× fee cost per sanctioned crank **[VERIFY fee basis at benchmark time]** | 1× | 10× | — | 1 | PARAM | [08](08-treasury-and-economics.md) §6 |
-| `keeper.budget_epoch` | Balance | USDC | **12,000** (raised per keeper-medium; derivation [08](08-treasury-and-economics.md) §6.2) | 6,000 (floor covers decision-critical load — see §3 note) | 60,000 | ×2 | 1 | PARAM | [08](08-treasury-and-economics.md) |
-| `collator.comp_epoch` | Balance | USDC/collator | **2,000** (frozen default, D-15) | 500 | 10,000 | ×2 | 1 | PARAM | [08](08-treasury-and-economics.md) §2.4 |
+| `keeper.budget_epoch` (key: `keeper.budget`) | Balance | USDC | **12,000** (raised per keeper-medium; derivation [08](08-treasury-and-economics.md) §6.2) | 6,000 (floor covers decision-critical load — see §3 note) | 60,000 | ×2 | 1 | PARAM | [08](08-treasury-and-economics.md) |
+| `collator.comp_epoch` (key: `collator.comp`) | Balance | USDC/collator | **2,000** (frozen default, D-15) | 500 | 10,000 | ×2 | 1 | PARAM | [08](08-treasury-and-economics.md) §2.4 |
 | `collator.n_min` (K component of `C_onchain`) | u8 | — | 4 | 3 | 12 | 1 | 2 | META | [05](05-welfare-and-decision-engine.md) §4.3 |
-| `collator.bond_req_vit` (E-coverage requirement, per collator) | Balance | VIT | **[VERIFY — set with the collator program before Phase-3 arming; sim-gated]** | — | — | ×2 | 2 | META | [05](05-welfare-and-decision-engine.md) §4.3.1 |
-| `collator.n_target` (E-coverage denominator) | u8 | — | 5 at launch, phase-scheduled upward **[VERIFY schedule at phase gates]** | 4 | 12 | 1 | 2 | META | [05](05-welfare-and-decision-engine.md) §4.3.1 |
+| `collator.bond_req_vit` (key: `collator.bond`; E-coverage requirement, per collator) | Balance | VIT | **[VERIFY — set with the collator program before Phase-3 arming; sim-gated]** | — | — | ×2 | 2 | META | [05](05-welfare-and-decision-engine.md) §4.3.1 |
+| `collator.n_target` (key: `collator.n_tgt`; E-coverage denominator) | u8 | — | 5 at launch, phase-scheduled upward **[VERIFY schedule at phase gates]** | 4 | 12 | 1 | 2 | META | [05](05-welfare-and-decision-engine.md) §4.3.1 |
 | `sec.prize.param` / `sec.prize.code` / `sec.prize.meta` (InCapPrize capability-envelope proxies; an undefined proxy ⇒ the proposal MUST NOT pass sizing) | Balance | USDC | **[VERIFY — derived from the class capability envelopes in Phase-0 calibration; sim-gated]** (CODE/META effective prize additionally floored at `trs.cap_proposal`·NAV for upgrade payloads, [08](08-treasury-and-economics.md) §5.2) | — | — | ×2 | 2 | META | [05](05-welfare-and-decision-engine.md) §5.6, [08](08-treasury-and-economics.md) §5 |
 | `sec.flow_cap` (wash-trade ceiling on measured contest flow in `C_hold` of the `ManipFloor̂` diagnostic — diagnostic-only in v1, never gates) | Fixed | × of `(b_acc + b_rej)` | **[VERIFY — Phase-0 calibration; sim-gated]** | — | — | ×2 | 2 | META | [05](05-welfare-and-decision-engine.md) §5.6, [14](14-threat-model.md) |
-| `ops.*` budget lines (`ops.bootnodes`, `ops.rpc_archive`, `ops.collators`, `ops.keepers`, `ops.oracle_evidence`, `ops.monitoring`, `ops.arweave`, `ops.watchtowers`, `ops.coretime`) | Balance | USDC/epoch | **[VERIFY — sized in Phase-2/3 ops planning; ops-gated]** (`ops.collators` = `collator.comp_epoch` × collator count; `ops.keepers` per [08](08-treasury-and-economics.md) §6.3) | — | — | — | 1 | TREASURY | [08](08-treasury-and-economics.md) §1.1, [12](12-release-and-operations.md) §6.1 |
-| `grd.review_deadline` (guardian retro-ratification deadline) | u32 | epochs | 2 | 1 | 4 | 1 | 2 | META | [06](06-governance-and-guardians.md) §5.4 |
+| `ops.*` budget lines (`ops.bootnodes`, `ops.rpc_archive`, `ops.collators`, `ops.keepers`, `ops.oracle_evidence` (key: `ops.oracle_ev`), `ops.monitoring`, `ops.arweave`, `ops.watchtowers`, `ops.coretime`) | Balance | USDC/epoch | **[VERIFY — sized in Phase-2/3 ops planning; ops-gated]** (`ops.collators` = `collator.comp_epoch` × collator count; `ops.keepers` per [08](08-treasury-and-economics.md) §6.3) | — | — | — | 1 | TREASURY | [08](08-treasury-and-economics.md) §1.1, [12](12-release-and-operations.md) §6.1 |
+| `grd.review_deadline` (key: `grd.review_dl`; guardian retro-ratification deadline) | u32 | epochs | 2 | 1 | 4 | 1 | 2 | META | [06](06-governance-and-guardians.md) §5.4 |
 | `att.bond` (attestor bond) | Balance | VIT | 25,000 | ×0.5 | ×10 | ×2 | 2 | entrenched | [06](06-governance-and-guardians.md) §7 |
-| `att.challenge_window` | u32 | blocks | 43,200 (72 h) | 43,200 | 72,000 | — | 2 | META | [06](06-governance-and-guardians.md) §7, [09](09-execution-upgrades-and-rollout.md) §2.4 |
+| `att.challenge_window` (key: `att.window`) | u32 | blocks | 43,200 (72 h) | 43,200 | 72,000 | — | 2 | META | [06](06-governance-and-guardians.md) §7, [09](09-execution-upgrades-and-rollout.md) §2.4 |
 | `ledger.min_split` (= MinTransfer) | Balance | USDC | 0.01 (10⁴ base units) | 0.01 (K floor) | 1 | — | 2 | META | [03](03-conditional-ledger.md) |
-| `ledger.archive_delay` | u32 | blocks | 1 yr | 90 d | — | — | 2 | META | [03](03-conditional-ledger.md) |
-| `ledger.position_deposit` | Balance | USDC/entry | **0.1** (frozen, Part 3; raised from 0.01) | 0.1 (K floor) | 1 | — | 2 | META | [03](03-conditional-ledger.md) |
+| `ledger.archive_delay` (key: `ledger.archive`) | u32 | blocks | 1 yr | 90 d | — | — | 2 | META | [03](03-conditional-ledger.md) |
+| `ledger.position_deposit` (key: `ledger.pos_dep`) | Balance | USDC/entry | **0.1** (frozen, Part 3; raised from 0.01) | 0.1 (K floor) | 1 | — | 2 | META | [03](03-conditional-ledger.md) |
 | `phase3.tvl_cap` (global real-USDC exposure, D-13) | Balance | USDC | 2,000,000 *(sim-gated **[VERIFY before Phase-3 arming]**)* | — | raised only by phase-gate META + values ratification | — | — | META+values | [09](09-execution-upgrades-and-rollout.md) |
-| `phase3.deposit_cap` (per account, D-13) | Balance | USDC | 20,000 *(sim-gated **[VERIFY]**)* | — | as above | — | — | META+values | [09](09-execution-upgrades-and-rollout.md) |
+| `phase3.deposit_cap` (key: `phase3.dep_cap`; per account, D-13) | Balance | USDC | 20,000 *(sim-gated **[VERIFY]**)* | — | as above | — | — | META+values | [09](09-execution-upgrades-and-rollout.md) |
 
 Safety rationale (row-wise, carried forward): kernel floors/ceilings exist so no captured decision sequence can walk a defense to zero — δ cannot reach 0, windows cannot reach one block, κ cannot open flash manipulation, timelocks/grace cannot vanish, p_max cannot exceed 0.10, guardian scope cannot grow, the intake slash fraction cannot reach 0, and the Ask-scaling `2·InCapPrize` term of `dec.v_min` is kernel, not a key.
 
@@ -119,7 +121,7 @@ Safety rationale (row-wise, carried forward): kernel floors/ceilings exist so no
 | Dead-man switch | no finalized parachain block for 4,800 relay blocks (~8 h) or snapshot > 4 d overdue ⇒ queue freeze, clock pause; coretime-renewal call **exempt** (D-9) | [05](05-welfare-and-decision-engine.md), [09](09-execution-upgrades-and-rollout.md) |
 | `StaleEpochBound` | 7 days ⇒ force-reject all in-flight on next tick | [05](05-welfare-and-decision-engine.md) |
 | Crank batch bounds | `TickBatch` = 10; `ReapBatch` = 100; `settle_cohort` ≤ 100 items/call | [05](05-welfare-and-decision-engine.md), [03](03-conditional-ledger.md) |
-| Entrenched floors | θS⁻/θC⁻ K-entrenched; guardian scope K; annulment requirement K; VOID rule K | [05](05-welfare-and-decision-engine.md), [06](06-governance-and-guardians.md) |
+| Entrenched floors | θS⁻/θC⁻ K-entrenched at **0.90 / 0.85** — deliberately equal to the [05](05-welfare-and-decision-engine.md) launch defaults: the welfare-gate knees are tighten-only from genesis and can never be amended below launch values; guardian scope K; annulment requirement K; VOID rule K | [05](05-welfare-and-decision-engine.md), [06](06-governance-and-guardians.md) |
 | Keeper-budget floor note | the 6,000 USDC hard min of `keeper.budget_epoch` is a kernel floor: below it the metered budget cannot cover decision-critical cranks at the 1× rebate bound and A-1 fails silently | [08](08-treasury-and-economics.md) §6 |
 
 ---
@@ -128,7 +130,7 @@ Safety rationale (row-wise, carried forward): kernel floors/ceilings exist so no
 
 ### 3.1 Epoch schedule — offsets as **fractions of `epoch.length`** (d-labels at the 21-day default)
 
-Phase offsets are stored as rational fractions of `epoch.length` (B-med fix), so the schedule survives `epoch.length` changes. **Changes take effect next epoch; in-flight cohorts keep their creation-time schedule.** Day labels below are the 302,400-block default.
+Phase offsets are stored as rational fractions of `epoch.length` (B-med fix), so the schedule survives `epoch.length` changes. **Representation (resolves the [02 §9](02-integration-contract.md) grouping ambiguity): the fraction pairs (numerator, denominator = 21) are kernel constants (K) in `futarchy-primitives`, exposed to clients as pallet metadata constants — they are not `Params` storage.** **Changes take effect next epoch; in-flight cohorts keep their creation-time schedule.** Day labels below are the 302,400-block default.
 
 | Phase | Fraction of epoch | Blocks (default) | Label |
 |---|---|---|---|
@@ -211,6 +213,9 @@ On-chain results MUST match within the §2 error bound plus one base unit of rou
 | Snapshots | ≤ 20 epochs (H + challenge + 12) | `pallet-welfare` | [05](05-welfare-and-decision-engine.md) |
 | `ExecutionRecords` | ring 256 (canonical history is event-derived within the committed window, D-2/D-6 — “pruned to indexer” language deleted) | [09](09-execution-upgrades-and-rollout.md), [02](02-integration-contract.md) |
 | Registry filings (Incident/Milestone) | bounded per `pallet-registry` spec | [07](07-oracle-and-disputes.md) |
+| `Params` registry | **128** keys (genesis-fixed set; ≥ the ~87 currently-concrete §1 rows plus headroom for `[VERIFY]`-gated rows as they resolve; the `params()` runtime API keeps its own 64-keys-per-call bound, [02](02-integration-contract.md) §3) | `pallet-constitution` |
+| `Capabilities` table | 64 rows | `pallet-constitution` |
+| `Meters` | 16 (generic bounded-meter primitive; empty at genesis — envelope meters live with their owning pallets, [15](15-invariants-and-testing.md) I-17) | `pallet-constitution` |
 
 **Why 64 and 32 are jointly satisfiable:** intake admits ≤ 64 candidates per epoch *before* Screening; qualification passes ≤ `epoch.slots` = 5 per epoch into the live pipeline. Live occupancy = 5 trading + ≤ 20 in measurement/settlement (5 × 4 cohort stages) + extended/suspended/rerun/queued stragglers ≤ 7 of margin ⇒ 32 suffices with headroom; 64 merely prices the pre-qualification waiting room (bonds + slash, [08](08-treasury-and-economics.md) §7).
 

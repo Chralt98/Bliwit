@@ -6,7 +6,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 
-use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub const INTEGRATION_CONTRACT_VERSION: u32 = 2;
@@ -24,7 +24,18 @@ pub type AccountId = [u8; 32];
 pub type H256 = [u8; 32];
 pub type BlockNumber = u32;
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub struct FixedU64(pub u64);
 
 #[derive(Clone, Debug, Eq, PartialEq, TypeInfo)]
@@ -155,7 +166,18 @@ pub enum VaultState {
     Voided,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum ProposalClass {
     Param,
     Treasury,

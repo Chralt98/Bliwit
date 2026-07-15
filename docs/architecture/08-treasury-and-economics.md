@@ -221,9 +221,9 @@ i.e., every decision-grade, sizing-passing adoption satisfies `AttackCost̂ ≥ 
 - `dec.v_min` = max(250,000, 400,000) = **400,000**; L̂ = 34,657 + 400,000 = 434,657; AttackCost̂ = **651,986**.
 - 3P = 600,000 ≤ 651,986 ✔ (margin 8.7%). Under the old flat defaults this identical proposal had AttackCost ≈ 51,986 vs required 600,000 — an 11.5× shortfall, now closed.
 
-**(c) PARAM at flat defaults (scaling not binding).** L̂ = 2 × 10,000 × ln 2 + 100,000 = 127,726; AttackCost̂ = 191,589; max passable envelope value = **63,863 USDC**. A PARAM delta whose certified envelope exceeds this must either attract more organic volume or fail sizing — the static-classification escape hatch of BE §13 is thereby bounded, not trusted.
+**(c) PARAM at flat defaults (scaling not binding).** L̂ = 2 × 10,000 × ln 2 + 100,000 = 113,863; AttackCost̂ = 170,794; max passable envelope value = **56,931 USDC**. A PARAM delta whose certified envelope exceeds this must either attract more organic volume or fail sizing — the static-classification escape hatch of BE §13 is thereby bounded, not trusted.
 
-**Defaults table `P_ref(class)`** (derived, frozen in [13](13-parameters.md) as derived values): PARAM 63,863 (= 1.5·(27,726 + 100,000)/3); TREASURY 142,329 (= 1.5·(34,657 + 250,000)/3); CODE 341,589 (= 1.5·(83,178 + 600,000)/3); META 669,315 (= 1.5·(138,629 + 1,200,000)/3).
+**Defaults table `P_ref(class)`** (derived, frozen in [13](13-parameters.md) as derived values): PARAM 56,931 (= 1.5·(13,863 + 100,000)/3); TREASURY 142,329 (= 1.5·(34,657 + 250,000)/3); CODE 341,589 (= 1.5·(83,178 + 600,000)/3); META 669,315 (= 1.5·(138,629 + 1,200,000)/3). Every class term is the **decision-pair** seeded depth `2·b·ln 2` at the [13](13-parameters.md) `pol.b` floors (10k/25k/60k/100k) plus the `dec.v_min` floor — gate-book depth is deliberately excluded from L̂ (§5.2 measures the decision pair only). The superseded PARAM cells (27,726 / 63,863) were a doubling slip: no other row, and no other 08 site (§3 commitments, §4.1 NAV floors), used 4·b·ln 2.
 
 ### 5.5 Honesty clause
 

@@ -150,7 +150,7 @@ Every DESIGN_REVIEW.md finding, its resolution, and the owning component documen
 | X-12 | D-11: FE-15 operator surface | 11 |
 | X-13 | D-16: owners + funding + permabuy | 12 |
 | X-14 | D-12: `fee.vit_usdc_rate` | 08 |
-| X-15 | D-2: published test artifacts | 02, 15 |
+| X-15 | D-2: published test artifacts | 02, 15; corpus schema: 04 §5 |
 | B-1 | D-1 | 03 |
 | B-2 | Gate instruments representable: `PositionKind` gains `GateYes(gate)`, `GateNo(gate)` per branch; `VaultInfo` gains per-branch gate-set supplies; `settle_gate(pid, gate, outcome)` call; conservation identity extended per-branch over the enlarged set | 03 |
 | B-3 | Baseline market gets a ledger home: epoch-keyed `BaselineVaults`, `PositionId::Baseline{epoch, Long/Short}`, `pol.b_baseline` param, settlement path via SettleAuthority at epoch settlement | 03, 04 |

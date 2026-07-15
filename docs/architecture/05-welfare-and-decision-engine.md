@@ -18,16 +18,34 @@ pub enum ProposalClass { Param, Treasury, Code, Meta, Constitutional }
 
 ### 1.2 `Proposal` — new fields (B-med: decide() fields)
 
-The canonical `Proposal` (type frozen in [doc 02](./02-integration-contract.md)) gains three fields the engine consumes; the previous spec's pseudocode referenced two of them without declaring them:
+The canonical `Proposal` (layout frozen as part of the [doc 02](./02-integration-contract.md) contract "by inclusion in `futarchy-primitives`") gains three fields the engine consumes (`ask`, `decide_at`, `rerun`); the base field list, which 02 and this document previously deferred to each other without either enumerating it, is **frozen here in full** — this declaration order is the SCALE layout:
 
 ```rust
-pub struct Proposal {
-    // ... fields as in doc 02 ...
+/// Generic over the runtime `AccountId` (concrete instantiation: AccountId32, 02 §8);
+/// carried by `futarchy-primitives` per 02 §2.
+pub struct Proposal<AccountId> {
+    pub id: ProposalId,
+    pub proposer: AccountId,
+    pub class: ProposalClass,
+    pub state: ProposalState,
+    pub epoch: EpochId,                     // creation epoch — the schedule anchor (§2.3)
+    pub submitted_at: BlockNumber,
+    pub payload_hash: H256,                 // pinned at qualification (06; re-checked 09 §1.2(2))
     pub ask: Balance,            // committed USDC outflow (TREASURY; 0 otherwise). Consumed by
                                  // bond formula, security sizing (§5.6), Ask-scaled liquidity (doc 08)
+    pub bond: Balance,                      // class bond held (13 §1 `prop.bond`)
+    pub resources: BoundedVec<[u8; 8], 8>,  // declared resource-domain keys (bound: 13 §4 "Resource locks")
+    pub metric_spec: MetricSpecVersion,     // creation-time spec version (I-16)
     pub decide_at: BlockNumber,  // absolute; computed and stored at qualification from the
                                  // creation-time epoch schedule (§2.3); updated only by T8/T13
     pub rerun: bool,             // set at rerun open (T13); selects the 2×POL / δ+1pp regime
+    pub extended: bool,                     // per-pair extension consumed (§2.1 T8)
+    pub delayed_once: bool,                 // guardian delay-once consumed (06)
+    pub markets: Option<MarketSet>,         // book ids once seeded (04)
+    pub maturity: Option<BlockNumber>,      // execution-queue maturity (09 §1.2(1))
+    pub grace_end: Option<BlockNumber>,     // execution grace deadline (09 §1.2(1))
+    pub version_constraint: Option<RuntimeVersionConstraint>, // layout: 09 §1.2(3)
+    pub decision: Option<DecisionOutcome>,  // set at decide()/terminal transition
 }
 ```
 
@@ -294,7 +312,7 @@ D_eff = min(1, (1 − HHI) / (1 − 1/n_cap(phase)))
 
 ### 4.6 Normalization and cold start (B-15, D-15)
 
-Steady state (unchanged): each raw metric is winsorized at the 5th/95th percentile of the trailing **12 finalized epoch values**, `log1p` for heavy-tailed series, min–max mapped to [0,1]; normalization constants for epoch e are computed from Snapshot(e−1) history and **frozen at epoch open before any epoch-e market opens**.
+Steady state (unchanged): each raw metric is winsorized at the 5th/95th percentile of the trailing **12 finalized epoch values**, `log1p` for heavy-tailed series, min–max mapped to [0,1]; normalization constants for epoch e are computed from Snapshot(e−1) history and **frozen at epoch open before any epoch-e market opens**. **Percentile family (normative):** inclusive linear interpolation (the "type-7" estimator — rank `1 + f·(n−1)` on the ascending sample, linearly interpolated between the bracketing order statistics); on-chain it is evaluated on the `FixedU64` 1e9 grid with the interpolation product rounded **down**, per §4.4's discipline. With the always-12-element §4.6 sample this is never vacuous: p5 interpolates between x₁ and x₂, p95 between x₁₁ and x₁₂ (nearest-rank would degenerate to min/max here, which is not meant).
 
 **Cold start (epochs 1–12).** Genesis ships, per normalized component:
 

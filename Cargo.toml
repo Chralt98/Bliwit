@@ -36,5 +36,17 @@ license = "GPL-3.0"
 repository = "https://github.com/bleavit/bleavit"
 
 [workspace.dependencies]
-# Polkadot SDK umbrella crate pin verified in PLAN.md V-1.
-polkadot-sdk = "2603.0.0"
+# FRAME crates on the `polkadot-stable2603` release train (01 §9; PLAN V-1).
+# The polkadot-sdk 2603.0.0 umbrella crate is the *version source* for these
+# pins (its manifest names this exact family), but it must NOT be depended on
+# directly: lockfile resolution drags the whole node stack in
+# (sc-service → litep2p → multihash → yanked core2 0.4.0) and fails.
+# Versions are `=`-exact so `cargo update` cannot silently drift the SDK mix
+# before the B1a runtime assembly (Codex adversarial-review finding, 2026-07-15);
+# frame-support 46.0.1 is the train's crates.io patch release, tested here.
+frame-support = { version = "=46.0.1", default-features = false }
+frame-system = { version = "=46.0.0", default-features = false }
+frame-benchmarking = { version = "=46.0.0", default-features = false }
+sp-runtime = { version = "=46.0.0", default-features = false }
+sp-io = { version = "=45.0.0", default-features = false }
+sp-core = { version = "=40.0.0", default-features = false }

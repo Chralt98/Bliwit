@@ -39,7 +39,7 @@ Checks in order, **all at dispatch time**. This list is normative and canonical:
 
 1. **Queue state**: queued, not cancelled, `maturity ≤ now ≤ grace_end`.
 2. **Preimage**: fetched; hash and length match the trading-time commitment (pinned since qualification, §7.3).
-3. **Version constraint**: `RuntimeVersionConstraint` matches live `spec_name`/`spec_version` — mismatch (an intervening upgrade) transitions to `Rejected(StaleQueue)`, requiring resubmission.
+3. **Version constraint**: `RuntimeVersionConstraint` matches live `spec_name`/`spec_version` — mismatch (an intervening upgrade) transitions to `Rejected(StaleQueue)`, requiring resubmission. **Layout (normative here; the type appears inside the frozen [02 §4](./02-integration-contract.md) `QueuedExecutionView` and the doc-05 `Proposal`):** `RuntimeVersionConstraint { spec_name: BoundedVec<u8, 32> /* UTF-8, = RuntimeVersion.spec_name */, spec_version: u32 }`.
 4. **Ratification (D-5)**: for CODE/META (and rule-altering META per the [06](./06-governance-and-guardians.md) capability table), the referendum at `ratify_ref` is in state Passed → else `Rejected(NotRatified)`. This is the single ratification deadline; there is no queue-time ratification check.
 5. **Attestation presence**: for CODE/META, the `AttestationRecord` referenced by `attestation_id` still exists, is unrevoked and unchallenged → else `Rejected(AttestationMissing)`. (Content validity was established at queue time, §1.1(3); this check catches post-queue revocation by an upheld late challenge.)
 6. **Capability rules**: every call domain in the batch is admissible for the class origin per the constitution capability table.
