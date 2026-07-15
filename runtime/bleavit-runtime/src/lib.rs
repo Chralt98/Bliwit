@@ -8,7 +8,10 @@ use futarchy_primitives::{
     chain_identity, currency, kernel, Balance, BlockNumber, ParamKey, H256,
     INTEGRATION_CONTRACT_VERSION,
 };
-use pallet_origins::{CallDomain, Origin, RuntimeCall, SafetyFilter};
+// The B1 frame-free composition model consumes the frame-free origins core
+// directly; A4 turned `pallet-origins` into a real `#[frame_support::pallet]`
+// whose `Origin`/`SafetyFilter` are the FRAME surface (B1a wires those).
+use origins_core::{CallDomain, Origin, RuntimeCall, SafetyFilter};
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
@@ -334,7 +337,7 @@ pub fn all_custom_origins() -> [Origin; 8] {
 }
 
 pub fn exhaustive_filter_sample() -> Vec<BleavitCall> {
-    use pallet_origins::{BoxedCall, RuntimeCall as C};
+    use origins_core::{BoxedCall, RuntimeCall as C};
     fn boxed(call: C) -> BoxedCall {
         BoxedCall::new(call)
     }
@@ -386,7 +389,7 @@ mod tests {
     use super::*;
     use alloc::vec;
     use futarchy_primitives::ProposalClass;
-    use pallet_origins::{BoxedCall, RuntimeCall as C};
+    use origins_core::{BoxedCall, RuntimeCall as C};
 
     fn boxed(call: C) -> BoxedCall {
         BoxedCall::new(call)

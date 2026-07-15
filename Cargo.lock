@@ -558,7 +558,7 @@ name = "bleavit-runtime"
 version = "0.1.0"
 dependencies = [
  "futarchy-primitives",
- "pallet-origins",
+ "origins-core",
  "parity-scale-codec",
  "scale-info",
 ]
@@ -2285,10 +2285,16 @@ dependencies = [
 name = "pallet-origins"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
  "futarchy-primitives",
  "origins-core",
  "parity-scale-codec",
  "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
 ]
 
 [[package]]

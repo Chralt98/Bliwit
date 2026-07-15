@@ -7,7 +7,10 @@ repository.workspace = true
 
 [dependencies]
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
-pallet-origins = { path = "../../pallets/origins", default-features = false }
+# B1 is the frame-free composition *model*: it consumes the frame-free
+# `origins-core` directly (A4 made `pallet-origins` a real FRAME pallet; the
+# runtime-level `construct_runtime!`/`BaseCallFilter` wiring over it is B1a).
+origins-core = { path = "../../crates/origins-core", default-features = false }
 parity-scale-codec = { version = "3", default-features = false, features = ["derive"] }
 scale-info = { version = "2", default-features = false, features = ["derive"] }
 
@@ -15,7 +18,7 @@ scale-info = { version = "2", default-features = false, features = ["derive"] }
 default = ["std"]
 std = [
   "futarchy-primitives/std",
-  "pallet-origins/std",
+  "origins-core/std",
   "parity-scale-codec/std",
   "scale-info/std",
 ]

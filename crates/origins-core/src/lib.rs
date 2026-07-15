@@ -4,12 +4,13 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+// 06 §3.3 wrapper bounds are kernel `K` constants single-homed in
+// `futarchy-primitives` (13 §1 `MAX_NESTED` = 4 levels / ≤ 16 calls; 01 §5.2:
+// downstream cores import, never re-declare). SQ-25 / Track-M audit fix.
+use futarchy_primitives::kernel::{MAX_NESTED_CALLS, MAX_NESTED_LEVELS};
 use futarchy_primitives::ProposalClass;
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
-
-pub const MAX_NESTING_DEPTH: u8 = 4;
-pub const MAX_WRAPPED_CALLS: u8 = 16;
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum Origin {
@@ -111,8 +112,8 @@ pub enum Error {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Budget {
-    depth: u8,
-    calls: u8,
+    depth: u32,
+    calls: u32,
 }
 
 impl Budget {
@@ -122,7 +123,7 @@ impl Budget {
 
     fn enter(&mut self) -> Result<(), Error> {
         self.depth = self.depth.checked_add(1).ok_or(Error::TooDeep)?;
-        ensure!(self.depth <= MAX_NESTING_DEPTH, Error::TooDeep);
+        ensure!(self.depth <= MAX_NESTED_LEVELS, Error::TooDeep);
         Ok(())
     }
 
@@ -132,7 +133,7 @@ impl Budget {
 
     fn count_call(&mut self) -> Result<(), Error> {
         self.calls = self.calls.checked_add(1).ok_or(Error::TooManyCalls)?;
-        ensure!(self.calls <= MAX_WRAPPED_CALLS, Error::TooManyCalls);
+        ensure!(self.calls <= MAX_NESTED_CALLS, Error::TooManyCalls);
         Ok(())
     }
 }
