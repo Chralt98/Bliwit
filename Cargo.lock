@@ -2377,10 +2377,18 @@ dependencies = [
 name = "pallet-registry"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
  "futarchy-primitives",
+ "pallet-assets",
+ "pallet-balances",
  "parity-scale-codec",
  "registry-core",
  "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
 ]
 
 [[package]]

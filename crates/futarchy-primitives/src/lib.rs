@@ -773,6 +773,12 @@ pub mod kernel {
     pub const DEC_EXTENSION_BLOCKS: u32 = 43_200;
     pub const DESCRIPTOR_LEAD_TIME_BLOCKS: u32 = 43_200;
     pub const WATCHTOWER_EXTENSION_BLOCKS: u32 = 28_800;
+    /// The 72 h optimistic challenge window (`orc.window`, 07 §5.2/§7), a frozen
+    /// shared kernel floor (META ≤ 120 h, never lowered). Single home for the
+    /// value the oracle reporting game and the `pallet-registry` filing windows
+    /// both use; the registry uses the frozen floor (07 §7 "72 h ... frozen
+    /// constant"), never a live-amended value.
+    pub const ORC_WINDOW_BLOCKS: u32 = 43_200;
     pub const MAX_NESTED_LEVELS: u32 = 4;
     pub const MAX_NESTED_CALLS: u32 = 16;
     pub const MAX_CALLS: u32 = 16;

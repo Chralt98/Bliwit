@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use futarchy_primitives::{
     AccountId, Balance, BlockNumber, EpochId, FixedU64, MetricSpecVersion, H256,
 };
-use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub type FilingId = u32;
@@ -16,23 +16,53 @@ pub const MAX_FILINGS_PER_EPOCH: u32 = futarchy_primitives::kernel::REG_MAX_FILI
 pub const MAX_LIVE_EPOCHS: usize = 4;
 pub const MAX_AGGREGATES: usize = 4;
 pub const REG_CLOSE_BATCH: usize = 20;
-pub const REG_WINDOW_BLOCKS: BlockNumber = 43_200;
+/// The 72 h filing challenge window (07 §7 "frozen constant"), single-homed onto
+/// the shared `orc.window` kernel floor (01 §5.2 / rule 4 — no 13-owned literal
+/// survives in a core).
+pub const REG_WINDOW_BLOCKS: BlockNumber = futarchy_primitives::kernel::ORC_WINDOW_BLOCKS;
 pub const REG_EXT_WINDOW_BLOCKS: BlockNumber =
     futarchy_primitives::kernel::WATCHTOWER_EXTENSION_BLOCKS;
-pub const REPORT_WINDOW_BLOCKS: BlockNumber = 28_800;
+/// Genesis defaults for the two META-amendable filing bonds (`reg.bond_incident`
+/// / `reg.bond_milestone`, 13 §1: 5,000 / 2,500 USDC). Present only as the
+/// [`Registry::new`] defaults for standalone / differential-oracle use; the FRAME
+/// pallet overrides [`Registry::bond_incident`] / [`Registry::bond_milestone`]
+/// from `pallet-constitution::Params` on every load (rule 4), so runtime
+/// behaviour is never driven by these literals.
 pub const REG_BOND_INCIDENT: Balance = 5_000_000_000;
 pub const REG_BOND_MILESTONE: Balance = 2_500_000_000;
 pub const WT_QUORUM: u8 = futarchy_primitives::kernel::WT_QUORUM;
 pub const MILESTONE_TARGET_POINTS: u32 = 100;
 const ONE: u64 = 1_000_000_000;
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum RegistryKind {
     Incident,
     Milestone,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum FilingClass {
     S1,
     S2,
@@ -40,7 +70,18 @@ pub enum FilingClass {
     Scope(u8),
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum FilingState {
     Filed {
         window_end: BlockNumber,
@@ -57,7 +98,18 @@ pub enum FilingState {
     Rejected,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub struct Filing {
     pub who: AccountId,
     pub class: FilingClass,
@@ -142,7 +194,18 @@ pub enum Event {
     },
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum Error {
     EpochFull,
     TooManyLiveEpochs,
@@ -159,6 +222,9 @@ pub enum Error {
     InvalidClass,
     Overflow,
     NotRegistered,
+    /// The filing already has `WT_QUORUM` acknowledgments — further acks add
+    /// nothing and are rejected so the per-filing ack set stays bounded (07 §4).
+    AlreadyQuorum,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -182,6 +248,19 @@ pub struct Registry {
     pub aggregates: Vec<(EpochId, FixedU64)>,
     pub events: Vec<Event>,
     ack_records: Vec<(EpochId, FilingId, AccountId)>,
+    /// Live `reg.bond_incident` — the FRAME pallet refreshes this from
+    /// `pallet-constitution::Params` on every load (rule 4); defaults to
+    /// [`REG_BOND_INCIDENT`] for standalone / differential use.
+    pub bond_incident: Balance,
+    /// Live `reg.bond_milestone` — see [`Registry::bond_incident`].
+    pub bond_milestone: Balance,
+    /// The Milestone-instance completion target (07 §7 / 05 §4.4: aggregate =
+    /// `points ÷ target`). A per-MetricSpec frozen field (I-16), NOT a 13/kernel
+    /// constant — the FRAME pallet refreshes it from the frozen MetricSpec via
+    /// `Config::Epoch` on every load; defaults to [`MILESTONE_TARGET_POINTS`] for
+    /// standalone / differential use. Guards against a zero target (rejected in
+    /// [`Registry::milestone_aggregate`]).
+    pub milestone_target: u32,
 }
 
 impl Registry {
@@ -193,6 +272,9 @@ impl Registry {
             aggregates: Vec::new(),
             events: Vec::new(),
             ack_records: Vec::new(),
+            bond_incident: REG_BOND_INCIDENT,
+            bond_milestone: REG_BOND_MILESTONE,
+            milestone_target: MILESTONE_TARGET_POINTS,
         }
     }
 
@@ -288,10 +370,21 @@ impl Registry {
                 // window; late acknowledgments must not retro-uphold a filing
                 // whose challenge surface already closed.
                 ensure!(now <= *window_end, Error::WindowClosed);
+                // Once quorum is reached, further acks add nothing and only grow
+                // the dedup set — reject them so it stays bounded by `WT_QUORUM`
+                // per filing (07 §4 needs "≥ quorum", never a running tally).
+                ensure!(*acks < WT_QUORUM, Error::AlreadyQuorum);
                 *acks = acks.saturating_add(1);
             }
-            FilingState::Challenged { window_end, .. } => {
-                ensure!(now <= *window_end, Error::WindowClosed);
+            FilingState::Challenged { .. } => {
+                // 07 §4: "a challenge supersedes the quorum requirement … a posted
+                // challenge is itself proof that the report was observable." So an
+                // acknowledgment is moot once challenged — reject it, rather than
+                // recording an unbounded `AckRecord` the `Challenged` state can
+                // never cap (which would breach the per-filing `WT_QUORUM` bound
+                // `try_state` and `reap_epoch`'s bounded reap assume). PR #54
+                // Codex-bot P2.
+                return Err(Error::AlreadyChallenged);
             }
             _ => return Err(Error::AlreadyFinal),
         }
@@ -388,23 +481,40 @@ impl Registry {
                         extended,
                         acks,
                     } => {
-                        if now < *window_end {
+                        // The window is INCLUSIVE of `window_end` for acks and
+                        // challenges (see `challenge_filing`), so the crank closes
+                        // only *strictly after* it — otherwise a valid at-deadline
+                        // challenge could be front-run by a same-block crank.
+                        if now <= *window_end {
                             continue;
                         }
                         if *acks >= WT_QUORUM {
                             terminal = Some(true);
                         } else if !*extended {
                             *extended = true;
-                            *window_end = now.saturating_add(REG_EXT_WINDOW_BLOCKS);
-                            extend_to = Some(*window_end);
+                            // Extend from the ORIGINAL deadline, not the (possibly
+                            // much later) crank block, so a keeper delay cannot
+                            // stretch the single 48 h extension past the 07 §11
+                            // latency budget.
+                            let new_end = window_end.saturating_add(REG_EXT_WINDOW_BLOCKS);
+                            *window_end = new_end;
+                            if now > new_end {
+                                // Keeper so late the whole extension already
+                                // elapsed: resolve the quorum failure in this same
+                                // crank (still one extension total).
+                                terminal = Some(false);
+                            } else {
+                                extend_to = Some(new_end);
+                            }
                         } else {
                             terminal = Some(false);
                         }
                     }
                     FilingState::Challenged { window_end, .. } => {
-                        if now < *window_end {
-                            continue;
-                        }
+                        let _ = window_end;
+                        // A challenged filing waits for `resolve_challenge`
+                        // (recompute / OracleResolution verdict, 07 §5.4/§9); the
+                        // crank never auto-resolves it.
                         continue;
                     }
                     _ => continue,
@@ -501,7 +611,11 @@ impl Registry {
             ensure!(actual <= *count, Error::Overflow);
         }
         for ((epoch, _), f) in &self.filings {
-            ensure!(f.bond >= self.required_bond(), Error::BondBelowMinimum);
+            // A filed bond is always positive; it is NOT re-checked against the
+            // live `required_bond()`, because a mid-life META amendment of
+            // `reg.bond_*` (13 §1) may raise the requirement above a bond that was
+            // valid — and is custodied at its stored amount — when it was filed.
+            ensure!(f.bond > 0, Error::BondBelowMinimum);
             self.validate_class(f.class)?;
             // Every retained filing belongs to exactly one lifecycle stage:
             // a live epoch (counted) or a closed epoch awaiting reap
@@ -528,8 +642,8 @@ impl Registry {
 
     fn required_bond(&self) -> Balance {
         match self.kind {
-            RegistryKind::Incident => REG_BOND_INCIDENT,
-            RegistryKind::Milestone => REG_BOND_MILESTONE,
+            RegistryKind::Incident => self.bond_incident,
+            RegistryKind::Milestone => self.bond_milestone,
         }
     }
     fn validate_class(&self, class: FilingClass) -> Result<(), Error> {
@@ -569,13 +683,20 @@ impl Registry {
         loser: AccountId,
         amount: Balance,
     ) {
+        // 07 §5.5/§7: the loser forfeits the full bond — 40 % to the honest
+        // counterparty, the remainder to INSURANCE. INSURANCE takes the exact
+        // complement (not a second independent floor) so the split conserves the
+        // forfeited bond to the unit and any rounding dust accrues to the
+        // protocol, never back to the slashed party (R-7, rounding against the
+        // claimant).
+        let challenger_share = amount.saturating_mul(40) / 100;
         self.events.push(Event::FilingBondSlashed {
             epoch,
             filing_id,
             loser,
             amount,
-            challenger_share: amount.saturating_mul(40) / 100,
-            insurance_share: amount.saturating_mul(60) / 100,
+            challenger_share,
+            insurance_share: amount.saturating_sub(challenger_share),
         });
     }
     fn incident_aggregate(&self, epoch: EpochId) -> FixedU64 {
@@ -593,13 +714,23 @@ impl Registry {
         FixedU64(ONE.saturating_sub(sev))
     }
     fn milestone_aggregate(&self, epoch: EpochId) -> FixedU64 {
-        let points: u32 = self
+        let points: u64 = self
             .filings
             .iter()
             .filter(|((e, _), f)| *e == epoch && matches!(f.state, FilingState::Upheld))
-            .map(|(_, f)| f.points as u32)
-            .sum();
-        FixedU64(((points as u64).saturating_mul(ONE)) / MILESTONE_TARGET_POINTS as u64)
+            .fold(0u64, |acc, (_, f)| acc.saturating_add(f.points as u64));
+        // aggregate = min(points / target, 1) on the 1e9 grid (05 §4.4 / 07 §7).
+        // `target` is the frozen-MetricSpec completion target (seam field, I-16),
+        // NOT a hardcoded divisor. A zero target (mis-seeded spec) yields 0 rather
+        // than dividing by zero (G-1); the result is clamped to ONE so a cohort
+        // that over-ships (or an over-large `points` claim) can never push the A
+        // pillar past 1.0 — a welfare component MUST live in [0, 1].
+        let target = self.milestone_target as u64;
+        if target == 0 {
+            return FixedU64(0);
+        }
+        let raw = points.saturating_mul(ONE) / target;
+        FixedU64(raw.min(ONE))
     }
 }
 
