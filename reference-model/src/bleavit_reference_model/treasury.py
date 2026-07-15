@@ -161,11 +161,9 @@ def p_ref(proposal_class) -> Decimal:
     with localcontext() as ctx:
         ctx.prec = WORK_PREC
         depth = Decimal(2) * B_FLOORS[name] * LN2
-        # SPEC-NOTE: 08 §5.4 displays PARAM depth as 27,726 although the
-        # two-book formula elsewhere gives 13,863. Preserve the normative
-        # displayed P_ref until the owning text is reconciled.
-        if name == "param":
-            depth *= Decimal(2)
+        # 08 §5.4 P_ref: every class uses the decision-pair depth 2·b·ln2
+        # (the former PARAM 27,726/63,863 cells were a doubling slip,
+        # reconciled 2026-07-15 — SQ-29).
         return (depth + V_MIN_FLOORS[name]) / Decimal(2)
 
 

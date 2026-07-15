@@ -532,7 +532,7 @@ class ReferenceModelTests(unittest.TestCase):
             10,
         )
         p_refs = {
-            "Param": 63_863,
+            "Param": 56_931,  # 08 §5.4 reconciled (SQ-29): pair depth 13,863, not 27,726
             "Treasury": 142_329,
             "Code": 341_589,
             "Meta": 669_315,
