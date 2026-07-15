@@ -8,13 +8,23 @@ use futarchy_primitives::{
     AccountId, Balance, BlockNumber, EpochId, FixedU64, MetricId, MetricSpecVersion, H256,
 };
 use origins_core::Origin;
-use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub const MAX_REPORTERS: usize = 64;
 pub const MAX_WATCHTOWERS: usize = futarchy_primitives::kernel::WT_MAX as usize;
-pub const MAX_ROUNDS: usize = 64;
-pub const MAX_COMPONENT_VALUES: usize = 64;
+/// Live reporting rounds: ≤ 16 components × ≤ 4 concurrently-settling epochs ×
+/// ≤ 2 frozen versions overlapping a MetricSpec activation boundary (07 §2(4)).
+/// Raised from 64 so a per-version game cannot be the round that overflows the
+/// bound (Codex F16 / SQ-59). Within 02 §3's `open_oracle_rounds` cap of 192.
+pub const MAX_ROUNDS: usize = 128;
+/// Settled values awaiting reaping; sized like [`MAX_ROUNDS`] (per-version).
+pub const MAX_COMPONENT_VALUES: usize = 128;
+/// Upper bound on live acknowledgment records: at most one live round per game
+/// key, each acknowledged by at most every registered watchtower. Pruned on
+/// settle/escalate (see [`Oracle::settle_at`]/`crank_round_close`) so this holds
+/// by construction; the FRAME shell's `AckRecords` storage bound is this value.
+pub const MAX_ACK_RECORDS: usize = MAX_WATCHTOWERS * MAX_ROUNDS;
 pub const ORC_WINDOW_BLOCKS: BlockNumber = 43_200;
 pub const ORC_EXT_WINDOW_BLOCKS: BlockNumber =
     futarchy_primitives::kernel::WATCHTOWER_EXTENSION_BLOCKS;
@@ -50,7 +60,18 @@ pub struct WatchtowerInfo {
     pub inactive_epochs: u8,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum SettlePath {
     Unchallenged,
     Recomputed,
@@ -236,6 +257,8 @@ pub enum Error {
     ProofTooLarge,
     EvidenceMismatch,
     BadProof,
+    /// A reported/adjudicated value is off the 05 §4.4 `[0, 1]` 1e9 grid.
+    ValueOutOfBounds,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -260,13 +283,22 @@ pub struct Oracle {
     pub component_values: Vec<((MetricId, EpochId, MetricSpecVersion), SettledComponent)>,
     pub reserve_health: ReserveHealth,
     pub events: Vec<Event>,
-    ack_records: Vec<(MetricId, EpochId, u8, AccountId, H256)>,
+    /// Per-round watchtower acknowledgments, keyed by `report_hash` (07 §13:
+    /// "acks are per-round, keyed by `report_hash`"). `pub` so the FRAME shell
+    /// (A5) can hydrate/dehydrate the whole aggregate around each call; not part
+    /// of the 02 §7.2 FE-read surface.
+    pub ack_records: Vec<(MetricId, EpochId, MetricSpecVersion, u8, AccountId, H256)>,
     /// `(component, frozen spec version)` pairs whose `MetricSpec` declares the
     /// value deterministically recomputable from committed evidence (07 §2(4),
     /// §9 - recomputability is a property of the frozen version, not the
     /// MetricId). Populated from spec registration; `recompute_proof` fails
     /// closed for anything else.
     pub recomputable_components: Vec<(MetricId, MetricSpecVersion)>,
+    /// Watchtowers that acknowledged ≥ 1 round (or newly registered) in the
+    /// current, not-yet-swept epoch — the liveness-discipline activity set
+    /// (07 §4). [`Oracle::sweep_watchtower_liveness`] consumes and clears it at
+    /// the epoch boundary; the FRAME shell's epoch pallet drives that call (B1a).
+    pub watchtower_active: Vec<AccountId>,
 }
 
 impl Oracle {
@@ -323,6 +355,9 @@ impl Oracle {
             who,
             stake: WT_STAKE,
         });
+        // A freshly-registered watchtower is active for the epoch it joined, so
+        // it is never charged inactivity for that epoch (07 §4).
+        self.mark_watchtower_active(who);
         Ok(())
     }
 
@@ -332,6 +367,14 @@ impl Oracle {
         ensure!(
             input.spec_version == input.expected_spec,
             Error::SpecVersionMismatch
+        );
+        // Component values live on the 05 §4.4 `[0, 1]` 1e9 grid: an
+        // out-of-range attestation can never be a valid settled value, so it is
+        // rejected at the door rather than allowed to settle unchallenged (I-18;
+        // Codex F15).
+        ensure!(
+            input.value.0 <= COMPONENT_VALUE_MAX,
+            Error::ValueOutOfBounds
         );
         ensure!(
             self.find_round(RoundKey {
@@ -403,7 +446,10 @@ impl Oracle {
         let (component, epoch) = (key.component, key.epoch);
         let idx = self.find_round(key).ok_or(Error::RoundNotFound)?;
         let r = &mut self.rounds[idx];
-        ensure!(now <= r.challenge_deadline, Error::WindowClosed);
+        // Half-open window `[open, deadline)` — a challenge at the deadline block
+        // must not race the close crank that treats that block as mature
+        // (Codex F24).
+        ensure!(now < r.challenge_deadline, Error::WindowClosed);
         ensure!(r.challenger.is_none(), Error::AlreadyChallenged);
         let bond = r.bond;
         r.challenger = Some(who);
@@ -440,18 +486,27 @@ impl Oracle {
             r.round == round && r.report_hash == report_hash,
             Error::RoundNotFound
         );
-        // Quorum proves observability during the live challenge window (07 §4):
-        // an acknowledgment after the window (or its single extension) closed
-        // must not retro-finalize a value whose challenge surface was gone.
-        ensure!(now <= r.challenge_deadline, Error::WindowClosed);
+        // Quorum proves observability during the live challenge window (07 §4).
+        // The window is half-open `[open, deadline)`: an acknowledgment at or
+        // after the deadline block — the same block the close crank treats as
+        // mature — must not retro-finalize (Codex F24 boundary consistency).
+        ensure!(now < r.challenge_deadline, Error::WindowClosed);
+        // Acks are keyed by the full game triple (07 §2(4)); omitting
+        // `spec_version` let one per-version game's ack collide with, or be
+        // pruned by, a sibling version (Codex F8).
         ensure!(
-            !self
-                .ack_records
-                .contains(&(component, epoch, round, who, report_hash)),
+            !self.ack_records.contains(&(
+                component,
+                epoch,
+                key.spec_version,
+                round,
+                who,
+                report_hash
+            )),
             Error::DuplicateAck
         );
         self.ack_records
-            .push((component, epoch, round, who, report_hash));
+            .push((component, epoch, key.spec_version, round, who, report_hash));
         r.acks = r.acks.saturating_add(1);
         self.events.push(Event::WindowAcknowledged {
             component,
@@ -459,15 +514,73 @@ impl Oracle {
             round,
             watchtower: who,
         });
+        // The watchtower did its job this epoch — mark it active for liveness
+        // discipline (07 §4).
+        self.mark_watchtower_active(who);
         Ok(())
     }
 
-    pub fn crank_round_close(
+    /// Epoch-boundary liveness sweep (07 §4): a watchtower that acknowledged no
+    /// round in an epoch that had ≥ 1 open round is marked inactive; two
+    /// consecutive inactive epochs slash 10% of `wt.stake` and eject. A
+    /// watchtower that was active this epoch has its counter reset. Epochs with
+    /// no open round charge nobody (absence of work is not a liveness failure).
+    /// The FRAME shell calls this once per epoch rollover with the just-ended
+    /// epoch and whether it carried an open round (both known to the epoch
+    /// pallet — B1a); the activity set is cleared for the next epoch.
+    pub fn sweep_watchtower_liveness(
         &mut self,
-        now: BlockNumber,
-        batch: usize,
-        carried_value: FixedU64,
+        ended_epoch: EpochId,
+        had_open_round: bool,
     ) -> Result<(), Error> {
+        let mut ejected: Vec<AccountId> = Vec::new();
+        for (who, info) in self.watchtowers.iter_mut() {
+            if self.watchtower_active.contains(who) {
+                info.inactive_epochs = 0;
+                continue;
+            }
+            if !had_open_round {
+                // An epoch with no open round is nobody's liveness failure and
+                // breaks the "two *consecutive* inactive epochs" streak, so a
+                // later miss cannot combine with an earlier one across an exempt
+                // epoch to force a slash (07 §4; Codex F5).
+                info.inactive_epochs = 0;
+                continue;
+            }
+            info.inactive_epochs = info.inactive_epochs.saturating_add(1);
+            self.events.push(Event::WatchtowerInactive {
+                who: *who,
+                epoch: ended_epoch,
+            });
+            if info.inactive_epochs >= 2 {
+                // 07 §4: two consecutive inactive epochs ⇒ slash 10% of the
+                // watchtower stake and eject.
+                self.events.push(Event::WatchtowerSlashed {
+                    who: *who,
+                    amount: WT_STAKE / 10,
+                });
+                ejected.push(*who);
+            }
+        }
+        for who in &ejected {
+            self.watchtowers.retain(|(a, _)| a != who);
+        }
+        self.watchtower_active.clear();
+        Ok(())
+    }
+
+    fn mark_watchtower_active(&mut self, who: AccountId) {
+        if !self.watchtower_active.contains(&who) {
+            self.watchtower_active.push(who);
+        }
+    }
+
+    /// Close matured rounds up to `batch`. The neutral-settlement path
+    /// (07 §10) carries the component's *last valid value* — derived here from
+    /// the settled-value history rather than supplied by the caller, so a
+    /// keeper can never inject a forged carry value and each neutralized round
+    /// carries the value for its own component (07 §4/§10).
+    pub fn crank_round_close(&mut self, now: BlockNumber, batch: usize) -> Result<(), Error> {
         let mut processed = 0usize;
         let mut i = 0usize;
         while i < self.rounds.len() && processed < batch {
@@ -500,7 +613,8 @@ impl Oracle {
                         epoch,
                         round,
                     });
-                    self.neutral_at(i, carried_value, 1)?;
+                    let carried = self.last_valid_value(component, epoch);
+                    self.neutral_at(i, carried, 1)?;
                 }
             } else if self.rounds[i].round < ORC_ROUNDS {
                 self.rounds[i].round += 1;
@@ -508,6 +622,16 @@ impl Oracle {
                     round_bond(self.rounds[i].stake_at_risk, self.rounds[i].round)?;
                 self.rounds[i].challenge_deadline = now.saturating_add(ORC_WINDOW_BLOCKS);
                 self.rounds[i].acks = 0;
+                // A fresh round has a new `report_hash`, so the prior round's
+                // acknowledgments can never match it again: drop them so
+                // `ack_records` stays bounded by the live-round acks only
+                // (G-6/I-20 — the FRAME shell's `AckRecords` bound relies on
+                // this pruning). Scoped to the game's own version so a sibling
+                // per-version game's acks survive (Codex F8).
+                let spec_version = self.rounds[i].spec_version;
+                self.ack_records.retain(|(c, e, v, _, _, _)| {
+                    !(*c == component && *e == epoch && *v == spec_version)
+                });
                 self.rounds[i].challenger = None;
                 self.rounds[i].counter_value = None;
                 self.rounds[i].report_hash = hash_report(
@@ -564,12 +688,10 @@ impl Oracle {
         );
         let value = recompute_value(proof)?;
         if value != self.rounds[idx].value {
-            // The committed data disproves the reported value: the reporter's
-            // full bond stack is forfeit per the 07 §5 slashing rule.
-            self.record_reporter_offense(
-                self.rounds[idx].reporter,
-                self.rounds[idx].cumulative_reporter_bond,
-            )?;
+            // The committed data disproves the reported value: record the 07 §3
+            // offense (stake discipline); the §5.5 bond-stack forfeiture is
+            // B-track custody.
+            self.record_reporter_offense(self.rounds[idx].reporter)?;
         }
         self.events.push(Event::RecomputeProven {
             component,
@@ -601,13 +723,20 @@ impl Oracle {
         reporter_wrong: bool,
     ) -> Result<(), Error> {
         ensure!(origin == Origin::OracleResolution, Error::BadOrigin);
+        // The adjudicated value must land on the 05 §4.4 grid like any other
+        // settled value (Codex F15).
+        ensure!(value.0 <= COMPONENT_VALUE_MAX, Error::ValueOutOfBounds);
         let (component, epoch) = (key.component, key.epoch);
         let idx = self.find_round(key).ok_or(Error::RoundNotFound)?;
+        // 07 §5.4: adjudication is the TERMINAL step of the game — the values
+        // track resolves a round-`R_max` dispute that carries a live challenge.
+        // A fresh or unchallenged round is not adjudicable, so the
+        // `OracleResolution` origin cannot bypass the escalation ladder and
+        // settle an arbitrary round (Codex F10).
+        ensure!(self.rounds[idx].round >= ORC_ROUNDS, Error::WindowOpen);
+        ensure!(self.rounds[idx].challenger.is_some(), Error::QuorumPending);
         if reporter_wrong {
-            self.record_reporter_offense(
-                self.rounds[idx].reporter,
-                self.rounds[idx].cumulative_reporter_bond,
-            )?;
+            self.record_reporter_offense(self.rounds[idx].reporter)?;
         }
         self.events.push(Event::Adjudicated {
             component,
@@ -615,6 +744,50 @@ impl Oracle {
             value,
         });
         self.settle_at(idx, value, SettlePath::Adjudicated, false)
+    }
+
+    /// Force-neutralize a measurement `epoch` at its `OracleSettleDeadline`
+    /// (07 §11 rule 1: any `(component, m)` not challenge-closed by the deadline
+    /// settles **neutrally** for every consuming cohort). The epoch pallet drives
+    /// this at the schedule-derived deadline (B1a), passing `expected` — the
+    /// `(component, frozen version)` pairs live cohorts consume for `epoch`
+    /// (§2(4); the epoch/welfare pallet owns that cohort→component map).
+    ///
+    /// Two obligations, both required for the §11(1) guarantee that welfare finds
+    /// a value for **every** expected component at settlement:
+    /// 1. **Live rounds** — neutral-settle every still-open round for `epoch`, so
+    ///    no `Rounds` entry survives its deadline money-bearing (§13 try-state).
+    ///    A later terminal verdict then finds no round (`RoundNotFound`) and can
+    ///    only resolve bonds/reputation (I-18) — never overwrite the money.
+    /// 2. **No-report components** — an admitted `(component, version)` that got
+    ///    no report has no round, so step 1 never touches it; write its neutral
+    ///    flagged carry-last `ComponentValues` entry directly (the §10 no-report
+    ///    path). Without this, welfare reads an absent component and can stall or
+    ///    settle a cohort with a missing neutral value (Codex P1).
+    pub fn force_neutralize_expired(
+        &mut self,
+        epoch: EpochId,
+        expected: &[(MetricId, MetricSpecVersion)],
+    ) -> Result<(), Error> {
+        // (1) `neutral_at`/`settle_at` remove the settled round, so repeatedly
+        // take the first remaining round for this epoch; bounded by `MAX_ROUNDS`.
+        while let Some(idx) = self.rounds.iter().position(|r| r.epoch == epoch) {
+            let component = self.rounds[idx].component;
+            let carried = self.last_valid_value(component, epoch);
+            self.neutral_at(idx, carried, 1)?;
+        }
+        // (2) After (1) no round for `epoch` remains, so any expected key still
+        // without a `ComponentValues` entry produced no report — neutralize it.
+        for &(component, spec_version) in expected {
+            let has_value = self
+                .component_values
+                .iter()
+                .any(|((c, e, v), _)| *c == component && *e == epoch && *v == spec_version);
+            if !has_value {
+                self.neutral_no_report(component, epoch, spec_version)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn crank_reserve_probe(&mut self, now: BlockNumber) -> Result<u64, Error> {
@@ -637,19 +810,28 @@ impl Oracle {
         Ok(query_id)
     }
 
-    pub fn reserve_probe_result(&mut self, query_id: u64, passed: bool) -> Result<(), Error> {
+    pub fn reserve_probe_result(
+        &mut self,
+        now: BlockNumber,
+        query_id: u64,
+        passed: bool,
+    ) -> Result<(), Error> {
         ensure!(
             query_id == self.reserve_health.last_query_id,
             Error::UnknownQuery
         );
         // Each probe outcome counts exactly once toward the consecutive
-        // thresholds: a replayed or post-timeout response for an already
-        // consumed query must not move the fail-static state.
-        ensure!(
-            self.reserve_health.pending_since.is_some(),
-            Error::UnknownQuery
-        );
-        self.apply_probe_result(query_id, passed);
+        // thresholds: a replayed response for an already consumed query must not
+        // move the fail-static state.
+        let since = self
+            .reserve_health
+            .pending_since
+            .ok_or(Error::UnknownQuery)?;
+        // A response that lands at or after the `res.probe_timeout` deadline is
+        // counted as a **fail** regardless of the reported outcome — a late or
+        // absent answer is never healthy (07 §8; Codex F2).
+        let effective = passed && now < since.saturating_add(RES_PROBE_TIMEOUT);
+        self.apply_probe_result(query_id, effective);
         Ok(())
     }
 
@@ -677,6 +859,19 @@ impl Oracle {
             Error::TooManyWatchtowers
         );
         ensure!(self.rounds.len() <= MAX_ROUNDS, Error::RoundLimit);
+        ensure!(
+            self.component_values.len() <= MAX_COMPONENT_VALUES,
+            Error::AlreadyFinal
+        );
+        ensure!(self.ack_records.len() <= MAX_ACK_RECORDS, Error::RoundLimit);
+        ensure!(
+            self.watchtower_active.len() <= MAX_WATCHTOWERS,
+            Error::TooManyWatchtowers
+        );
+        // The liveness activity set only names registered watchtowers (07 §4).
+        for who in &self.watchtower_active {
+            ensure!(self.is_watchtower(who), Error::NotRegistered);
+        }
         for r in &self.rounds {
             ensure!((1..=ORC_ROUNDS).contains(&r.round), Error::RoundNotFound);
             ensure!(
@@ -694,9 +889,10 @@ impl Oracle {
             let recorded_acks = self
                 .ack_records
                 .iter()
-                .filter(|(c, e, round, _, hash)| {
+                .filter(|(c, e, v, round, _, hash)| {
                     *c == r.component
                         && *e == r.epoch
+                        && *v == r.spec_version
                         && *round == r.round
                         && *hash == r.report_hash
                 })
@@ -718,6 +914,13 @@ impl Oracle {
             Error::AlreadyFinal
         );
         let r = self.rounds.remove(idx);
+        // The game for this `(component, epoch, version)` is terminal: its
+        // acknowledgment records are dead weight, so reap them — scoped to this
+        // version so a sibling per-version game's acks survive (G-6/I-20;
+        // Codex F8).
+        self.ack_records.retain(|(c, e, v, _, _, _)| {
+            !(*c == r.component && *e == r.epoch && *v == r.spec_version)
+        });
         self.component_values.push((
             (r.component, r.epoch, r.spec_version),
             SettledComponent {
@@ -733,6 +936,26 @@ impl Oracle {
             path,
         });
         Ok(())
+    }
+
+    /// The value the neutral path carries for `component` when settling
+    /// `epoch` (07 §10, "carries its last valid value"): the most recent
+    /// settled value for the component in a strictly earlier epoch, or the
+    /// neutral 0.5 default (05 §10) when no prior value survives (histories are
+    /// reaped at cohort settlement).
+    fn last_valid_value(&self, component: MetricId, epoch: EpochId) -> FixedU64 {
+        self.component_values
+            .iter()
+            .filter(|((c, e, _), _)| *c == component && *e < epoch)
+            // Deterministic selection independent of storage-hasher order: the
+            // greatest earlier epoch, ties broken by the greater spec version
+            // (Codex F14). NB: because settled values are reaped at cohort
+            // settlement, a fully-reaped history still falls back to neutral
+            // 0.5 — carrying the true last value across reaping is Codex F13,
+            // tracked as a resume item.
+            .max_by_key(|((_, e, v), _)| (*e, *v))
+            .map(|(_, settled)| settled.value)
+            .unwrap_or(FixedU64(COMPONENT_VALUE_MAX / 2))
     }
 
     fn neutral_at(
@@ -752,21 +975,73 @@ impl Oracle {
         self.settle_at(idx, carried_value, SettlePath::Neutral, true)
     }
 
-    fn record_reporter_offense(&mut self, who: AccountId, amount: Balance) -> Result<(), Error> {
-        let (_, info) = self
-            .reporters
-            .iter_mut()
-            .find(|(a, _)| *a == who)
-            .ok_or(Error::NotRegistered)?;
+    /// Neutral-settle an admitted `(component, epoch, spec_version)` that received
+    /// **no report** — there is no round to remove, so unlike [`Self::neutral_at`]
+    /// this pushes the carry-last flagged `ComponentValues` entry directly (07 §10
+    /// no-report path). Only [`Self::force_neutralize_expired`] calls it, and only
+    /// for keys with no existing value, so it never shadows a settled entry (I-18).
+    fn neutral_no_report(
+        &mut self,
+        component: MetricId,
+        epoch: EpochId,
+        spec_version: MetricSpecVersion,
+    ) -> Result<(), Error> {
+        ensure!(
+            self.component_values.len() < MAX_COMPONENT_VALUES,
+            Error::AlreadyFinal
+        );
+        let carried = self.last_valid_value(component, epoch);
+        // Defensive symmetry with `settle_at`: a no-report key should carry no
+        // acks, but reap any that exist so none outlives its (never-opened) game.
+        self.ack_records
+            .retain(|(c, e, v, _, _, _)| !(*c == component && *e == epoch && *v == spec_version));
+        self.component_values.push((
+            (component, epoch, spec_version),
+            SettledComponent {
+                value: carried,
+                path: SettlePath::Neutral,
+                flagged: true,
+            },
+        ));
+        self.events.push(Event::NeutralSettlement {
+            component,
+            epoch,
+            carried_value: carried,
+            flagged_epochs: 1,
+        });
+        self.events.push(Event::ComponentSettled {
+            component,
+            epoch,
+            value: carried,
+            path: SettlePath::Neutral,
+        });
+        Ok(())
+    }
+
+    fn record_reporter_offense(&mut self, who: AccountId) -> Result<(), Error> {
+        // A reporter ejected on a prior game is already maximally punished;
+        // recording a further offense against them is a **no-op**, not an error,
+        // so a valid recompute/adjudication on their *other* still-live rounds
+        // can still settle instead of failing `NotRegistered` (Codex F17). The
+        // 3rd-offense ejection removes them from new participation; retained
+        // reputation beyond that is B-track custody.
+        let Some((_, info)) = self.reporters.iter_mut().find(|(a, _)| *a == who) else {
+            return Ok(());
+        };
         info.offenses = info.offenses.saturating_add(1);
-        if info.offenses >= 2 {
+        let offense = info.offenses;
+        // 07 §3 stake discipline: 50% of `orc.reporter_stake` on **exactly** the
+        // second adjudicated-false report; **ejection** on the third (not a
+        // further slash) — Codex F19. The §5.5 round-bond-stack forfeiture and
+        // its 40/60 routing are economic custody, wired at B-track (decision #3).
+        if offense == 2 {
             self.events.push(Event::ReporterSlashed {
                 who,
-                amount: amount / 2,
-                offense: info.offenses,
+                amount: ORC_REPORTER_STAKE / 2,
+                offense,
             });
         }
-        if info.offenses >= 3 {
+        if offense >= 3 {
             self.reporters.retain(|(a, _)| *a != who);
             self.events.push(Event::ReporterEjected { who });
         }
@@ -933,6 +1208,47 @@ mod tests {
         };
     }
 
+    fn round_deadline(o: &Oracle, k: RoundKey) -> BlockNumber {
+        o.rounds
+            .iter()
+            .find(|r| {
+                r.component == k.component && r.epoch == k.epoch && r.spec_version == k.spec_version
+            })
+            .expect("live round")
+            .challenge_deadline
+    }
+
+    /// Report round 1, then drive the game to a terminal state (round `R_max`
+    /// with a live challenge) so `adjudicate` is admissible (07 §5.4).
+    fn to_terminal(o: &mut Oracle, reporter: u8, challenger: u8, k: RoundKey, value: FixedU64) {
+        report!(
+            o,
+            acct(reporter),
+            1,
+            k.component,
+            k.epoch,
+            k.spec_version,
+            value,
+            h(9),
+            400_000_000_000,
+            100,
+            k.spec_version,
+        )
+        .unwrap();
+        // Rounds 1..R_max: challenge (strictly inside the window) then crank at
+        // the deadline to escalate.
+        for _ in 1..ORC_ROUNDS {
+            let d = round_deadline(o, k);
+            o.challenge(acct(challenger), d - 1, k, FixedU64(440_000_000), h(10))
+                .unwrap();
+            o.crank_round_close(d, 1).unwrap();
+        }
+        // Round R_max carries the terminal challenge.
+        let d = round_deadline(o, k);
+        o.challenge(acct(challenger), d - 1, k, FixedU64(440_000_000), h(10))
+            .unwrap();
+    }
+
     #[test]
     fn reporter_and_watchtower_registries_are_bounded() {
         let mut o = Oracle::default();
@@ -985,18 +1301,13 @@ mod tests {
             3,
         )
         .unwrap();
-        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1, FixedU64(50))
-            .unwrap();
+        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
         assert!(matches!(
             o.events.last(),
             Some(Event::WindowExtended { .. })
         ));
-        o.crank_round_close(
-            ORC_WINDOW_BLOCKS + ORC_EXT_WINDOW_BLOCKS + 3,
-            1,
-            FixedU64(50),
-        )
-        .unwrap();
+        o.crank_round_close(ORC_WINDOW_BLOCKS + ORC_EXT_WINDOW_BLOCKS + 3, 1)
+            .unwrap();
         assert_eq!(o.component_values[0].1.path, SettlePath::Neutral);
         assert!(o.component_values[0].1.flagged);
         assert!(o
@@ -1028,8 +1339,7 @@ mod tests {
         let rh = o.rounds[0].report_hash;
         o.ack_observed(acct(2), 5, key(7, 41, 3), 1, rh).unwrap();
         o.ack_observed(acct(3), 6, key(7, 41, 3), 1, rh).unwrap();
-        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1, FixedU64(50))
-            .unwrap();
+        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
         assert_eq!(o.component_values[0].1.path, SettlePath::Unchallenged);
 
         let mut o = Oracle::default();
@@ -1050,8 +1360,7 @@ mod tests {
         .unwrap();
         o.challenge(acct(4), 2, key(8, 42, 3), FixedU64(44), h(10))
             .unwrap();
-        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1, FixedU64(50))
-            .unwrap();
+        o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
         assert_eq!(o.rounds[0].round, 2);
         assert_eq!(o.rounds[0].bond, 20_000_000_000);
     }
@@ -1090,20 +1399,9 @@ mod tests {
         let mut o = Oracle::default();
         o.register_reporter(acct(1), 0).unwrap();
         for n in 0..3 {
-            report!(
-                o,
-                acct(1),
-                1,
-                9 + n,
-                41,
-                3,
-                FixedU64(62),
-                h(9),
-                400_000_000_000,
-                10,
-                3,
-            )
-            .unwrap();
+            // 07 §5.4: adjudication only resolves a terminal (round-R_max,
+            // challenged) dispute (Codex F10) — drive each game there first.
+            to_terminal(&mut o, 1, 4, key(9 + n, 41, 3), FixedU64(62));
             assert_eq!(
                 o.adjudicate(Origin::FutarchyParam, key(9 + n, 41, 3), FixedU64(44), true),
                 Err(Error::BadOrigin)
@@ -1133,12 +1431,14 @@ mod tests {
         );
         assert!(!o.reserve_health.unhealthy);
         assert_eq!(o.crank_reserve_probe(RES_PROBE_INTERVAL * 2), Ok(2));
-        o.reserve_probe_result(2, false).unwrap();
+        o.reserve_probe_result(RES_PROBE_INTERVAL * 2, 2, false)
+            .unwrap();
         assert!(o.reserve_health.unhealthy);
         for i in 3..=5 {
             o.crank_reserve_probe(RES_PROBE_INTERVAL * i as u32)
                 .unwrap();
-            o.reserve_probe_result(i, true).unwrap();
+            o.reserve_probe_result(RES_PROBE_INTERVAL * i as u32, i, true)
+                .unwrap();
         }
         assert!(!o.reserve_health.unhealthy);
         assert!(o
@@ -1251,25 +1551,25 @@ mod tests {
         .unwrap();
         let rh = o.rounds[0].report_hash;
         let deadline = o.rounds[0].challenge_deadline;
-        // Acknowledgment after the challenge window closed is rejected.
+        // The window is half-open: an acknowledgment *at* the deadline block (the
+        // block the close crank treats as mature) is already rejected (F24).
         assert_eq!(
-            o.ack_observed(acct(2), deadline + 1, key(7, 41, 3), 1, rh),
+            o.ack_observed(acct(2), deadline, key(7, 41, 3), 1, rh),
             Err(Error::WindowClosed)
         );
         // The uncranked round then extends rather than finalizing.
-        o.crank_round_close(deadline + 2, 1, FixedU64(50)).unwrap();
+        o.crank_round_close(deadline + 2, 1).unwrap();
         assert!(matches!(
             o.events.last(),
             Some(Event::WindowExtended { .. })
         ));
-        // Acks inside the live extension window still count toward quorum.
+        // Acks strictly inside the live extension window still count toward quorum.
         let extended_deadline = o.rounds[0].challenge_deadline;
-        o.ack_observed(acct(2), extended_deadline, key(7, 41, 3), 1, rh)
+        o.ack_observed(acct(2), extended_deadline - 1, key(7, 41, 3), 1, rh)
             .unwrap();
-        o.ack_observed(acct(3), extended_deadline, key(7, 41, 3), 1, rh)
+        o.ack_observed(acct(3), extended_deadline - 1, key(7, 41, 3), 1, rh)
             .unwrap();
-        o.crank_round_close(extended_deadline + 1, 1, FixedU64(50))
-            .unwrap();
+        o.crank_round_close(extended_deadline + 1, 1).unwrap();
         assert_eq!(o.component_values[0].1.path, SettlePath::Unchallenged);
     }
 
@@ -1277,20 +1577,7 @@ mod tests {
     fn settled_components_cannot_be_reopened_by_a_new_report() {
         let mut o = Oracle::default();
         o.register_reporter(acct(1), 0).unwrap();
-        report!(
-            o,
-            acct(1),
-            1,
-            7,
-            41,
-            3,
-            FixedU64(62),
-            h(9),
-            400_000_000_000,
-            10,
-            3,
-        )
-        .unwrap();
+        to_terminal(&mut o, 1, 4, key(7, 41, 3), FixedU64(62));
         o.adjudicate(Origin::OracleResolution, key(7, 41, 3), FixedU64(44), false)
             .unwrap();
         assert_eq!(o.component_values.len(), 1);
@@ -1318,9 +1605,13 @@ mod tests {
     fn reserve_probe_results_count_once() {
         let mut o = Oracle::default();
         assert_eq!(o.crank_reserve_probe(RES_PROBE_INTERVAL), Ok(1));
-        o.reserve_probe_result(1, false).unwrap();
+        o.reserve_probe_result(RES_PROBE_INTERVAL, 1, false)
+            .unwrap();
         // Replaying the consumed query must not add a second consecutive fail.
-        assert_eq!(o.reserve_probe_result(1, false), Err(Error::UnknownQuery));
+        assert_eq!(
+            o.reserve_probe_result(RES_PROBE_INTERVAL, 1, false),
+            Err(Error::UnknownQuery)
+        );
         assert!(!o.reserve_health.unhealthy);
         assert_eq!(o.reserve_health.consecutive_fails, 1);
         // A response landing after the timeout already consumed the query is
@@ -1329,7 +1620,10 @@ mod tests {
         o.crank_probe_timeout(RES_PROBE_INTERVAL * 2 + RES_PROBE_TIMEOUT)
             .unwrap();
         assert!(o.reserve_health.unhealthy);
-        assert_eq!(o.reserve_probe_result(2, true), Err(Error::UnknownQuery));
+        assert_eq!(
+            o.reserve_probe_result(RES_PROBE_INTERVAL * 2, 2, true),
+            Err(Error::UnknownQuery)
+        );
         assert_eq!(o.reserve_health.consecutive_passes, 0);
     }
 
@@ -1383,8 +1677,19 @@ mod tests {
         // The settled version-3 value does not finalize version 4's game...
         assert_eq!(o.component_values.len(), 1);
         assert_eq!(o.rounds.len(), 1);
-        // ...which still settles on its own track.
-        o.adjudicate(Origin::OracleResolution, key(7, 41, 4), FixedU64(50), false)
+        // ...which still settles on its own track — escalate v4 to terminal
+        // (07 §5.4 / Codex F10) then adjudicate it.
+        let k4 = key(7, 41, 4);
+        for _ in 1..ORC_ROUNDS {
+            let d = round_deadline(&o, k4);
+            o.challenge(acct(4), d - 1, k4, FixedU64(50), h(10))
+                .unwrap();
+            o.crank_round_close(d, 1).unwrap();
+        }
+        let d = round_deadline(&o, k4);
+        o.challenge(acct(4), d - 1, k4, FixedU64(50), h(10))
+            .unwrap();
+        o.adjudicate(Origin::OracleResolution, k4, FixedU64(50), false)
             .unwrap();
         assert_eq!(o.component_values.len(), 2);
         // A repeat report for a settled version stays final.
@@ -1423,5 +1728,232 @@ mod tests {
             report!(o, acct(1), 1, 1, 1, 2, FixedU64(1), h(1), 0, 10, 1),
             Err(Error::SpecVersionMismatch)
         );
+    }
+
+    #[test]
+    fn watchtower_liveness_grace_then_inactivity_slash_and_reset() {
+        // 07 §4 liveness discipline: registration grace, then inactivity
+        // accrual, the 2-consecutive slash+eject, the active-epoch reset, and
+        // the no-open-round exemption.
+        let mut o = Oracle::default();
+        o.register_watchtower(acct(2), 0).unwrap();
+        o.register_watchtower(acct(3), 0).unwrap();
+
+        // Epoch 1: both were just registered (grace) ⇒ no inactivity.
+        o.sweep_watchtower_liveness(1, true).unwrap();
+        assert!(o.watchtowers.iter().all(|(_, i)| i.inactive_epochs == 0));
+        assert!(o.watchtower_active.is_empty());
+
+        // Epoch 2 had an open round but neither acked ⇒ both inactive once.
+        o.sweep_watchtower_liveness(2, true).unwrap();
+        assert!(o.watchtowers.iter().all(|(_, i)| i.inactive_epochs == 1));
+        assert_eq!(
+            o.events
+                .iter()
+                .filter(|e| matches!(e, Event::WatchtowerInactive { .. }))
+                .count(),
+            2
+        );
+
+        // Watchtower 2 acks in epoch 3 (needs a live round); 3 stays idle.
+        o.register_reporter(acct(1), 0).unwrap();
+        report!(o, acct(1), 1, 7, 41, 3, FixedU64(62), h(9), 0, 10, 3).unwrap();
+        let rh = o.rounds[0].report_hash;
+        o.ack_observed(acct(2), 5, key(7, 41, 3), 1, rh).unwrap();
+        o.sweep_watchtower_liveness(3, true).unwrap();
+        // 2 reset to 0 (active); 3 reaches 2 ⇒ slashed and ejected.
+        assert_eq!(o.watchtowers.len(), 1);
+        assert_eq!(o.watchtowers[0].0, acct(2));
+        assert_eq!(o.watchtowers[0].1.inactive_epochs, 0);
+        assert!(o.events.iter().any(
+            |e| matches!(e, Event::WatchtowerSlashed { amount, .. } if *amount == WT_STAKE / 10)
+        ));
+
+        // An epoch with no open round charges nobody, even when idle.
+        o.sweep_watchtower_liveness(4, false).unwrap();
+        assert_eq!(o.watchtowers[0].1.inactive_epochs, 0);
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn force_neutralize_expired_settles_stale_rounds_and_blocks_late_verdicts() {
+        // 07 §11: a round not challenge-closed by its OracleSettleDeadline
+        // settles neutrally; a late terminal verdict then finds no round and
+        // cannot overwrite the money (I-18; Codex F11/F12).
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(620_000_000),
+            h(9),
+            400_000_000_000,
+            100,
+            3,
+        )
+        .unwrap();
+        o.challenge(acct(4), 2, key(7, 41, 3), FixedU64(440_000_000), h(10))
+            .unwrap();
+        o.force_neutralize_expired(41, &[]).unwrap();
+        assert_eq!(o.component_values.len(), 1);
+        assert_eq!(o.component_values[0].1.path, SettlePath::Neutral);
+        assert!(o.component_values[0].1.flagged);
+        assert!(o.rounds.is_empty());
+        // A late verdict can no longer touch the settled money.
+        assert_eq!(
+            o.adjudicate(
+                Origin::OracleResolution,
+                key(7, 41, 3),
+                FixedU64(440_000_000),
+                true
+            ),
+            Err(Error::RoundNotFound)
+        );
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn force_neutralize_expired_neutralizes_no_report_components() {
+        // Codex P1 / 07 §11(1): an admitted component that got NO report has no
+        // round, so the live-round sweep never touches it — yet welfare must find
+        // a value for it at the money deadline. The deadline crank synthesizes the
+        // neutral flagged carry-last entry directly (07 §10 no-report path).
+        // `expected` = the (component, version) pairs live cohorts consume for the
+        // epoch; the epoch/welfare pallet supplies them at B1a.
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        // Component 7 opens a round (settled via the sweep); component 8 is also
+        // expected but never reports (settled via the no-report path).
+        report!(
+            o,
+            acct(1),
+            1,
+            7,
+            41,
+            3,
+            FixedU64(620_000_000),
+            h(9),
+            400_000_000_000,
+            100,
+            3,
+        )
+        .unwrap();
+        let expected = [(7, 3), (8, 3)];
+        o.force_neutralize_expired(41, &expected).unwrap();
+        // Both keys carry a neutral flagged value — 7 from its round, 8 no-report.
+        assert_eq!(o.component_values.len(), 2);
+        for &(c, v) in &expected {
+            let entry = o
+                .component_values
+                .iter()
+                .find(|((cc, ee, vv), _)| *cc == c && *ee == 41 && *vv == v)
+                .expect("every expected component has a value by the deadline");
+            assert_eq!(entry.1.path, SettlePath::Neutral);
+            assert!(entry.1.flagged);
+        }
+        // The no-report component with no prior value carries neutral 0.5 (05 §10).
+        let no_report = o
+            .component_values
+            .iter()
+            .find(|((c, _, _), _)| *c == 8)
+            .unwrap();
+        assert_eq!(no_report.1.value, FixedU64(COMPONENT_VALUE_MAX / 2));
+        assert!(o.rounds.is_empty());
+        // Idempotent: a second crank finds both keys valued and adds nothing.
+        o.force_neutralize_expired(41, &expected).unwrap();
+        assert_eq!(o.component_values.len(), 2);
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn round_state_fields_match_contract_02_section_7_2() {
+        use scale_info::TypeDef;
+        // 02 §7.2 (contract v3) freezes `RoundState`'s field names and SCALE order;
+        // the triple key + these fields are the reconciled oracle surface (SQ-58).
+        // Lock them so the code can never silently re-diverge from the frozen
+        // contract again (rule 5) — the divergence SQ-58 was raised about.
+        const CONTRACT_FIELDS: [&str; 17] = [
+            "component",
+            "epoch",
+            "round",
+            "spec_version",
+            "reporter",
+            "value",
+            "evidence_hash",
+            "bond",
+            "challenge_deadline",
+            "extended",
+            "challenger",
+            "counter_value",
+            "acks",
+            "report_hash",
+            "stake_at_risk",
+            "cumulative_reporter_bond",
+            "cumulative_challenger_bond",
+        ];
+        let type_info = RoundState::type_info();
+        let names: Vec<&str> = match &type_info.type_def {
+            TypeDef::Composite(c) => c.fields.iter().filter_map(|f| f.name).collect(),
+            _ => panic!("RoundState must encode as a SCALE composite type"),
+        };
+        assert_eq!(names, CONTRACT_FIELDS);
+    }
+
+    #[test]
+    fn offense_against_an_ejected_reporter_is_a_noop_not_an_error() {
+        // Codex F17: a reporter ejected on one game can still have another live
+        // round settled — a further offense against them is a no-op, so the
+        // valid recompute is not stranded by `NotRegistered`.
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        // Committed evidence that disproves the report (recomputes to 0.44).
+        let mut proof = alloc::vec![0u8; 24];
+        proof[..8].copy_from_slice(&440_000_000u64.to_le_bytes());
+        // Game 30 is reported now but recomputed only AFTER the ejection.
+        o.recomputable_components.push((30, 3));
+        report!(
+            o,
+            acct(1),
+            1,
+            30,
+            41,
+            3,
+            FixedU64(620_000_000),
+            hash_evidence(&proof),
+            400_000_000_000,
+            100,
+            3,
+        )
+        .unwrap();
+        // Eject acct(1): three recompute-disproofs on other components accrue
+        // three offenses (recompute settles each game directly — no crank).
+        for n in 0..3 {
+            o.recomputable_components.push((31 + n, 3));
+            report!(
+                o,
+                acct(1),
+                1,
+                31 + n,
+                41,
+                3,
+                FixedU64(620_000_000),
+                hash_evidence(&proof),
+                400_000_000_000,
+                100,
+                3,
+            )
+            .unwrap();
+            o.recompute_proof(acct(5), key(31 + n, 41, 3), &proof)
+                .unwrap();
+        }
+        assert!(!o.is_reporter(&acct(1)));
+        // The pre-existing game still settles by recompute despite the ejection.
+        o.recompute_proof(acct(5), key(30, 41, 3), &proof).unwrap();
+        assert!(o.component_values.iter().any(|((c, _, _), _)| *c == 30));
+        o.try_state().unwrap();
     }
 }

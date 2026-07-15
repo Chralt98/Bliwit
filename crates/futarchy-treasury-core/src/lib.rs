@@ -6,11 +6,17 @@ extern crate alloc;
 use alloc::vec::Vec;
 use futarchy_primitives::{AccountId, Balance, BlockNumber, EpochId, ProposalClass, H256};
 use origins_core::Origin;
-use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const USDC: Balance = 1_000_000;
-pub const VIT: Balance = 1_000_000_000_000;
+// Currency units and the genesis VIT supply are chain-identity constants owned
+// by `futarchy-primitives` (rule 4 / 13 rule 1); re-exported here under the
+// names this core and its FRAME shell consume.
+pub const USDC: Balance = futarchy_primitives::currency::USDC;
+pub const VIT: Balance = futarchy_primitives::currency::VIT;
+/// Genesis VIT supply (08 §2.1 / 02 §8 identity): 1,000,000,000 VIT, fixed at
+/// genesis — sourced from [`futarchy_primitives::currency::VIT_TOTAL_SUPPLY`].
+pub const DEFAULT_VIT_SUPPLY: Balance = futarchy_primitives::currency::VIT_TOTAL_SUPPLY;
 pub const MAX_BUDGET_LINES: usize = 32;
 pub const MAX_STREAMS: usize = 128;
 pub const MAX_PENDING_OUTFLOWS: usize = 64;
@@ -40,7 +46,18 @@ pub enum TreasuryAccount {
     Ops,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum BudgetLine {
     Pol,
     PolBaseline,
@@ -94,15 +111,30 @@ impl BudgetLine {
     }
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum AssetKind {
     Usdc,
     Vit,
     Foreign(H256),
 }
 
+/// Internal NAV computation (08 §1.2): the treasury's own solvency view. Named
+/// distinctly from the frozen 02 §4 `NavView` runtime-API type (in
+/// `futarchy-primitives`, a 10-field account decomposition) which the B2
+/// `FutarchyApi` builds from these components plus the line balances (rule 5).
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
-pub struct NavView {
+pub struct NavComponents {
     pub nav: Balance,
     pub spendable_nav: Balance,
     pub reserve_impaired: bool,
@@ -210,13 +242,6 @@ impl<const BUCKETS: usize> RollingMeter<BUCKETS> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
-pub struct IssuanceMeter {
-    pub supply_at_window_start: Balance,
-    pub minted: Balance,
-    pub window_start: BlockNumber,
-}
-
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
 pub enum Event {
     Spent {
@@ -268,7 +293,10 @@ pub enum Event {
     KeeperBudgetLow {
         remaining: Balance,
     },
-    KeeperBudgetExhausted,
+    KeeperBudgetExhausted {
+        epoch: EpochId,
+        spent: Balance,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
@@ -294,6 +322,7 @@ pub enum Error {
     IssuanceCapExceeded,
     UnknownForeignAsset,
     NavFloorUnmet,
+    ZeroQuote,
     Overflow,
 }
 
@@ -308,7 +337,11 @@ pub struct Treasury {
     pub pol_commitments: Vec<Balance>,
     pub meter_30d: RollingMeter<31>,
     pub meter_180d: RollingMeter<181>,
-    pub issuance: IssuanceMeter,
+    /// Rolling 365-day issuance meter (08 §2.3, I-7 monotone): a bucketed
+    /// trailing window like the outflow meters, so mints straddling the year
+    /// seam cannot exceed `iss.inflation_cap`. `limit_bps` is the live cap
+    /// (kernel ceiling 2%, amendable down only), refreshed from Params on load.
+    pub issuance: RollingMeter<366>,
     pub events: Vec<Event>,
     pub next_stream_id: u64,
     /// VIT balances credited to budget lines by `issue_vit` (08 §2.3) —
@@ -322,13 +355,23 @@ pub struct Treasury {
     /// Coretime-chain state (09 §4/§6). A present quote is what makes the
     /// renewal window open; the price never comes from the caller.
     pub coretime_quotes: Vec<(u32, Balance)>,
+    /// Live tunable seams (rule 4). These default to the 13 §1 defaults
+    /// (`TRS_CAP_PROPOSAL_BPS`, `TRS_STREAM_THRESHOLD_BPS`), so the frame-free
+    /// core and the M3 model behave identically at default parameters. The
+    /// production FRAME pallet overwrites them from `pallet-constitution::Params`
+    /// (`trs.cap_proposal`, `trs.stream_thr`) on every load — never a hardcode
+    /// in runtime code, only the oracle's defaults. The metered caps
+    /// (`trs.cap_30d`/`trs.cap_180d` on the outflow meters, `iss.inflation` on
+    /// `issuance`) live on the meters' `limit_bps` fields, refreshed the same way.
+    pub cap_proposal_bps: u32,
+    pub stream_threshold_bps: u32,
 }
 
 impl Default for Treasury {
     fn default() -> Self {
         Self {
             main_usdc: 0,
-            vit_supply: 1_000_000_000 * VIT,
+            vit_supply: DEFAULT_VIT_SUPPLY,
             reserve_impaired: false,
             lines: Vec::new(),
             streams: Vec::new(),
@@ -336,16 +379,14 @@ impl Default for Treasury {
             pol_commitments: Vec::new(),
             meter_30d: RollingMeter::new(TRS_CAP_30D_BPS),
             meter_180d: RollingMeter::new(TRS_CAP_180D_BPS),
-            issuance: IssuanceMeter {
-                supply_at_window_start: 1_000_000_000 * VIT,
-                minted: 0,
-                window_start: 0,
-            },
+            issuance: RollingMeter::new(ISS_INFLATION_CAP_BPS),
             events: Vec::new(),
             next_stream_id: 0,
             vit_lines: Vec::new(),
             funded_coretime_periods: Vec::new(),
             coretime_quotes: Vec::new(),
+            cap_proposal_bps: TRS_CAP_PROPOSAL_BPS,
+            stream_threshold_bps: TRS_STREAM_THRESHOLD_BPS,
         }
     }
 }
@@ -358,8 +399,26 @@ impl Treasury {
         amount: Balance,
     ) -> Result<(), Error> {
         ensure!(origin == Origin::FutarchyTreasury, Error::BadOrigin);
-        self.debit_main(amount)?;
-        self.credit_line(line, amount)?;
+        // Atomicity (G-1): compute the entire credit — table room AND the
+        // credited balance's overflow check — BEFORE touching `main_usdc`, so a
+        // debit is never followed by a failing credit (Codex review).
+        match self.lines.iter().position(|(l, _)| *l == line) {
+            Some(i) => {
+                let credited = self.lines[i].1.checked_add(amount).ok_or(Error::Overflow)?;
+                ensure!(self.main_usdc >= amount, Error::InsufficientFunds);
+                self.main_usdc -= amount;
+                self.lines[i].1 = credited;
+            }
+            None => {
+                ensure!(
+                    self.lines.len() < MAX_BUDGET_LINES,
+                    Error::TooManyBudgetLines
+                );
+                ensure!(self.main_usdc >= amount, Error::InsufficientFunds);
+                self.main_usdc -= amount;
+                self.lines.push((line, amount));
+            }
+        }
         self.events.push(Event::BudgetLineFunded { line, amount });
         Ok(())
     }
@@ -376,11 +435,22 @@ impl Treasury {
         // 08 §1.3: grants above trs.stream_threshold = 1% NAV MUST stream —
         // a direct spend must not bypass vesting and later cancellability.
         ensure!(
-            amount <= bps(self.nav().nav, TRS_STREAM_THRESHOLD_BPS)?,
+            amount <= bps(self.nav().nav, self.stream_threshold_bps)?,
             Error::StreamRequired
         );
-        self.enforce_outflow(now, amount)?;
-        self.debit_line(line, amount)?;
+        // 08 §1.3: per-proposal outflow ≤ trs.cap_proposal × spendable NAV.
+        // Read-only, checked before the line so its error keeps precedence.
+        let nav = self.nav().spendable_nav;
+        ensure!(
+            amount <= bps(nav, self.cap_proposal_bps)?,
+            Error::ProposalCapExceeded
+        );
+        // Atomicity (G-1): validate the line debit before charging the meters,
+        // so a rejected spend leaves both the line and the meters untouched
+        // (FRAME rolls back all storage on `Err`; the core must match).
+        let idx = self.debitable_line(line, amount)?;
+        self.charge_meters(now, nav, amount)?;
+        self.lines[idx].1 -= amount;
         self.events.push(Event::Spent { line, dest, amount });
         Ok(())
     }
@@ -393,16 +463,45 @@ impl Treasury {
         ensure!(origin == Origin::FutarchyTreasury, Error::BadOrigin);
         self.ensure_spendable()?;
         ensure!(input.duration > 0, Error::BadDuration);
-        ensure!(self.streams.len() < MAX_STREAMS, Error::TooManyStreams);
+        // The 13 §4 bound is on CONCURRENT open streams (08 §1.3), not the
+        // lifetime count. When the table is full, a terminal stream (cancelled,
+        // or fully vested-and-claimed) may be reaped to make room. Compute the
+        // reapable slot read-only here; the removal is deferred to the commit
+        // below so a rejected open stays a strict no-op (G-1).
+        let reap_idx = if self.streams.len() < MAX_STREAMS {
+            None
+        } else {
+            Some(
+                self.streams
+                    .iter()
+                    .position(|s| s.cancelled || s.claimed >= s.total)
+                    .ok_or(Error::TooManyStreams)?,
+            )
+        };
         let nav = self.nav().nav;
         ensure!(
-            input.total > bps(nav, TRS_STREAM_THRESHOLD_BPS)?,
+            input.total > bps(nav, self.stream_threshold_bps)?,
             Error::StreamRequired
         );
-        self.enforce_outflow(now, input.total)?;
-        self.debit_line(input.line, input.total)?;
+        // 08 §1.3 per-proposal cap (read-only, precedence over the line error).
+        let spendable = self.nav().spendable_nav;
+        ensure!(
+            input.total <= bps(spendable, self.cap_proposal_bps)?,
+            Error::ProposalCapExceeded
+        );
+        // Atomicity (G-1): validate the line debit and the id increment before
+        // charging the meters / mutating.
+        let idx = self.debitable_line(input.line, input.total)?;
+        let next_id = self.next_stream_id.checked_add(1).ok_or(Error::Overflow)?;
+        self.charge_meters(now, spendable, input.total)?;
+        self.lines[idx].1 -= input.total;
+        // Commit: reap the terminal slot (if any) then push — both after every
+        // fallible step.
+        if let Some(i) = reap_idx {
+            self.streams.remove(i);
+        }
         let id = self.next_stream_id;
-        self.next_stream_id = self.next_stream_id.checked_add(1).ok_or(Error::Overflow)?;
+        self.next_stream_id = next_id;
         self.streams.push(Stream {
             id,
             recipient: input.recipient,
@@ -457,11 +556,13 @@ impl Treasury {
             .total
             .checked_sub(self.streams[idx].claimed)
             .ok_or(Error::Overflow)?;
-        self.streams[idx].cancelled = true;
-        self.main_usdc = self
+        // Compute the reverted MAIN balance before mutating (G-1 atomicity).
+        let new_main = self
             .main_usdc
             .checked_add(remainder)
             .ok_or(Error::Overflow)?;
+        self.streams[idx].cancelled = true;
+        self.main_usdc = new_main;
         self.events.push(Event::StreamCancelled {
             id,
             reverted: remainder,
@@ -477,30 +578,41 @@ impl Treasury {
     ) -> Result<(), Error> {
         ensure!(origin == Origin::FutarchyTreasury, Error::BadOrigin);
         ensure!(line.vit_issuance_allowed(), Error::IssuanceLineNotAllowed);
-        if now >= self.issuance.window_start.saturating_add(DAYS_365_BLOCKS) {
-            self.issuance.window_start = now;
-            self.issuance.minted = 0;
-            self.issuance.supply_at_window_start = self.vit_supply;
-        }
-        let cap = bps(self.issuance.supply_at_window_start, ISS_INFLATION_CAP_BPS)?;
-        let next = self
-            .issuance
-            .minted
-            .checked_add(amount)
-            .ok_or(Error::Overflow)?;
+        // 08 §2.3: a ROLLING 365-day issuance meter (I-7 monotone). Roll a COPY
+        // so a rejected mint mutates nothing (G-1 atomicity). The cap base is
+        // the supply at the trailing window's start, computed as the current
+        // supply minus the mints still inside the window (`vit_supply − spent`);
+        // because the meter never resets its trailing sum at a boundary, two
+        // mints straddling the year seam are summed and cannot together exceed
+        // `iss.inflation_cap` — the fixed-window boundary doubling is closed.
+        let mut meter = self.issuance;
+        meter.roll(now);
+        let reference_supply = self.vit_supply.saturating_sub(meter.spent());
+        let cap = bps(reference_supply, meter.limit_bps)?;
+        let next = meter.spent().checked_add(amount).ok_or(Error::Overflow)?;
         ensure!(next <= cap, Error::IssuanceCapExceeded);
-        self.issuance.minted = next;
-        self.vit_supply = self.vit_supply.checked_add(amount).ok_or(Error::Overflow)?;
+        let new_supply = self.vit_supply.checked_add(amount).ok_or(Error::Overflow)?;
+        // Pre-validate the line credit so a full table cannot mint-then-fail.
+        let line_pos = self.vit_lines.iter().position(|(l, _)| *l == line);
+        ensure!(
+            line_pos.is_some() || self.vit_lines.len() < MAX_BUDGET_LINES,
+            Error::TooManyBudgetLines
+        );
+        // All reachable checks passed — commit the meter charge, the mint and
+        // the line credit together.
+        meter.add(now, amount)?;
+        self.issuance = meter;
+        self.vit_supply = new_supply;
         // 08 §2.3: the minted VIT is credited to the requested REWARDS/ops
         // line so the line can actually disburse it.
-        if let Some((_, bal)) = self.vit_lines.iter_mut().find(|(l, _)| *l == line) {
-            *bal = bal.checked_add(amount).ok_or(Error::Overflow)?;
-        } else {
-            ensure!(
-                self.vit_lines.len() < MAX_BUDGET_LINES,
-                Error::TooManyBudgetLines
-            );
-            self.vit_lines.push((line, amount));
+        match line_pos {
+            Some(i) => {
+                self.vit_lines[i].1 = self.vit_lines[i]
+                    .1
+                    .checked_add(amount)
+                    .ok_or(Error::Overflow)?;
+            }
+            None => self.vit_lines.push((line, amount)),
         }
         self.events.push(Event::VitIssued {
             amount,
@@ -552,6 +664,11 @@ impl Treasury {
         period_index: u32,
         price: Balance,
     ) -> Result<(), Error> {
+        // A real renewal costs > 0; a zero quote would let a keeper "renew" for
+        // free and permanently mark the period funded, blocking a corrected
+        // retry (Codex review). Reject it — absence of a quote (window closed)
+        // is distinct from a zero price.
+        ensure!(price > 0, Error::ZeroQuote);
         ensure!(
             !self.funded_coretime_periods.contains(&period_index),
             Error::PeriodAlreadyFunded
@@ -570,6 +687,14 @@ impl Treasury {
         );
         self.coretime_quotes.push((period_index, price));
         Ok(())
+    }
+
+    /// Drop a stale/superseded open quote (09 §4/§6) so the bounded quote slot
+    /// cannot be clogged by periods the keeper never renewed. Runtime-internal
+    /// (B4 prunes when it re-reads Coretime-chain state; the quote's validity
+    /// interval is PLAN SQ-53). A no-op if the period has no open quote.
+    pub fn prune_coretime_quote(&mut self, period_index: u32) {
+        self.coretime_quotes.retain(|(p, _)| *p != period_index);
     }
 
     /// 09 §4 `execute_coretime_renewal(period_index)`: permissionless
@@ -612,17 +737,51 @@ impl Treasury {
             self.events.push(Event::NavHaircutFlagged { epoch, flag });
         }
     }
-    pub fn nav(&self) -> NavView {
-        let obligations = self
-            .open_stream_remainders()
+    /// Runtime-internal (08 §1.2/§8.2): sync the live-book POL subsidy
+    /// commitments `nav()` nets as obligations. The POL/market lifecycle (A3)
+    /// owns the set — this pallet only holds the treasury's view of it so NAV
+    /// reflects live commitments; B1a wires the sync. The registration keying
+    /// and trigger are a cross-pallet concern (PLAN SQ-47). Bounded (13 §4).
+    pub fn set_pol_commitments(&mut self, commitments: &[Balance]) -> Result<(), Error> {
+        ensure!(
+            commitments.len() <= MAX_POL_COMMITMENTS,
+            Error::TooManyObligations
+        );
+        self.pol_commitments = commitments.to_vec();
+        Ok(())
+    }
+    /// Runtime-internal (08 §1.2/§1.3): sync the queued in-cap proposal outflows
+    /// `nav()` nets as obligations. The execution-guard queue (A11) owns them;
+    /// B1a wires the sync (PLAN SQ-47). Bounded (13 §4).
+    pub fn set_pending_outflows(&mut self, outflows: &[Balance]) -> Result<(), Error> {
+        ensure!(
+            outflows.len() <= MAX_PENDING_OUTFLOWS,
+            Error::TooManyObligations
+        );
+        self.pending_outflows = outflows.to_vec();
+        Ok(())
+    }
+    pub fn nav(&self) -> NavComponents {
+        // 08 §1.2: NAV = liquid USDC at par + reversions − obligations (open
+        // stream remainders owed FROM the treasury, queued in-cap outflows, POL
+        // commitments). An open stream's remainder is BOTH such an obligation
+        // AND escrowed USDC the treasury still holds at par (it was debited from
+        // the spendable lines at open, so `main + Σlines` no longer counts it):
+        // it enters as an asset and an equal liability that net to zero, i.e.
+        // the committed funds are excluded from NAV exactly once — via the
+        // open-time line debit. Counting only the obligation would double-
+        // subtract them (understating NAV, tightening every cap and floor).
+        let escrow = self.open_stream_remainders();
+        let obligations = escrow
             .saturating_add(sum(&self.pending_outflows))
             .saturating_add(sum(&self.pol_commitments));
-        let nav = self
+        let assets = self
             .main_usdc
             .saturating_add(sum_lines(&self.lines))
-            .saturating_sub(obligations);
+            .saturating_add(escrow);
+        let nav = assets.saturating_sub(obligations);
         let spendable_nav = if self.reserve_impaired { 0 } else { nav };
-        NavView {
+        NavComponents {
             nav,
             spendable_nav,
             reserve_impaired: self.reserve_impaired,
@@ -678,6 +837,17 @@ impl Treasury {
             .map(|(_, b)| *b)
             .fold(0, Balance::saturating_add);
         ensure!(vit_in_lines <= self.vit_supply, Error::Overflow);
+        // I-7/I-17 (15 §1): the trailing-window minted sum never exceeds the
+        // KERNEL ceiling `ISS_INFLATION_CAP_BPS` (2%) of supply. `iss.inflation`
+        // is amendable DOWN only, so the live cap ≤ 2%; checking against the
+        // fixed kernel ceiling (not the live cap) keeps this a true standing
+        // invariant that a mid-window down-amendment cannot retroactively break
+        // (a release-blocking `try_state` failure would otherwise be reachable).
+        let issuance_ceiling = bps(self.vit_supply, ISS_INFLATION_CAP_BPS)?;
+        ensure!(
+            self.issuance.spent() <= issuance_ceiling,
+            Error::IssuanceCapExceeded
+        );
         ensure!(
             self.funded_coretime_periods.len() <= MAX_FUNDED_CORETIME_PERIODS,
             Error::TooManyObligations
@@ -692,37 +862,40 @@ impl Treasury {
         ensure!(!self.reserve_impaired, Error::ReserveImpaired);
         Ok(())
     }
-    fn enforce_outflow(&mut self, now: BlockNumber, amount: Balance) -> Result<(), Error> {
-        let nav = self.nav().spendable_nav;
-        ensure!(
-            amount <= bps(nav, TRS_CAP_PROPOSAL_BPS)?,
-            Error::ProposalCapExceeded
-        );
-        // Check both windows before recording in either: a rejected outflow
-        // must not consume meter capacity.
-        self.meter_30d.roll(now);
-        self.meter_180d.roll(now);
-        self.meter_30d.can_charge(nav, amount)?;
-        self.meter_180d.can_charge(nav, amount)?;
-        self.meter_30d.add(now, amount)?;
-        self.meter_180d.add(now, amount)
-    }
-    fn debit_main(&mut self, amount: Balance) -> Result<(), Error> {
-        ensure!(self.main_usdc >= amount, Error::InsufficientFunds);
-        self.main_usdc -= amount;
+    /// Charge both rolling meters against `nav` for `amount`, atomically: roll
+    /// into copies, and commit BOTH only if both windows admit (G-1) — a
+    /// rejected outflow must not consume, or even lazily roll, meter state,
+    /// since FRAME rolls the whole dispatch back on `Err`. The caller has
+    /// already enforced the per-proposal cap against the same `nav`.
+    fn charge_meters(
+        &mut self,
+        now: BlockNumber,
+        nav: Balance,
+        amount: Balance,
+    ) -> Result<(), Error> {
+        let mut m30 = self.meter_30d;
+        let mut m180 = self.meter_180d;
+        m30.roll(now);
+        m180.roll(now);
+        m30.can_charge(nav, amount)?;
+        m180.can_charge(nav, amount)?;
+        m30.add(now, amount)?;
+        m180.add(now, amount)?;
+        self.meter_30d = m30;
+        self.meter_180d = m180;
         Ok(())
     }
-    fn credit_line(&mut self, line: BudgetLine, amount: Balance) -> Result<(), Error> {
-        if let Some((_, bal)) = self.lines.iter_mut().find(|(l, _)| *l == line) {
-            *bal = bal.checked_add(amount).ok_or(Error::Overflow)?;
-        } else {
-            ensure!(
-                self.lines.len() < MAX_BUDGET_LINES,
-                Error::TooManyBudgetLines
-            );
-            self.lines.push((line, amount));
-        }
-        Ok(())
+    /// Index of `line` in `self.lines`, proven to hold at least `amount`
+    /// (`UnknownBudgetLine`/`InsufficientFunds` otherwise) — a read-only check so
+    /// callers can validate a debit before any mutation.
+    fn debitable_line(&self, line: BudgetLine, amount: Balance) -> Result<usize, Error> {
+        let idx = self
+            .lines
+            .iter()
+            .position(|(l, _)| *l == line)
+            .ok_or(Error::UnknownBudgetLine)?;
+        ensure!(self.lines[idx].1 >= amount, Error::InsufficientFunds);
+        Ok(idx)
     }
     fn debit_line(&mut self, line: BudgetLine, amount: Balance) -> Result<(), Error> {
         let (_, bal) = self
@@ -934,8 +1107,22 @@ mod tests {
                 .unwrap_err(),
             Error::IssuanceCapExceeded
         );
-        t.issue_vit(TREASURY, DAYS_365_BLOCKS, 1, BudgetLine::OpsArweave)
-            .unwrap();
+        // Rolling window: at the 365-day seam the day-0 mint is STILL counted
+        // (it evicts only once strictly older than the window), so a second full
+        // cap is refused — the fixed-window boundary doubling is closed.
+        assert_eq!(
+            t.issue_vit(TREASURY, DAYS_365_BLOCKS, 1, BudgetLine::OpsArweave)
+                .unwrap_err(),
+            Error::IssuanceCapExceeded
+        );
+        // One day later the day-0 mint has fully rolled off; capacity returns.
+        t.issue_vit(
+            TREASURY,
+            DAYS_365_BLOCKS + DAY_BLOCKS,
+            1,
+            BudgetLine::OpsArweave,
+        )
+        .unwrap();
         assert_eq!(t.vit_line_balance(BudgetLine::OpsArweave), 1);
         t.try_state().unwrap();
     }

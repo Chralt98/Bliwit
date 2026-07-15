@@ -5,10 +5,11 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use futarchy_primitives::{AccountId, Balance, BlockNumber, ProposalId, H256};
-use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub type AttestationId = u32;
+// Single-homed kernel constants (13 rule 1 / 01 §5.2): import, never re-declare.
 pub const MIN_MEMBERS: usize = futarchy_primitives::kernel::ATT_MIN_MEMBERS as usize;
 pub const QUORUM: usize = futarchy_primitives::kernel::ATT_QUORUM as usize;
 pub const ATTESTOR_BOND: Balance = 25_000_000_000_000_000;
@@ -16,14 +17,36 @@ pub const CHALLENGE_WINDOW_BLOCKS: BlockNumber = 43_200;
 pub const CHALLENGE_BOND: Balance = ATTESTOR_BOND / 2;
 pub const FALSE_EJECTION_THRESHOLD: u8 = 2;
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum AttestorOrigin {
     Signed,
     ConstitutionalValues,
     RatifyTrack,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum ChallengeStatus {
     Open {
         challenger: AccountId,
@@ -34,7 +57,18 @@ pub enum ChallengeStatus {
     Rejected,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub struct AttestorInfo {
     pub account: AccountId,
     pub bond: Balance,
@@ -42,7 +76,18 @@ pub struct AttestorInfo {
     pub active: bool,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub struct Attestation {
     pub id: AttestationId,
     pub pid: ProposalId,
@@ -94,6 +139,8 @@ pub enum Error {
     ChallengeBondTooSmall,
     ChallengeStillOpen,
     QuorumMissing,
+    /// The referenced attestation exists but has no open challenge to resolve.
+    NoOpenChallenge,
     Overflow,
 }
 
@@ -218,7 +265,7 @@ impl AttestorRegistry {
             Some(ChallengeStatus::Open {
                 challenger, bond, ..
             }) => (challenger, bond),
-            _ => return Err(Error::AttestationNotFound),
+            _ => return Err(Error::NoOpenChallenge),
         };
         let loser = if attestation_upheld {
             challenger
@@ -253,6 +300,14 @@ impl AttestorRegistry {
         Ok(())
     }
     pub fn has_quorum(&self, pid: ProposalId, artifact_hash: H256, now: BlockNumber) -> bool {
+        // 06 §7: "≥ 3 members required before any CODE/META proposal can
+        // qualify". The gate needs a full **active** registry, not just a 2-of-N
+        // count — if ejections drop the active membership below MIN_MEMBERS the
+        // attestation gate fails outright, even if two active members' windows
+        // have closed (A10 Codex PR review, I-19).
+        if self.active_member_count() < MIN_MEMBERS {
+            return false;
+        }
         let mut distinct: Vec<AccountId> = Vec::new();
         for att in self
             .attestations
@@ -290,18 +345,23 @@ impl AttestorRegistry {
                 );
             }
         }
-        for att in &self.attestations {
-            ensure!(
-                self.members.iter().any(|m| m.account == att.attestor),
-                Error::NotMember
-            );
-        }
+        // Historical attestations from recalled attestors are NOT an invariant
+        // violation: `has_quorum` counts only active members, so a lawful recall
+        // (`set_members`) legitimately leaves non-member attestations in the
+        // ledger. Requiring every stored attestation's attestor to still be
+        // seated turned a valid recall-after-attest into a spurious,
+        // release-blocking try_state failure (06 §7; A10 spec-reviewer major).
+        // Reaping dead records is the B2-deferred map (PLAN SQ-2).
         Ok(())
     }
     fn attestation_counts(&self, att: &Attestation, now: BlockNumber) -> bool {
         match att.challenge {
-            None => now > att.challenge_deadline,
-            Some(ChallengeStatus::Upheld) => true,
+            // 06 §7: only attestations "whose windows have closed" count. An
+            // upheld challenge proves the attestation valid but does NOT shortcut
+            // the 72-hour window — quorum still waits for `challenge_deadline`
+            // (conservative reading for the security-critical I-19 gate; A10
+            // Codex adversarial finding). Open/Rejected never count.
+            None | Some(ChallengeStatus::Upheld) => now > att.challenge_deadline,
             Some(ChallengeStatus::Rejected) | Some(ChallengeStatus::Open { .. }) => false,
         }
     }
@@ -312,6 +372,10 @@ impl AttestorRegistry {
     fn is_active_member(&self, who: AccountId) -> bool {
         self.members.iter().any(|m| m.account == who && m.active)
     }
+    /// Count of currently active (non-ejected) attestors (06 §7 registry floor).
+    pub fn active_member_count(&self) -> usize {
+        self.members.iter().filter(|m| m.active).count()
+    }
 }
 
 fn validate_and_infos(members: Vec<AccountId>) -> Result<Vec<AttestorInfo>, Error> {
@@ -321,6 +385,12 @@ fn validate_and_infos(members: Vec<AccountId>) -> Result<Vec<AttestorInfo>, Erro
             ensure!(members[i] != members[j], Error::DuplicateMember);
         }
     }
+    // KNOWN LIMITATION (deferred to the real per-account bond system, B-track —
+    // Codex finding): re-electing the same roster recreates every member with a
+    // full bond and `false_count = 0`, so a continuing attestor's strike count
+    // resets and unsettled challenge liabilities are dropped. The `fungible`
+    // bond ledger must preserve bond/strike state for continuing members and
+    // keep departing members liable until their open challenges settle.
     Ok(members
         .into_iter()
         .map(|account| AttestorInfo {
@@ -427,5 +497,51 @@ mod tests {
             ),
             Err(Error::ChallengeWindowClosed)
         );
+    }
+
+    #[test]
+    fn upheld_attestation_still_waits_for_its_challenge_window() {
+        // 06 §7: an upheld challenge proves the attestation valid but does not
+        // shortcut the 72h window — quorum still waits for `challenge_deadline`.
+        let mut r = AttestorRegistry::new(members()).unwrap();
+        r.attest(acct(2), 9, [7; 32], [8; 32], 0).unwrap(); // id 0, deadline = CWB
+        r.attest(acct(1), 9, [7; 32], [8; 32], 100).unwrap(); // id 1, deadline = 100+CWB
+        r.challenge_attestation(acct(9), 1, [5; 32], CHALLENGE_BOND, 101)
+            .unwrap();
+        r.resolve_challenge(AttestorOrigin::RatifyTrack, 1, true)
+            .unwrap(); // upheld early
+                       // acct(2)'s window has closed (counts); acct(1) is upheld but its window
+                       // is still open, so it does NOT count — quorum is not yet met.
+        assert!(!r.has_quorum(9, [7; 32], CHALLENGE_WINDOW_BLOCKS + 1));
+        // Once acct(1)'s window closes too, quorum forms.
+        assert!(r.has_quorum(9, [7; 32], 100 + CHALLENGE_WINDOW_BLOCKS + 1));
+    }
+
+    #[test]
+    fn quorum_fails_when_active_registry_drops_below_minimum() {
+        // 06 §7 (I-19): "≥ 3 members required before any CODE/META proposal can
+        // qualify". Eject one of three attestors, then have the two remaining
+        // active members attest with closed windows — quorum must still FAIL
+        // because the active registry is below MIN_MEMBERS (A10 Codex PR review).
+        let mut r = AttestorRegistry::new(members()).unwrap();
+        // Eject acct(1) via two adjudicated-false attestations.
+        let a = r.attest(acct(1), 1, [1; 32], [2; 32], 0).unwrap();
+        r.challenge_attestation(acct(9), a, [3; 32], CHALLENGE_BOND, 1)
+            .unwrap();
+        r.resolve_challenge(AttestorOrigin::RatifyTrack, a, false)
+            .unwrap();
+        let b = r.attest(acct(1), 2, [1; 32], [2; 32], 2).unwrap();
+        r.challenge_attestation(acct(9), b, [3; 32], CHALLENGE_BOND, 3)
+            .unwrap();
+        r.resolve_challenge(AttestorOrigin::RatifyTrack, b, false)
+            .unwrap();
+        assert!(!r.is_active_member(acct(1)));
+        assert_eq!(r.active_member_count(), 2);
+        // The two still-active members each attest a CODE artifact; windows close.
+        r.attest(acct(2), 9, [7; 32], [8; 32], 0).unwrap();
+        r.attest(acct(3), 9, [7; 32], [8; 32], 0).unwrap();
+        // Two counting attestations from distinct active members, but the active
+        // registry is below MIN_MEMBERS ⇒ the CODE/META gate has no quorum.
+        assert!(!r.has_quorum(9, [7; 32], CHALLENGE_WINDOW_BLOCKS + 1));
     }
 }

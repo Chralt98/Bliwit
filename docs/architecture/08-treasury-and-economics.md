@@ -61,7 +61,7 @@ VIT holdings: marked 0. In-flight XCM: marked 0 until arrival (conservative).
 
 ### 1.4 Calls (delta over BE §5.2.7)
 
-`spend(line, dest, amount)`, `open_stream(recipient, total, start, duration)`, `cancel_stream(id)`, `claim_stream(id)` (Signed recipient), `fund_budget_line(line, amount)`, `recover_foreign(asset, dest)` — all as before, line-scoped. New: `issue_vit(amount, line)` (§2.3, `FutarchyTreasury` origin, issuance-metered); vesting-schedule storage (§2.2). Events: `StreamOpened/Claimed/Cancelled`, `BudgetLineFunded`, `VitIssued`, `NavHaircutFlagged`, `KeeperBudgetLow`, `KeeperBudgetExhausted`, `SlotsShrunk` (§4.4), `NavFloorUnmet` (§4.4).
+`spend(line, dest, amount)`, `open_stream(line, recipient, total, start, duration)`, `cancel_stream(id)`, `claim_stream(id)` (Signed recipient), `fund_budget_line(line, amount)`, `recover_foreign(asset, dest, amount)` — all as before, line-scoped (every outflow call names a budget line per §1.1; `open_stream` funds the stream from `line` and reverts its remainder there on cancellation; `recover_foreign`'s `amount` allows partial sweeps). New: `issue_vit(amount, line)` (§2.3, `FutarchyTreasury` origin, issuance-metered); vesting-schedule storage (§2.2). The `execute_coretime_renewal(period_index)` call (permissionless Signed keeper, dead-man-freeze exempt per D-9) is specified in [09](09-execution-upgrades-and-rollout.md) §4. Events: `StreamOpened/Claimed/Cancelled`, `BudgetLineFunded`, `VitIssued`, `NavHaircutFlagged`, `KeeperBudgetLow`, `KeeperBudgetExhausted { epoch, spent }` (§6.3), `SlotsShrunk` (§4.4, emitted by the decision engine, [05](05-welfare-and-decision-engine.md)), `NavFloorUnmet` (§4.4), plus `Spent`, `ForeignRecovered` and `CoretimeRenewalCalled`.
 
 ---
 

@@ -5,7 +5,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use futarchy_primitives::{AccountId, Balance, BlockNumber, EpochId, ProposalId, H256};
-use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub type ActionId = u32;
@@ -25,7 +25,18 @@ pub const PAUSE_INTAKE_ALLOWANCE_WINDOW_EPOCHS: EpochId = 4;
 pub const PAUSE_INTAKE_ALLOWANCE: u8 = 1;
 pub const LEDGER_FREEZE_RENEWALS: u8 = 1;
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    MaxEncodedLen,
+    PartialEq,
+    Eq,
+    TypeInfo,
+)]
 pub enum GuardianOrigin {
     Signed,
     ConstitutionalValues,
@@ -33,7 +44,18 @@ pub enum GuardianOrigin {
     EmergencyPlaybook,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    MaxEncodedLen,
+    PartialEq,
+    Eq,
+    TypeInfo,
+)]
 pub enum ProposalStatus {
     Trading,
     Extended,
@@ -49,7 +71,18 @@ impl ProposalStatus {
     }
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    MaxEncodedLen,
+    PartialEq,
+    Eq,
+    TypeInfo,
+)]
 pub enum PlaybookId {
     Depeg,
     Migration,
@@ -59,7 +92,18 @@ pub enum PlaybookId {
     LedgerFreeze,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    MaxEncodedLen,
+    PartialEq,
+    Eq,
+    TypeInfo,
+)]
 pub enum PlaybookTrigger {
     DepegMedian,
     MigrationHalt,
@@ -71,7 +115,18 @@ pub enum PlaybookTrigger {
     LedgerDrift,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    MaxEncodedLen,
+    PartialEq,
+    Eq,
+    TypeInfo,
+)]
 pub enum GuardianPower {
     PauseIntake {
         until: BlockNumber,
@@ -90,13 +145,35 @@ pub enum GuardianPower {
     SuspendOnGate,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    MaxEncodedLen,
+    PartialEq,
+    Eq,
+    TypeInfo,
+)]
 pub struct ActionTarget {
     pub pid: Option<ProposalId>,
     pub playbook: Option<PlaybookId>,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    MaxEncodedLen,
+    PartialEq,
+    Eq,
+    TypeInfo,
+)]
 pub struct PendingAction {
     pub id: ActionId,
     pub proposer: AccountId,
@@ -107,7 +184,18 @@ pub struct PendingAction {
     pub dispatched: bool,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    MaxEncodedLen,
+    PartialEq,
+    Eq,
+    TypeInfo,
+)]
 pub struct ReviewRecord {
     pub action_id: ActionId,
     pub deadline_epoch: EpochId,
@@ -117,7 +205,18 @@ pub struct ReviewRecord {
     pub approver_count: u8,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    MaxEncodedLen,
+    PartialEq,
+    Eq,
+    TypeInfo,
+)]
 pub struct ActivePlaybook {
     pub id: PlaybookId,
     pub expiry: BlockNumber,
@@ -199,7 +298,18 @@ pub enum Error {
     Overflow,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    MaxEncodedLen,
+    PartialEq,
+    Eq,
+    TypeInfo,
+)]
 pub struct TriggerState {
     pub depeg: bool,
     pub migration_halt: bool,
@@ -269,6 +379,14 @@ impl Guardian {
         validate_members(&members)?;
         self.members = members;
         self.member_bonds = [GUARDIAN_BOND; GUARDIAN_SEATS];
+        // Re-election starts the incoming council with a clean workflow: drop
+        // every un-dispatched proposed action and its approvals so a recalled
+        // member's live 5-of-7 approval can never carry over and help dispatch
+        // under the new council (a stale-approval bypass of the threshold —
+        // 06 §5.1/§5.4). Accountability state (reviews), emergency state (active
+        // playbooks) and the per-proposal rerun ledger deliberately survive.
+        self.pending.clear();
+        self.approvals.clear();
         self.events.push(Event::MembersSet { members });
         Ok(())
     }
@@ -364,6 +482,13 @@ impl Guardian {
         for review in &mut self.reviews {
             if !review.ratified && !review.recall_scheduled && epoch > review.deadline_epoch {
                 let slash = GUARDIAN_BOND.saturating_mul(REVIEW_SLASH_PERCENT as Balance) / 100;
+                // KNOWN LIMITATION (deferred to the real per-account bond system,
+                // B-track — Codex finding). Bonds are a seat-indexed arithmetic
+                // placeholder, so this only slashes approvers *still seated*: a
+                // guardian recalled before the review deadline evades the slash.
+                // 06 §5.1 requires bonds "held for the full term plus one epoch";
+                // the `fungible` bond ledger must key bonds by account and keep a
+                // recalled member liable through the post-term window.
                 for approver in review.approvers.iter().take(review.approver_count as usize) {
                     if let Some(idx) = self.members.iter().position(|member| member == approver) {
                         self.member_bonds[idx] = self.member_bonds[idx].saturating_sub(slash);
@@ -401,7 +526,7 @@ impl Guardian {
             active.renewals_used < LEDGER_FREEZE_RENEWALS,
             Error::RenewalNotAllowed
         );
-        active.renewals_used += 1;
+        active.renewals_used = active.renewals_used.saturating_add(1);
         active.expiry = now.checked_add(HOLD_MAX_BLOCKS).ok_or(Error::Overflow)?;
         self.events.push(Event::PlaybookRenewed { id });
         Ok(())
@@ -417,6 +542,27 @@ impl Guardian {
         }
         self.active_playbooks = kept;
     }
+    /// Reap terminal workflow records so the live-slot caps are **concurrent**,
+    /// not lifetime (06 §5.1: proposals expire un-dispatched after 3 days;
+    /// §5.4: reviews close on ratification or recall). Dispatched or expired
+    /// un-dispatched actions (and their approvals) drop; ratified or
+    /// recall-scheduled reviews drop. Without this the 64/128 caps brick the
+    /// council after 64 lifetime proposals / 128 lifetime actions (A10
+    /// spec-reviewer majors). Driven by the maintenance crank each block.
+    pub fn reap_terminal(&mut self, now: BlockNumber) {
+        let mut reaped: Vec<ActionId> = Vec::new();
+        self.pending.retain(|a| {
+            let terminal = a.dispatched || now > a.expires_at;
+            if terminal {
+                reaped.push(a.id);
+            }
+            !terminal
+        });
+        if !reaped.is_empty() {
+            self.approvals.retain(|(id, _)| !reaped.contains(id));
+        }
+        self.reviews.retain(|r| !(r.ratified || r.recall_scheduled));
+    }
     pub fn try_state(&self) -> Result<(), Error> {
         validate_members(&self.members)?;
         ensure!(self.pending.len() <= 64, Error::TooManyPending);
@@ -425,6 +571,15 @@ impl Guardian {
             self.active_playbooks.len() <= 6,
             Error::TooManyActivePlaybooks
         );
+        // Playbooks are singletons (06 §6.2): no two active records share an id.
+        for i in 0..self.active_playbooks.len() {
+            for j in (i + 1)..self.active_playbooks.len() {
+                ensure!(
+                    self.active_playbooks[i].id != self.active_playbooks[j].id,
+                    Error::PlaybookAlreadyActive
+                );
+            }
+        }
         for (id, who) in &self.approvals {
             ensure!(
                 self.pending.iter().any(|a| a.id == *id),
@@ -443,14 +598,22 @@ impl Guardian {
         ensure!(self.reviews.len() < 128, Error::TooManyReviews);
         let action = self.pending[idx];
         if let GuardianPower::ActivatePlaybook { id, .. } = action.power {
-            ensure!(
-                self.active_playbooks.len() < 6,
-                Error::TooManyActivePlaybooks
-            );
-            if matches!(id, PlaybookId::LedgerFreeze) {
+            // Playbooks are enumerated singletons (06 §6.2): at most one active
+            // record per id. If one is already active, LedgerFreeze refuses
+            // re-activation (it renews only via a values referendum, §6.3) while
+            // every other playbook re-activates in place ("renew by re-activation
+            // while triggered") without consuming a new slot — so duplicate
+            // non-ledger activations can no longer exhaust the six slots and
+            // block PB-LEDGER-FREEZE (A10 Codex adversarial finding).
+            if self.active_playbooks.iter().any(|p| p.id == id) {
                 ensure!(
-                    !self.active_playbooks.iter().any(|p| p.id == id),
+                    !matches!(id, PlaybookId::LedgerFreeze),
                     Error::PlaybookAlreadyActive
+                );
+            } else {
+                ensure!(
+                    self.active_playbooks.len() < 6,
+                    Error::TooManyActivePlaybooks
                 );
             }
         }
@@ -478,11 +641,17 @@ impl Guardian {
             expiry,
         } = action.power
         {
-            self.active_playbooks.push(ActivePlaybook {
-                id,
-                expiry,
-                renewals_used: 0,
-            });
+            // Upsert by id: re-activation renews the existing record's expiry
+            // (06 §6.2) rather than appending a duplicate.
+            if let Some(existing) = self.active_playbooks.iter_mut().find(|p| p.id == id) {
+                existing.expiry = expiry;
+            } else {
+                self.active_playbooks.push(ActivePlaybook {
+                    id,
+                    expiry,
+                    renewals_used: 0,
+                });
+            }
             self.events.push(Event::PlaybookActivated {
                 id,
                 trigger,
@@ -526,7 +695,7 @@ impl Guardian {
                     self.pause_used_in_window < PAUSE_INTAKE_ALLOWANCE,
                     Error::AllowanceExhausted
                 );
-                self.pause_used_in_window += 1;
+                self.pause_used_in_window = self.pause_used_in_window.saturating_add(1);
             }
             GuardianPower::DelayOnce { pid } => {
                 ensure!(
@@ -541,7 +710,7 @@ impl Guardian {
                     self.delay_used_this_epoch < DELAY_ONCE_ALLOWANCE_PER_EPOCH,
                     Error::AllowanceExhausted
                 );
-                self.delay_used_this_epoch += 1;
+                self.delay_used_this_epoch = self.delay_used_this_epoch.saturating_add(1);
                 self.rerun_used.push(pid);
             }
             GuardianPower::ForceRerun { pid } => {
@@ -554,7 +723,8 @@ impl Guardian {
                     self.force_rerun_used_this_epoch < FORCE_RERUN_ALLOWANCE_PER_EPOCH,
                     Error::AllowanceExhausted
                 );
-                self.force_rerun_used_this_epoch += 1;
+                self.force_rerun_used_this_epoch =
+                    self.force_rerun_used_this_epoch.saturating_add(1);
                 self.rerun_used.push(pid);
             }
             GuardianPower::ActivatePlaybook {
@@ -600,7 +770,18 @@ impl Guardian {
     }
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    MaxEncodedLen,
+    PartialEq,
+    Eq,
+    TypeInfo,
+)]
 pub struct DispatchContext {
     pub proposal_status: ProposalStatus,
     pub in_rerun: bool,
@@ -982,5 +1163,52 @@ mod tests {
         g.enforce_reviews(3).unwrap();
         assert!(g.member_bonds[..5].iter().all(|b| *b == GUARDIAN_BOND / 2));
         assert!(g.member_bonds[5..].iter().all(|b| *b == GUARDIAN_BOND));
+    }
+
+    #[test]
+    fn set_members_reelection_clears_pending_and_approvals() {
+        let mut g = Guardian::new(members()).unwrap();
+        g.propose_action(acct(1), GuardianPower::SuspendOnGate, [0; 32], 0)
+            .unwrap();
+        g.approve_action(acct(2), 0, 1, ctx()).unwrap();
+        assert_eq!(g.pending.len(), 1);
+        assert_eq!(g.approvals.len(), 2);
+        let mut new_members = members();
+        for (i, seat) in new_members.iter_mut().enumerate() {
+            *seat = acct((i as u8) + 10);
+        }
+        g.set_members(GuardianOrigin::ConstitutionalValues, new_members)
+            .unwrap();
+        // No recalled member's live approval survives to help dispatch.
+        assert!(g.pending.is_empty());
+        assert!(g.approvals.is_empty());
+        assert!(g.try_state().is_ok());
+    }
+
+    #[test]
+    fn reap_terminal_drops_dispatched_expired_and_terminal_reviews() {
+        let mut g = Guardian::new(members()).unwrap();
+        // A dispatched action (5-of-7) with its scheduled review.
+        g.propose_action(acct(1), GuardianPower::SuspendOnGate, [0; 32], 0)
+            .unwrap();
+        for n in 2..=5 {
+            g.approve_action(acct(n), 0, 1, ctx()).unwrap();
+        }
+        assert!(g.pending[0].dispatched);
+        assert_eq!(g.reviews.len(), 1);
+        // A second, un-dispatched action that will expire.
+        g.propose_action(acct(1), GuardianPower::SuspendOnGate, [0; 32], 0)
+            .unwrap();
+        assert_eq!(g.pending.len(), 2);
+        // Ratify the first review so it becomes terminal.
+        g.ratify_action(GuardianOrigin::ConstitutionalValues, 0)
+            .unwrap();
+        // Reap past the second action's expiry: dispatched + expired actions
+        // (and their approvals) and the ratified review are reclaimed.
+        g.reap_terminal(ACTION_EXPIRY_BLOCKS + 1);
+        assert!(g.pending.is_empty());
+        assert!(g.approvals.is_empty());
+        assert!(g.reviews.is_empty());
+        assert!(g.try_state().is_ok());
     }
 }

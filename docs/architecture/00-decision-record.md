@@ -24,6 +24,7 @@ Conventions: **D-n** = a decision made here. Finding IDs (X-n, B-n, F-n) refer t
 - **Indexer role**: the FE P-4 position wins — canonical history is **event-derived and chain-served within the committed window**; the indexer is an optional convenience for dashboards, never load-bearing for the canonical frontend. BE §5.2.6 "pruned to indexer" language is replaced accordingly.
 - All kernel constants the FE re-checks (`MinSplit`, per-trade min/max, position bound, §21-tunables) are exposed via the runtime **constants API** (metadata) — readable without storage, no hardcoding in the FE.
 - Backend WBS gains row **E15** mirroring FE-R1 (contract implementation), release-gating for the backend exactly as FE-12 is for the frontend.
+- **Contract v3 (2026-07-15, A5):** the oracle storage surface (§7.2 `Rounds`/`ComponentValues`) moved to the per-version **triple key** `(MetricId, EpochId, MetricSpecVersion)` and `INTEGRATION_CONTRACT_VERSION` bumped 2 → 3 — a **pre-genesis** R-1 correction of a contradiction internal to contract v2 (its pair key could not hold the concurrent per-version games 07 §2(4) requires). Jointly signed off by the user (owner for both sides). Detail in 02 §13 version history + PLAN.md Decision log.
 
 ### D-3. Trade denomination: branch-USDC books with an auto-split wrapper; buyers keep the mirror (B-7)
 

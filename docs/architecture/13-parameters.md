@@ -208,7 +208,7 @@ On-chain results MUST match within the §2 error bound plus one base unit of rou
 | Positions key order | **`(PositionId, AccountId)`** — per-vault prefix-drainable for reaping (was `(AccountId, PositionId)`) | — | [03](03-conditional-ledger.md) |
 | `MaxSettlingCohorts` | 4 non-terminal (2 measuring + 1 awaiting oracle + 1 settling) | `pallet-epoch` | [05](05-welfare-and-decision-engine.md) |
 | Resource locks | ≤ 32 proposals × 8 domains | `pallet-epoch` | [05](05-welfare-and-decision-engine.md) |
-| Oracle games | ≤ 16 components × 4 settling epochs × 3 rounds | `pallet-oracle` | [07](07-oracle-and-disputes.md) |
+| Oracle games (live rounds) | ≤ 16 components × 4 settling epochs × 2 concurrent frozen versions = **128** — one live round per `(component, epoch, version)` game (the 3-round escalation ladder is sequential *within* a game, not concurrent storage; ≤ 2 versions overlap only across a MetricSpec activation boundary — [07](07-oracle-and-disputes.md) §2(4)). Within 02 §3's `open_oracle_rounds` view cap of 192. `MAX_ROUNDS = 128` (SQ-59) | `pallet-oracle` | [07](07-oracle-and-disputes.md) |
 | `MetricSpecs` | ≤ 16 versions | `pallet-welfare` | [05](05-welfare-and-decision-engine.md) |
 | Snapshots | ≤ 20 epochs (H + challenge + 12) | `pallet-welfare` | [05](05-welfare-and-decision-engine.md) |
 | `ExecutionRecords` | ring 256 (canonical history is event-derived within the committed window, D-2/D-6 — “pruned to indexer” language deleted) | [09](09-execution-upgrades-and-rollout.md), [02](02-integration-contract.md) |
@@ -216,6 +216,11 @@ On-chain results MUST match within the §2 error bound plus one base unit of rou
 | `Params` registry | **128** keys (genesis-fixed set; ≥ the ~87 currently-concrete §1 rows plus headroom for `[VERIFY]`-gated rows as they resolve; the `params()` runtime API keeps its own 64-keys-per-call bound, [02](02-integration-contract.md) §3) | `pallet-constitution` |
 | `Capabilities` table | 64 rows | `pallet-constitution` |
 | `Meters` | 16 (generic bounded-meter primitive; empty at genesis — envelope meters live with their owning pallets, [15](15-invariants-and-testing.md) I-17) | `pallet-constitution` |
+| Treasury `Streams` | **128** open vesting streams (recipient-claimable grants > `trs.stream_threshold`, §1.3); ≥ `epoch.slots` new grants/epoch over multi-epoch vesting horizons, with headroom | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.3) |
+| Treasury budget lines | **32** — ≥ the enumerated `POL`/`POL_BASELINE`/`KEEPER`/`ORACLE`/`REWARDS`/`ops.*` lines (§1.1) with headroom; upsert-keyed, so occupancy ≤ the line enumeration | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.1) |
+| Treasury pending outflows | **64** — queued in-cap proposal outflows awaiting meter grace (§1.3); matched to the `IntakeQueue` pre-qualification ceiling | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.3) |
+| Treasury POL commitments | **196** = `MaxLiveMarkets` — one live-book subsidy obligation per market that NAV nets against (§1.2/§8.2) | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §8) |
+| Treasury coretime obligations | **8** each: ≤ 8 funded-period idempotency keys **and** ≤ 8 open renewal quotes (two separately-bounded collections, D-9); ~8 renewal periods of retained history | `pallet-futarchy-treasury` ([09](09-execution-upgrades-and-rollout.md) §4) |
 
 **Why 64 and 32 are jointly satisfiable:** intake admits ≤ 64 candidates per epoch *before* Screening; qualification passes ≤ `epoch.slots` = 5 per epoch into the live pipeline. Live occupancy = 5 trading + ≤ 20 in measurement/settlement (5 × 4 cohort stages) + extended/suspended/rerun/queued stragglers ≤ 7 of margin ⇒ 32 suffices with headroom; 64 merely prices the pre-qualification waiting room (bonds + slash, [08](08-treasury-and-economics.md) §7).
 

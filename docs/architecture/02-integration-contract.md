@@ -4,7 +4,7 @@
 
 **Boundary.** This document owns everything the chain and the canonical frontend must agree on byte-for-byte: shared SCALE types, the `FutarchyApi` runtime API and its view types, the frozen event schema, the storage items and names the frontend reads directly, chain identity constants, the constants-binding rules, the WSS bootnode chain-spec requirement, the backend-published test-artifact feed, and the `ReleaseChannel` raw storage key. It does **not** own the *semantics* behind these surfaces (ledger rules → [03](03-conditional-ledger.md), market mechanics → [04](04-markets-and-pricing.md), decision engine → [05](05-welfare-and-decision-engine.md), oracle game → [07](07-oracle-and-disputes.md), upgrade path → [09](09-execution-upgrades-and-rollout.md)) — but where a name or layout appears both here and there, **this document's spelling is canonical**. Normative language per RFC 2119.
 
-**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 2**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
+**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 3**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
 
 ---
 
@@ -113,7 +113,7 @@ pub enum TradeSide { BuyLong, BuyShort, SellLong, SellShort }
 
 `Proposal` gains the fields the decision engine reads (`ask: Balance`, `decide_at: BlockNumber` — B-med, semantics in [05](05-welfare-and-decision-engine.md)); `ExecutionRecord.result` is typed `DispatchOutcomeCode` as above. The full `Proposal`/`ExecutionRecord` structs and their ≤ 512 B / bound arguments are owned by [05](05-welfare-and-decision-engine.md)/[09](09-execution-upgrades-and-rollout.md); their SCALE layouts are part of this contract by inclusion in `futarchy-primitives`.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 2`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
+The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 3`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
 
 ---
 
@@ -145,7 +145,7 @@ sp_api::decl_runtime_apis! {
         /// Ring of the last 32 cohort settlements (mirrors RecentCohortSummaries, §7.1).
         fn recent_cohorts() -> BoundedVec<CohortSummaryView, ConstU32<32>>;
         /// Oracle rounds currently open.
-        fn open_oracle_rounds() -> BoundedVec<OracleRoundView, ConstU32<192>>;       // 16 × 4 × 3
+        fn open_oracle_rounds() -> BoundedVec<OracleRoundView, ConstU32<192>>;       // ≤128 live (16×4×2 per-version); cap 192
     }
 }
 ```
@@ -279,6 +279,7 @@ pub type CohortSummaryView = CohortSummary;
 pub struct OracleRoundView {
     pub component: MetricId,
     pub epoch: EpochId,
+    pub spec_version: MetricSpecVersion,  // per-version game key (contract v3, 07 §2(4))
     pub round: u8,                        // 1..=3
     pub reporter: AccountId,
     pub value_1e9: FixedU64,
@@ -348,10 +349,10 @@ Storage:
 | Item | Type | Bound |
 |---|---|---|
 | `Reporters` | `map AccountId → ReporterInfo { stake: Balance, registered_at: BlockNumber, offenses: u8 }` | counted; ≥ 3 required before attested components admit |
-| `Rounds` | `map (MetricId, EpochId) → RoundState { round: u8, spec_version: MetricSpecVersion, reporter: AccountId, value: FixedU64, evidence_hash: H256, bond: Balance, challenge_deadline: BlockNumber, extended: bool, challenger: Option<AccountId>, counter_value: Option<FixedU64>, acks: u8 }` | ≤ 16 components × ≤ 4 settling epochs (per-version games across an activation boundary append a `RoundState` per frozen version — [07](07-oracle-and-disputes.md) §2) |
-| `ComponentValues` | `map (MetricId, EpochId) → SettledComponent { value: FixedU64, path: SettlePath, flagged: bool }` | reaped at cohort settlement; `SettlePath ∈ { Unchallenged, Recomputed, Adjudicated, Neutral }` |
+| `Rounds` | `map (MetricId, EpochId, MetricSpecVersion) → RoundState { component: MetricId, epoch: EpochId, round: u8, spec_version: MetricSpecVersion, reporter: AccountId, value: FixedU64, evidence_hash: H256, bond: Balance, challenge_deadline: BlockNumber, extended: bool, challenger: Option<AccountId>, counter_value: Option<FixedU64>, acks: u8, report_hash: H256, stake_at_risk: Balance, cumulative_reporter_bond: Balance, cumulative_challenger_bond: Balance }` | ≤ **128** = 16 components × ≤ 4 settling epochs × ≤ 2 concurrent frozen versions — one live game per `(component, epoch, spec_version)`. The **triple key** (contract v3) is normative: 07 §2(4) runs an independent game per frozen version, so an activation boundary keeps two games live for one `(component, epoch)`; the pair key of contract v2 could not hold them (it maps one value per key). The value re-embeds `component`/`epoch`/`spec_version` for a `try_state` key-integrity check. `report_hash`/`stake_at_risk`/`cumulative_*_bond` back per-round ack keying, bond-schedule freezing and §5.5 slashing; the FE reads the `OracleRoundView` projection (§4), not this struct |
+| `ComponentValues` | `map (MetricId, EpochId, MetricSpecVersion) → SettledComponent { value: FixedU64, path: SettlePath, flagged: bool }` | reaped at cohort settlement; **triple key** (contract v3) — per-version games settle their own cohorts, so one `(component, epoch)` can carry a settled value per frozen version. `SettlePath ∈ { Unchallenged, Recomputed, Adjudicated, Neutral }` |
 | `Watchtowers` | `map AccountId → WatchtowerInfo { stake: Balance, registered_at: BlockNumber, inactive_epochs: u8 }` | counted, ≤ `wt.max = 16` seats; bonded acknowledgment quorum (D-18; registry semantics in [07](07-oracle-and-disputes.md) §4) |
-| `ReserveHealth` | `{ consecutive_fails: u8, consecutive_passes: u8, unhealthy: bool, last_query_id }` | single value; the deterministic reserve-probe state (`R`, [07](07-oracle-and-disputes.md) §8) |
+| `ReserveHealth` | `{ consecutive_fails: u8, consecutive_passes: u8, unhealthy: bool, last_query_id: u64, last_probe_at: BlockNumber, pending_since: Option<BlockNumber> }` | single value; the deterministic reserve-probe state (`R`, [07](07-oracle-and-disputes.md) §8). `last_probe_at`/`pending_since` (contract v3) time the probe for the fail-static timeout |
 
 Events:
 
@@ -409,7 +410,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 2` (runtime constant) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 3` (runtime constant) |
 
 ---
 
@@ -502,6 +503,11 @@ Total **168 bytes** (v1.0 baseline — the pre-freeze 78- and 92-byte drafts in 
 4. **No hardcodes (X-11h).** The frontend binds to the constants API and `params()` for every chain-tunable value (§9); frontend CI enforces the no-literal rule. The 64-position bound and every other formerly hardcoded §21-tunable are chain-read.
 5. **Release coupling.** Backend E15 and frontend FE-R1 are the two ends of this contract; neither side's release gates pass while the other's contract surface is red (§11).
 6. **Contingency.** If a contract regression ships anyway, the frontend degrades to the D-6 layer-1 surface (chain-served `RecentCohortSummaries` + 8-checkpoint TWAP series + direct storage reads) — reduced depth, full correctness; it never falls back to a trusted third-party service.
+
+**Version history.**
+
+- **v3 (2026-07-15) — oracle per-version reconciliation (A5).** 07 §2(4) runs one reporting game per `(component, epoch, frozen spec_version)`, so §7.2 `Rounds`/`ComponentValues` take the **triple key** `(MetricId, EpochId, MetricSpecVersion)`. Contract v2's pair key was self-contradictory — its own bound note said per-version games "append a `RoundState` per frozen version," which a one-value-per-key map cannot do; the triple resolves it. `RoundState` additionally carries the ack-keying/bond-freezing/§5.5-slashing fields the protocol requires, `ReserveHealth` its probe-timing fields, and `OracleRoundView` (§4) gains `spec_version`. **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply; the change is a straight restructure. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-15.
+- **v2** — the frozen baseline established at D-2 (all FE §30 patch items applied).
 
 ---
 
