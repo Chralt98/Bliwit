@@ -2292,11 +2292,17 @@ dependencies = [
 name = "pallet-futarchy-treasury"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
  "futarchy-primitives",
  "futarchy-treasury-core",
- "pallet-origins",
+ "origins-core",
  "parity-scale-codec",
  "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
 ]
 
 [[package]]

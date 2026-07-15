@@ -216,6 +216,11 @@ On-chain results MUST match within the §2 error bound plus one base unit of rou
 | `Params` registry | **128** keys (genesis-fixed set; ≥ the ~87 currently-concrete §1 rows plus headroom for `[VERIFY]`-gated rows as they resolve; the `params()` runtime API keeps its own 64-keys-per-call bound, [02](02-integration-contract.md) §3) | `pallet-constitution` |
 | `Capabilities` table | 64 rows | `pallet-constitution` |
 | `Meters` | 16 (generic bounded-meter primitive; empty at genesis — envelope meters live with their owning pallets, [15](15-invariants-and-testing.md) I-17) | `pallet-constitution` |
+| Treasury `Streams` | **128** open vesting streams (recipient-claimable grants > `trs.stream_threshold`, §1.3); ≥ `epoch.slots` new grants/epoch over multi-epoch vesting horizons, with headroom | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.3) |
+| Treasury budget lines | **32** — ≥ the enumerated `POL`/`POL_BASELINE`/`KEEPER`/`ORACLE`/`REWARDS`/`ops.*` lines (§1.1) with headroom; upsert-keyed, so occupancy ≤ the line enumeration | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.1) |
+| Treasury pending outflows | **64** — queued in-cap proposal outflows awaiting meter grace (§1.3); matched to the `IntakeQueue` pre-qualification ceiling | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.3) |
+| Treasury POL commitments | **196** = `MaxLiveMarkets` — one live-book subsidy obligation per market that NAV nets against (§1.2/§8.2) | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §8) |
+| Treasury coretime obligations | **8** each: ≤ 8 funded-period idempotency keys **and** ≤ 8 open renewal quotes (two separately-bounded collections, D-9); ~8 renewal periods of retained history | `pallet-futarchy-treasury` ([09](09-execution-upgrades-and-rollout.md) §4) |
 
 **Why 64 and 32 are jointly satisfiable:** intake admits ≤ 64 candidates per epoch *before* Screening; qualification passes ≤ `epoch.slots` = 5 per epoch into the live pipeline. Live occupancy = 5 trading + ≤ 20 in measurement/settlement (5 × 4 cohort stages) + extended/suspended/rerun/queued stragglers ≤ 7 of margin ⇒ 32 suffices with headroom; 64 merely prices the pre-qualification waiting room (bonds + slash, [08](08-treasury-and-economics.md) §7).
 

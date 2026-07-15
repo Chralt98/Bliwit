@@ -744,8 +744,14 @@ pub mod bounds {
 pub mod currency {
     pub const USDC_DECIMALS: u8 = 6;
     pub const VIT_DECIMALS: u8 = 12;
+    /// One whole USDC (6 decimals) and one whole VIT (12 decimals) in base units.
+    pub const USDC: u128 = 1_000_000;
+    pub const VIT: u128 = 1_000_000_000_000;
     pub const USDC_CENT: u128 = 10_000;
     pub const VIT_EXISTENTIAL_DEPOSIT: u128 = 10_000_000_000;
+    /// Genesis VIT supply (02 §8 / 13 §3.5 identity, D-17): 1,000,000,000 VIT,
+    /// fixed at genesis. The single home for this chain-identity constant.
+    pub const VIT_TOTAL_SUPPLY: u128 = 1_000_000_000 * VIT;
 }
 
 pub mod chain_identity {
