@@ -2,7 +2,10 @@
 //! DoD, 15 §4.5). B5 recalibrates the placeholder weights from this harness.
 
 use super::*;
+// `Vec` is not in the no_std prelude — the runtime's wasm `runtime-benchmarks`
+// build compiles this file `no_std`, unlike the std-only pallet gate (B1a).
 use crate::pallet::{Attestations, Members, NextAttestationId};
+use alloc::vec::Vec;
 use frame_benchmarking::v2::*;
 use frame_support::BoundedVec;
 

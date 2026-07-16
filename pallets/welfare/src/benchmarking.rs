@@ -2,7 +2,11 @@
 //! B5 replaces the hand-seeded weights after PoV calibration.
 
 use super::*;
+// `Vec`/`vec!` are not in the no_std prelude — the runtime's wasm
+// `runtime-benchmarks` build compiles this file `no_std`, unlike the std-only
+// pallet gate (B1a).
 use crate::pallet::{BoundedSpecSet, Pallet};
+use alloc::{vec, vec::Vec};
 use frame_benchmarking::v2::*;
 use frame_system::RawOrigin;
 

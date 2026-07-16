@@ -106,7 +106,7 @@ impl Default for WelfareParams {
     TypeInfo,
     DecodeWithMemTracking,
 )]
-#[cfg_attr(feature = "std", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Pillar {
     S,
     COnchain,
@@ -127,7 +127,7 @@ pub enum Pillar {
     PartialEq,
     TypeInfo,
 )]
-#[cfg_attr(feature = "std", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum SourceClass {
     Onchain,
     RelayDerived,
@@ -167,11 +167,13 @@ pub struct MetricSpec {
     pub prior_bounds: [FixedU64; HISTORY_PRIORS],
 }
 
-// FRAME genesis configs are serde-backed under `std`. `FixedU64` is a shared
-// no_std tuple type without a serde dependency, so serialize this one genesis
-// carrier through its canonical 1e9-grid integer representation rather than
-// forcing serde into `futarchy-primitives`.
-#[cfg(feature = "std")]
+// FRAME genesis configs are serde-backed (including in the no_std Wasm
+// runtime, whose GenesisBuilder API builds genesis inside the blob). `FixedU64`
+// is a shared no_std tuple type without a serde dependency, so serialize this
+// one genesis carrier through its canonical 1e9-grid integer representation
+// rather than forcing serde into `futarchy-primitives`. Gated on the `serde`
+// feature (std implies it) so the pallet can enable it for no_std Wasm builds.
+#[cfg(feature = "serde")]
 #[derive(serde::Serialize, serde::Deserialize)]
 struct MetricSpecSerde {
     id: MetricId,
@@ -194,7 +196,7 @@ struct MetricSpecSerde {
     prior_bounds: [u64; HISTORY_PRIORS],
 }
 
-#[cfg(feature = "std")]
+#[cfg(feature = "serde")]
 impl serde::Serialize for MetricSpec {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -224,7 +226,7 @@ impl serde::Serialize for MetricSpec {
     }
 }
 
-#[cfg(feature = "std")]
+#[cfg(feature = "serde")]
 impl<'de> serde::Deserialize<'de> for MetricSpec {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
