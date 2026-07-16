@@ -708,7 +708,7 @@ impl Treasury {
         &mut self,
         _keeper: AccountId,
         period_index: u32,
-    ) -> Result<(), Error> {
+    ) -> Result<Balance, Error> {
         ensure!(
             !self.funded_coretime_periods.contains(&period_index),
             Error::PeriodAlreadyFunded
@@ -729,7 +729,7 @@ impl Treasury {
             line: BudgetLine::OpsCoretime,
             amount: price,
         });
-        Ok(())
+        Ok(price)
     }
     pub fn set_reserve_impaired(&mut self, epoch: EpochId, flag: bool) {
         if self.reserve_impaired != flag {
@@ -1143,7 +1143,10 @@ mod tests {
         // the amount.
         t.note_coretime_renewal_quote(42, 100_000 * USDC).unwrap();
         let line_before = t.line_balance(BudgetLine::OpsCoretime);
-        t.execute_coretime_renewal(acct(7), 42).unwrap();
+        assert_eq!(
+            t.execute_coretime_renewal(acct(7), 42).unwrap(),
+            100_000 * USDC
+        );
         assert_eq!(
             t.line_balance(BudgetLine::OpsCoretime),
             line_before - 100_000 * USDC
@@ -1171,7 +1174,10 @@ mod tests {
             Error::InsufficientFunds
         );
         t.note_coretime_renewal_quote(43, 400_000 * USDC).unwrap();
-        t.execute_coretime_renewal(acct(8), 43).unwrap();
+        assert_eq!(
+            t.execute_coretime_renewal(acct(8), 43).unwrap(),
+            400_000 * USDC
+        );
         t.try_state().unwrap();
     }
 

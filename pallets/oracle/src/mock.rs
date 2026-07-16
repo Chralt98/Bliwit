@@ -105,6 +105,7 @@ impl pallet_oracle::Config for Test {
     type AdjudicationOrigin = TestAdjudicationOrigin;
     type Reporting = TestReporting;
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
+    type ProbeDispatch = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;

@@ -765,6 +765,18 @@ pub mod currency {
 pub mod chain_identity {
     pub const SS58_PREFIX: u16 = 7777;
     pub const FIXTURE_PARA_ID: u32 = 4242;
+
+    // 02 §8 / 09 §6.1 (D-17) — the pinned XCM identity, single-homed here as
+    // plain numbers (this crate stays frame/xcm-free, 01 §5.2); `bleavit-xcm`
+    // constructs the typed `Location`s from these (B4).
+    /// Asset Hub (the USDC reserve chain), sibling parachain id.
+    pub const ASSET_HUB_PARA_ID: u32 = 1000;
+    /// Coretime chain (broker), sibling parachain id — renewal funding target (09 §4).
+    pub const CORETIME_PARA_ID: u32 = 1005;
+    /// `PalletInstance` of `pallet-assets` on Asset Hub holding USDC (D-17).
+    pub const USDC_PALLET_INSTANCE: u8 = 50;
+    /// USDC asset index on Asset Hub (D-17; verified Circle-native id, 2026-07-16).
+    pub const USDC_ASSET_INDEX: u128 = 1337;
 }
 
 pub mod kernel {

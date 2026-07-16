@@ -182,7 +182,8 @@ On-chain results MUST match within the §2 error bound plus one base unit of rou
 |---|---|
 | ss58 prefix | 7777 (registry submission before Phase 2) |
 | paraId | assigned at onboarding; test fixtures 4242 |
-| USDC | `ForeignAssets`, Location `{parents: 1, X3(Parachain(1000), PalletInstance(50), GeneralIndex(1337))}` **[VERIFY asset index 1337]**; 6 decimals; `min_balance` 10⁴ |
+| USDC | `ForeignAssets`, Location `{parents: 1, X3(Parachain(1000), PalletInstance(50), GeneralIndex(1337))}` (asset index 1337 verified Circle-native sufficient USDC, 2026-07-16, PLAN V-17); 6 decimals; `min_balance` 10⁴ |
+| Counterparty system chains | Asset Hub = `Parachain(1000)` (USDC reserve, [09](09-execution-upgrades-and-rollout.md) §6.1); **Coretime chain = `Parachain(1005)`** (renewal-funding target, [09](09-execution-upgrades-and-rollout.md) §4; verified 2026-07-16, PLAN V-18); relay = parent. Single-homed as numbers in `futarchy-primitives::chain_identity` |
 | VIT | native; **total supply 10⁹, 12 decimals**; existential deposit 0.01 VIT |
 | VIT vesting | SDK `pallet-vesting`; min vested transfer **1 VIT**; genesis-allocation schedules per [08](08-treasury-and-economics.md) §2.1 |
 | USDC treasury target | ≥ 25M USDC before Phase-5 arming; per-class min-viable NAV floors per [08](08-treasury-and-economics.md) §4 |

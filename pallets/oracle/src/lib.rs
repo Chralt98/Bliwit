@@ -141,6 +141,18 @@ pub trait ReportingContext {
     ) -> alloc::vec::Vec<(MetricId, MetricSpecVersion)>;
 }
 
+/// B4/B1a seam (07 §8): fired after `crank_reserve_probe` commits a fresh pending
+/// probe. The implementation (`bleavit-xcm`'s `XcmProbeDispatcher`) builds and sends
+/// the Asset Hub program. Infallible by design: a failed or missing send simply
+/// leaves the probe pending until the fail-static timeout (07 §8, I-24).
+pub trait ProbeDispatch {
+    fn probe_due(query_id: u64);
+}
+
+impl ProbeDispatch for () {
+    fn probe_due(_: u64) {}
+}
+
 /// Constructs a runtime origin resolving to a given authority so benchmarks can
 /// drive the privileged `adjudicate` call with its exact 07 §5.4 origin.
 #[cfg(feature = "runtime-benchmarks")]
@@ -188,6 +200,10 @@ pub mod pallet {
 
         /// Weight information for extrinsics.
         type WeightInfo: WeightInfo;
+
+        /// Runtime XCM adapter invoked only after a fresh reserve probe commits
+        /// (07 §8; B4/B1a). The pallet remains XCM-free by construction.
+        type ProbeDispatch: ProbeDispatch;
 
         /// Origin construction for benchmarking (see [`BenchmarkHelper`]).
         #[cfg(feature = "runtime-benchmarks")]
@@ -604,12 +620,15 @@ pub mod pallet {
         /// `oracle.crank_reserve_probe` — permissionless probe crank: first counts
         /// any timed-out outstanding probe as a fail (fail-static, 07 §8), then
         /// sends the next probe if `res.probe_interval` has elapsed. Signed
-        /// (keeper, rebated). State only — the XCM send is B4 (I-24, rule 7).
+        /// (keeper, rebated). The pallet commits state first, then fires the
+        /// XCM-free [`ProbeDispatch`] seam; send failure remains fail-static
+        /// through the pending probe's timeout (I-24, rule 7).
         #[pallet::call_index(8)]
         #[pallet::weight(T::WeightInfo::crank_reserve_probe())]
         pub fn crank_reserve_probe(origin: OriginFor<T>) -> DispatchResult {
             ensure_signed(origin)?;
             let now = Self::now();
+            let mut fresh_query_id = None;
             Self::mutate_core(|o| {
                 let mut folded = false;
                 if let Some(since) = o.reserve_health.pending_since {
@@ -629,13 +648,19 @@ pub mod pallet {
                         .last_probe_at
                         .saturating_add(RES_PROBE_INTERVAL)
                 {
-                    o.crank_reserve_probe(now).map(|_| ())
+                    let query_id = o.crank_reserve_probe(now)?;
+                    fresh_query_id = Some(query_id);
+                    Ok(())
                 } else if folded {
                     Ok(())
                 } else {
                     Err(CoreError::ProbeTooEarly)
                 }
-            })
+            })?;
+            if let Some(query_id) = fresh_query_id {
+                T::ProbeDispatch::probe_due(query_id);
+            }
+            Ok(())
         }
 
         /// `oracle.adjudicate` — the sole privileged call: the `OracleResolution`

@@ -1235,6 +1235,128 @@ fn request_adjudication_before_round_three_is_window_open() {
 // 9. Reserve health probe R (07 §8 — deterministic class-3, fail-static)
 // =========================================================================
 
+mod probe_dispatch_seam {
+    use super::*;
+    use crate as pallet_oracle;
+    use frame_support::{derive_impl, parameter_types};
+    use sp_runtime::{traits::IdentityLookup, AccountId32, BuildStorage};
+    use std::cell::RefCell;
+
+    type Block = frame_system::mocking::MockBlock<DispatchTest>;
+
+    frame_support::construct_runtime!(
+        pub enum DispatchTest {
+            System: frame_system,
+            Oracle: pallet_oracle,
+        }
+    );
+
+    #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
+    impl frame_system::Config for DispatchTest {
+        type Block = Block;
+        type AccountId = AccountId32;
+        type Lookup = IdentityLookup<AccountId32>;
+    }
+
+    pub struct DispatchReporting;
+
+    impl pallet_oracle::ReportingContext for DispatchReporting {
+        fn report_window_end(_: EpochId) -> futarchy_primitives::BlockNumber {
+            10
+        }
+
+        fn is_expected_spec_version(_: MetricId, _: EpochId, _: MetricSpecVersion) -> bool {
+            true
+        }
+
+        fn stake_at_risk(_: MetricId, _: EpochId) -> Balance {
+            0
+        }
+
+        fn expected_components(_: EpochId) -> Vec<(MetricId, MetricSpecVersion)> {
+            Vec::new()
+        }
+    }
+
+    std::thread_local! {
+        static DISPATCHED: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub struct RecordingProbeDispatch;
+
+    impl pallet_oracle::ProbeDispatch for RecordingProbeDispatch {
+        fn probe_due(query_id: u64) {
+            DISPATCHED.with(|ids| ids.borrow_mut().push(query_id));
+        }
+    }
+
+    parameter_types! {
+        pub const MaxRoundCloseBatch: u32 = 20;
+    }
+
+    impl pallet_oracle::Config for DispatchTest {
+        type AdjudicationOrigin = frame_system::EnsureRoot<AccountId32>;
+        type Reporting = DispatchReporting;
+        type MaxRoundCloseBatch = MaxRoundCloseBatch;
+        type ProbeDispatch = RecordingProbeDispatch;
+        type WeightInfo = ();
+        #[cfg(feature = "runtime-benchmarks")]
+        type BenchmarkHelper = DispatchBenchmarkHelper;
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    pub struct DispatchBenchmarkHelper;
+
+    #[cfg(feature = "runtime-benchmarks")]
+    impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for DispatchBenchmarkHelper {
+        fn adjudication_origin() -> RuntimeOrigin {
+            RuntimeOrigin::root()
+        }
+    }
+
+    fn new_ext() -> sp_io::TestExternalities {
+        let storage = RuntimeGenesisConfig {
+            system: Default::default(),
+            oracle: Default::default(),
+        }
+        .build_storage()
+        .expect("probe-dispatch test genesis must build");
+        let mut ext = sp_io::TestExternalities::new(storage);
+        ext.execute_with(|| System::set_block_number(1));
+        ext
+    }
+
+    #[test]
+    fn reserve_probe_crank_dispatches_only_a_fresh_pending_query() {
+        new_ext().execute_with(|| {
+            DISPATCHED.with(|ids| ids.borrow_mut().clear());
+
+            System::set_block_number(u64::from(RES_PROBE_INTERVAL));
+            assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(
+                AccountId32::new([9; 32])
+            )));
+            assert_eq!(
+                pallet_oracle::ReserveHealth::<DispatchTest>::get().last_query_id,
+                1
+            );
+            DISPATCHED.with(|ids| assert_eq!(&*ids.borrow(), &[1]));
+
+            // The timeout matures before the next send interval. This crank
+            // commits the fail-static fold but creates no pending query, so the
+            // runtime dispatcher must not be invoked a second time (07 §8).
+            System::set_block_number(u64::from(RES_PROBE_INTERVAL + RES_PROBE_TIMEOUT));
+            assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(
+                AccountId32::new([9; 32])
+            )));
+            let health = pallet_oracle::ReserveHealth::<DispatchTest>::get();
+            assert_eq!(health.last_query_id, 1);
+            assert_eq!(health.pending_since, None);
+            assert_eq!(health.consecutive_fails, 1);
+            DISPATCHED.with(|ids| assert_eq!(&*ids.borrow(), &[1]));
+        });
+    }
+}
+
 #[test]
 fn reserve_probe_before_interval_is_too_early() {
     new_test_ext().execute_with(|| {

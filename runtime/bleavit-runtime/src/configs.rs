@@ -1147,6 +1147,12 @@ impl pallet_oracle::ReportingContext for PendingReporting {
 impl pallet_oracle::Config for Runtime {
     type AdjudicationOrigin = pallet_origins::EnsureOracleResolution;
     type Reporting = PendingReporting;
+    // B4 pending probe-dispatch seam: `()` sends nothing, so every probe times
+    // out fail-static (07 §8, I-24 — absence is never healthy). Swapped for
+    // `bleavit_xcm::probe::XcmProbeDispatcher` when the stub XCM config below
+    // (`xcm_config`: Barrier/AssetTransactor/Trader/XcmSender = ()) is replaced
+    // by the bleavit-xcm components (the B4 runtime-integration follow-up).
+    type ProbeDispatch = ();
     type MaxRoundCloseBatch = ConstU32<{ kernel::TICK_BATCH }>;
     type WeightInfo = pallet_oracle::weights::SubstrateWeight<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
@@ -1251,10 +1257,27 @@ impl pallet_futarchy_treasury::TreasuryParams for TreasuryParams {
         u32::from(percent_param(b"iss.inflation")) * 100
     }
 }
+/// B4 pending renewal-dispatch seam: fail-closed (G-1) — every
+/// `execute_coretime_renewal` rolls back until the real
+/// `bleavit_xcm::coretime::XcmRenewalDispatcher` is wired with the stub XCM
+/// config swap (09 §4: an unwireable transfer must not consume the quote or
+/// mark the period funded; the keeper simply retries once wired).
+pub struct PendingRenewalDispatch;
+impl pallet_futarchy_treasury::RenewalDispatch for PendingRenewalDispatch {
+    fn dispatch_renewal(
+        _period_index: u32,
+        _amount: Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Err(sp_runtime::DispatchError::Other(
+            "coretime renewal XCM dispatch not wired yet (B4 runtime integration)",
+        ))
+    }
+}
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
     type Params = TreasuryParams;
     type CurrentEpoch = PendingEpochClock;
+    type RenewalDispatch = PendingRenewalDispatch;
     type WeightInfo = pallet_futarchy_treasury::weights::SubstrateWeight<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;

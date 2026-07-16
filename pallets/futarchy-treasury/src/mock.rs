@@ -98,6 +98,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type TreasuryOrigin = TestTreasuryOrigin;
     type Params = TestParams;
     type CurrentEpoch = CurrentEpochValue;
+    type RenewalDispatch = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;

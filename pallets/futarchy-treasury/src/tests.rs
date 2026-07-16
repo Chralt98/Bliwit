@@ -299,6 +299,182 @@ fn issuance_is_line_scoped_and_capped_at_two_percent() {
 
 // ---- coretime renewal (09 §4) -----------------------------------------------
 
+mod renewal_dispatch_seam {
+    use super::*;
+    use crate as pallet_futarchy_treasury;
+    use frame_support::{derive_impl, parameter_types};
+    use sp_core::crypto::AccountId32;
+    use sp_runtime::{traits::IdentityLookup, BuildStorage, DispatchError};
+    use std::cell::{Cell, RefCell};
+
+    type Block = frame_system::mocking::MockBlock<DispatchTest>;
+
+    frame_support::construct_runtime!(
+        pub enum DispatchTest {
+            System: frame_system,
+            Treasury: pallet_futarchy_treasury,
+        }
+    );
+
+    #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
+    impl frame_system::Config for DispatchTest {
+        type Block = Block;
+        type AccountId = AccountId32;
+        type Lookup = IdentityLookup<AccountId32>;
+    }
+
+    pub struct DispatchParams;
+
+    impl pallet_futarchy_treasury::TreasuryParams for DispatchParams {
+        fn cap_proposal_bps() -> u32 {
+            TRS_CAP_PROPOSAL_BPS
+        }
+
+        fn cap_30d_bps() -> u32 {
+            futarchy_treasury_core::TRS_CAP_30D_BPS
+        }
+
+        fn cap_180d_bps() -> u32 {
+            futarchy_treasury_core::TRS_CAP_180D_BPS
+        }
+
+        fn stream_threshold_bps() -> u32 {
+            TRS_STREAM_THRESHOLD_BPS
+        }
+
+        fn inflation_cap_bps() -> u32 {
+            futarchy_treasury_core::ISS_INFLATION_CAP_BPS
+        }
+    }
+
+    std::thread_local! {
+        static DISPATCHED: RefCell<Vec<(u32, u128)>> = const { RefCell::new(Vec::new()) };
+        static FAIL_DISPATCH: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub struct RecordingRenewalDispatch;
+
+    impl pallet_futarchy_treasury::RenewalDispatch for RecordingRenewalDispatch {
+        fn dispatch_renewal(
+            period_index: u32,
+            amount: u128,
+        ) -> frame_support::dispatch::DispatchResult {
+            DISPATCHED.with(|calls| calls.borrow_mut().push((period_index, amount)));
+            if FAIL_DISPATCH.with(Cell::get) {
+                Err(DispatchError::Other("renewal dispatch failed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    parameter_types! {
+        pub const CurrentEpoch: u32 = 0;
+    }
+
+    impl pallet_futarchy_treasury::Config for DispatchTest {
+        type TreasuryOrigin = frame_system::EnsureRoot<AccountId32>;
+        type Params = DispatchParams;
+        type CurrentEpoch = CurrentEpoch;
+        type RenewalDispatch = RecordingRenewalDispatch;
+        type WeightInfo = ();
+        #[cfg(feature = "runtime-benchmarks")]
+        type BenchmarkHelper = DispatchBenchmarkHelper;
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    pub struct DispatchBenchmarkHelper;
+
+    #[cfg(feature = "runtime-benchmarks")]
+    impl pallet_futarchy_treasury::BenchmarkHelper<RuntimeOrigin, AccountId32>
+        for DispatchBenchmarkHelper
+    {
+        fn treasury_origin() -> RuntimeOrigin {
+            RuntimeOrigin::root()
+        }
+
+        fn account(seed: u8) -> AccountId32 {
+            AccountId32::new([seed; 32])
+        }
+    }
+
+    fn new_ext() -> sp_io::TestExternalities {
+        let storage = RuntimeGenesisConfig {
+            system: Default::default(),
+            treasury: pallet_futarchy_treasury::GenesisConfig {
+                main_usdc: MAIN0,
+                ..Default::default()
+            },
+        }
+        .build_storage()
+        .expect("renewal-dispatch test genesis must build");
+        let mut ext = sp_io::TestExternalities::new(storage);
+        ext.execute_with(|| {
+            System::set_block_number(1);
+            assert_ok!(Treasury::fund_budget_line(
+                RuntimeOrigin::root(),
+                BudgetLine::OpsCoretime,
+                1_000_000 * USDC,
+            ));
+            DISPATCHED.with(|calls| calls.borrow_mut().clear());
+            FAIL_DISPATCH.with(|fail| fail.set(false));
+        });
+        ext
+    }
+
+    #[test]
+    fn renewal_dispatch_receives_the_committed_period_and_quote() {
+        new_ext().execute_with(|| {
+            let price = 100_000 * USDC;
+            assert_ok!(Treasury::note_coretime_renewal_quote(42, price));
+
+            assert_ok!(Treasury::execute_coretime_renewal(
+                RuntimeOrigin::signed(AccountId32::new([7; 32])),
+                42,
+            ));
+
+            DISPATCHED.with(|calls| assert_eq!(&*calls.borrow(), &[(42, price)]));
+            let state = Treasury::treasury();
+            assert!(state.funded_coretime_periods.contains(&42));
+            assert!(!state
+                .coretime_quotes
+                .iter()
+                .any(|(period, _)| *period == 42));
+        });
+    }
+
+    #[test]
+    fn renewal_dispatch_error_rolls_back_accounting_for_retry() {
+        new_ext().execute_with(|| {
+            let price = 100_000 * USDC;
+            assert_ok!(Treasury::note_coretime_renewal_quote(42, price));
+            let line_before = Treasury::line_balance(BudgetLine::OpsCoretime);
+            System::reset_events();
+            FAIL_DISPATCH.with(|fail| fail.set(true));
+
+            assert_err!(
+                Treasury::execute_coretime_renewal(
+                    RuntimeOrigin::signed(AccountId32::new([7; 32])),
+                    42,
+                ),
+                DispatchError::Other("renewal dispatch failed")
+            );
+
+            DISPATCHED.with(|calls| assert_eq!(&*calls.borrow(), &[(42, price)]));
+            let state = Treasury::treasury();
+            assert_eq!(Treasury::line_balance(BudgetLine::OpsCoretime), line_before);
+            assert!(state.coretime_quotes.contains(&(42, price)));
+            assert!(!state.funded_coretime_periods.contains(&42));
+            assert!(!System::events().iter().any(|record| {
+                matches!(
+                    record.event,
+                    RuntimeEvent::Treasury(Event::CoretimeRenewalCalled { .. })
+                )
+            }));
+        });
+    }
+}
+
 #[test]
 fn coretime_renewal_is_permissionless_quote_priced_and_idempotent() {
     funded_ext().execute_with(|| {
@@ -818,7 +994,9 @@ fn shell_matches_core_over_a_randomized_op_stream() {
                     amount * 1_000,
                     BudgetLine::Rewards,
                 ),
-                6 => core.execute_coretime_renewal(acc(6).into(), (r >> 3) % 4),
+                6 => core
+                    .execute_coretime_renewal(acc(6).into(), (r >> 3) % 4)
+                    .map(|_| ()),
                 _ => core.recover_foreign(
                     CoreOrigin::FutarchyTreasury,
                     AssetKind::Foreign([2u8; 32]),

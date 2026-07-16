@@ -28,6 +28,7 @@ members = [
   "pallets/epoch",
   "pallets/execution-guard",
   "runtime/bleavit-runtime",
+  "runtime/bleavit-xcm",
   "runtime-api",
   "node/bleavit-node",
 ]

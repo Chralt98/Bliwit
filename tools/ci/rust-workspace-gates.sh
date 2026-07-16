@@ -27,6 +27,30 @@ if cargo metadata --locked --no-deps --format-version=1 \
   cargo build -p futarchy-primitives -p futarchy-fixed --no-default-features --locked
 fi
 
+# I-24 XCM-isolation lint (15 §1, rule 7): `xcm`/`pallet-xcm` types must never be
+# imported by the decision/settlement pallets or their frame-free cores; in the
+# oracle the only permitted XCM-adjacent surface is the reserve-probe
+# `QueryResponse` *handler seam* (`reserve_probe_result`, 07 §8), which needs no
+# xcm imports either — so the deny list covers oracle too. Word-boundary match
+# catches `use xcm...`, `staging_xcm...`, `pallet_xcm...` in code and manifests;
+# `cumulus-primitives-core` is denied too (it re-exports XCM types — a smuggling
+# path). This enforces the *import* half of the 15 §1 lint; the "XCM-derived
+# storage reads" half is not grep-detectable and stays review-enforced (I-24 is
+# convention-class — 15 §1).
+i24_paths=(
+  pallets/epoch pallets/welfare pallets/market pallets/conditional-ledger pallets/oracle
+  crates/epoch-core crates/welfare-core crates/market-core crates/conditional-ledger-core crates/oracle-core
+)
+i24_existing=()
+for p in "${i24_paths[@]}"; do [[ -d "$p" ]] && i24_existing+=("$p"); done
+if [[ ${#i24_existing[@]} -gt 0 ]]; then
+  if grep -rnE '(^|[^a-zA-Z0-9_-])(staging[-_]xcm|pallet[-_]xcm|xcm_executor|xcm_builder|cumulus[-_]primitives[-_]core)([^a-zA-Z0-9_-]|$)|^\s*use xcm' \
+      "${i24_existing[@]}" --include='*.rs' --include='Cargo.toml'; then
+    echo "I-24 violation: xcm import found in a decision/settlement pallet (15 §1, runtime-code rule 7)" >&2
+    exit 1
+  fi
+fi
+
 if [[ -d reference-model/tests ]]; then
   PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
 fi

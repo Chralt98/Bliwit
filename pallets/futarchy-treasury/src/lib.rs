@@ -100,6 +100,27 @@ pub trait TreasuryParams {
     fn inflation_cap_bps() -> u32;
 }
 
+/// B4/B1a seam (09 §4): dispatch the DOT funding transfer for a renewal the
+/// accounting just committed. An `Err` rolls back the whole extrinsic (quote
+/// restored, period not funded) so the keeper can retry — bounded retry via
+/// re-cranks (09 §4); remote failures after a successful local dispatch remain
+/// keeper-monitored and never enter a decision path (I-24).
+pub trait RenewalDispatch {
+    fn dispatch_renewal(
+        period_index: u32,
+        amount: futarchy_primitives::Balance,
+    ) -> frame_support::pallet_prelude::DispatchResult;
+}
+
+impl RenewalDispatch for () {
+    fn dispatch_renewal(
+        _: u32,
+        _: futarchy_primitives::Balance,
+    ) -> frame_support::pallet_prelude::DispatchResult {
+        Ok(())
+    }
+}
+
 /// Maps a benchmark scenario to concrete runtime origins so the benchmark
 /// harness can exercise every call with its exact 08 §1.1 authority.
 #[cfg(feature = "runtime-benchmarks")]
@@ -150,6 +171,10 @@ pub mod pallet {
         /// issuance windows. Wired to `pallet-epoch`'s clock by the runtime
         /// (A8/B1a); a constant in the mock.
         type CurrentEpoch: Get<EpochId>;
+
+        /// Runtime XCM adapter for the DOT renewal-funding leg (09 §4). The
+        /// accounting pallet stays XCM-free; an error rolls the extrinsic back.
+        type RenewalDispatch: RenewalDispatch;
 
         /// Weight information for extrinsics.
         type WeightInfo: WeightInfo;
@@ -468,7 +493,8 @@ pub mod pallet {
         pub fn execute_coretime_renewal(origin: OriginFor<T>, period_index: u32) -> DispatchResult {
             let keeper = ensure_signed(origin)?;
             let keeper = Self::to_core_account(keeper);
-            Self::mutate(|t| t.execute_coretime_renewal(keeper, period_index))
+            let amount = Self::mutate(|t| t.execute_coretime_renewal(keeper, period_index))?;
+            T::RenewalDispatch::dispatch_renewal(period_index, amount)
         }
     }
 
@@ -702,10 +728,13 @@ pub mod pallet {
         /// Load → run the core transition → (on `Ok`) persist and deposit its
         /// events; on `Err`, return the mapped error with storage untouched
         /// (G-1 status-quo default — nothing was written).
-        fn mutate(op: impl FnOnce(&mut Treasury) -> Result<(), CoreError>) -> DispatchResult {
+        fn mutate<R>(
+            op: impl FnOnce(&mut Treasury) -> Result<R, CoreError>,
+        ) -> Result<R, DispatchError> {
             let mut t = Self::load();
-            op(&mut t).map_err(Self::map_core_error)?;
-            Self::persist(t)
+            let result = op(&mut t).map_err(Self::map_core_error)?;
+            Self::persist(t)?;
+            Ok(result)
         }
 
         /// Convert the mutated aggregate back to bounded storage and deposit its
