@@ -1,0 +1,23 @@
+[package]
+name = "futarchy-runtime-api"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+futarchy-primitives = { path = "../crates/futarchy-primitives", default-features = false }
+sp-api.workspace = true
+
+[dev-dependencies]
+bounded-collections = "0.3.2"
+parity-scale-codec = { version = "3.7.5", features = ["derive"] }
+sp-core = { workspace = true, default-features = true }
+sp-runtime = { workspace = true, default-features = true }
+
+[features]
+default = ["std"]
+std = [
+  "futarchy-primitives/std",
+  "sp-api/std",
+]

@@ -28,6 +28,7 @@ members = [
   "pallets/epoch",
   "pallets/execution-guard",
   "runtime/bleavit-runtime",
+  "runtime-api",
 ]
 
 [workspace.package]
@@ -47,6 +48,8 @@ repository = "https://github.com/bleavit/bleavit"
 frame-support = { version = "=46.0.1", default-features = false }
 frame-system = { version = "=46.0.0", default-features = false }
 frame-benchmarking = { version = "=46.0.0", default-features = false }
+# Runtime API declarations on the same `polkadot-stable2603` release train.
+sp-api = { version = "=41.0.0", default-features = false }
 sp-runtime = { version = "=46.0.0", default-features = false }
 sp-io = { version = "=45.0.0", default-features = false }
 sp-core = { version = "=40.0.0", default-features = false }
@@ -88,7 +91,6 @@ pallet-utility = { version = "=46.0.0", default-features = false }
 pallet-xcm = { version = "=26.0.0", default-features = false }
 parachains-common = { version = "=28.0.0", default-features = false }
 polkadot-runtime-common = { version = "=25.0.0", default-features = false }
-sp-api = { version = "=41.0.0", default-features = false }
 sp-block-builder = { version = "=41.0.0", default-features = false }
 sp-consensus-aura = { version = "=0.47.0", default-features = false }
 sp-genesis-builder = { version = "=0.22.0", default-features = false }

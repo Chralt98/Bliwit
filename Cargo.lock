@@ -2062,6 +2062,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "futarchy-runtime-api"
+version = "0.1.0"
+dependencies = [
+ "bounded-collections",
+ "futarchy-primitives",
+ "parity-scale-codec",
+ "sp-api",
+ "sp-core",
+ "sp-runtime",
+]
+
+[[package]]
 name = "futarchy-treasury-core"
 version = "0.1.0"
 dependencies = [

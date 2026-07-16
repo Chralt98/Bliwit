@@ -50,6 +50,7 @@ rollout that removes `sudo` at Phase 4.
 | [`reference-model/`](reference-model/pyproject.toml), [`tools/reference-model/generate-vectors.py`](tools/reference-model/generate-vectors.py) | M3 independent Python executable spec and CI-regenerated JSON vector corpus |
 | `pallets/`, `crates/*-core/` | Track A (re-scoped to production FRAME): each `crates/<name>-core/` contains the frame-free functional core and each `pallets/<name>/` currently contains a compiling shell scaffold (lib.rs · mock · tests · benchmarking · weights). The remaining Track-A work is replacing those scaffolds with real `#[frame_support::pallet]` wrappers |
 | `runtime/bleavit-runtime/` | B1 runtime assembly crate: pallet composition model, SafetyFilter BaseCallFilter adapter, USDC/fee/origin/genesis filtering wiring — a frame-free model, not yet `construct_runtime!`/`impl_runtime_apis!` (that is B1a) |
+| `runtime-api/` | B2 `futarchy-runtime-api` crate: the `sp_api::decl_runtime_apis!` declaration of the frozen 11-method `FutarchyApi` (02 §3) over the view types in `futarchy-primitives`; the runtime implements it in B1a |
 | `node/`, `frontend/` | Implementation roots created for future milestones; currently placeholders until their tracks begin |
 
 ## How this gets built
