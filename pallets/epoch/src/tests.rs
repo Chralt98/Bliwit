@@ -3,7 +3,8 @@ use crate::*;
 use epoch_core::{CohortInfo as CoreCohort, EpochParams, Origin as CoreOrigin};
 use frame_support::{assert_noop, assert_ok, BoundedVec};
 use futarchy_primitives::{
-    phase_offsets, Branch, CohortSummary, DecisionOutcome, EpochPhase, ProposalState,
+    keeper::CrankClass, phase_offsets, Branch, CohortSummary, DecisionOutcome, EpochPhase,
+    ProposalState,
 };
 use parity_scale_codec::Encode;
 use sp_runtime::DispatchError;
@@ -798,6 +799,36 @@ fn r2_2_decide_first_latches_stale_epoch_and_force_rejects() {
 }
 
 #[test]
+fn stale_decide_noop_on_already_decided_proposal_never_rebates() {
+    new_test_ext().execute_with(|| {
+        let mut state = decision_state(2, ProposalClass::Param);
+        let mut already_decided = live_proposal(1, ProposalState::Measuring, 0);
+        already_decided.proposer = keeper();
+        already_decided.decision = Some(DecisionOutcome::Adopt);
+        state.proposals.insert(0, already_decided);
+        state.epoch.phase = EpochPhase::Trade;
+        state.epoch.phase_start_block = phase_block(0, phase_offsets::TRADE_NUM);
+        state.proposals[1].decide_at = phase_block(0, phase_offsets::DECIDE_NUM);
+        state.proposal_id_high_water = 2;
+        assert_ok!(Epoch::seed(state));
+        RecordKeeperRebates::set(true);
+        let stale = phase_block(0, phase_offsets::DECIDE_NUM)
+            .saturating_add(epoch_core::STALE_EPOCH_BOUND)
+            .saturating_add(1);
+        set_block(stale);
+
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+
+        assert_eq!(
+            Proposals::<Test>::get(1).and_then(|proposal| proposal.decision),
+            Some(DecisionOutcome::Adopt)
+        );
+        assert!(KeeperRebates::get().is_empty());
+    });
+}
+
+#[test]
 fn frozen_seed_force_reject_does_not_deploy_markets() {
     new_test_ext().execute_with(|| {
         let mut state = EpochState::new();
@@ -1468,6 +1499,41 @@ fn tick_drives_qualify_and_seed_with_bounded_idempotent_items() {
 }
 
 #[test]
+fn keeper_rebate_is_exactly_once_for_useful_tick_and_zero_for_noop_or_error() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(keeper()),
+            proposal(1, keeper(), ProposalState::Submitted, 0, 1),
+        ));
+        set_block(phase_block(0, phase_offsets::QUALIFY_NUM));
+        RecordKeeperRebates::set(true);
+
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(keeper(), CrankClass::DecisionCritical)]
+        );
+
+        // Already qualified: a repeated crank performs no useful work.
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        assert_noop!(
+            Epoch::tick(RuntimeOrigin::signed(keeper()), tick_batch(vec![99])),
+            Error::<Test>::UnknownProposal
+        );
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(keeper(), CrankClass::DecisionCritical)]
+        );
+    });
+}
+
+#[test]
 fn tick_cancels_failed_static_checks_and_slashes_intake() {
     new_test_ext().execute_with(|| {
         assert_ok!(Epoch::submit(
@@ -1576,6 +1642,7 @@ fn decision_extension_is_once_only_and_keeps_creation_schedule_frozen() {
     new_test_ext().execute_with(|| {
         assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Param)));
         MarketGrade::set(false);
+        RecordKeeperRebates::set(true);
         assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
         let extended = Proposals::<Test>::get(1).expect("extended proposal remains live");
         assert_eq!(extended.state, ProposalState::Extended);
@@ -1586,12 +1653,34 @@ fn decision_extension_is_once_only_and_keeps_creation_schedule_frozen() {
             extended.decide_at,
             1u32.saturating_add(epoch_core::DECISION_EXTENSION)
         );
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(keeper(), CrankClass::DecisionCritical)]
+        );
+
+        // The same window cannot be extended again, and the too-early retry does
+        // not earn another rebate.
+        assert_noop!(
+            Epoch::decide(RuntimeOrigin::signed(keeper()), 1),
+            Error::<Test>::BadPhase
+        );
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(keeper(), CrankClass::DecisionCritical)]
+        );
 
         set_block(extended.decide_at);
         assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
         assert_eq!(
             Epoch::epoch_state().proposals[0].decision,
             Some(DecisionOutcome::Reject(RejectReason::NotDecisionGrade))
+        );
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![
+                (keeper(), CrankClass::DecisionCritical),
+                (keeper(), CrankClass::DecisionCritical),
+            ]
         );
         assert!(!SeamCalls::get()
             .iter()
@@ -2056,6 +2145,7 @@ fn settlement_is_cursor_resumable_and_welfare_is_the_only_settlement_seam() {
             CohortStatus::Measuring { until_epoch: 2 },
         )));
         set_block(phase_block(3, phase_offsets::HOUSEKEEPING_NUM));
+        RecordKeeperRebates::set(true);
         assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1));
         assert_eq!(
             Cohorts::<Test>::get(0).map(|c| c.status),
@@ -2072,6 +2162,10 @@ fn settlement_is_cursor_resumable_and_welfare_is_the_only_settlement_seam() {
                 },
             )]
         );
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(keeper(), CrankClass::DecisionCritical)]
+        );
         assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1));
         assert_eq!(
             SeamCalls::get().last(),
@@ -2087,9 +2181,27 @@ fn settlement_is_cursor_resumable_and_welfare_is_the_only_settlement_seam() {
                 s: FixedU64(500_000_000)
             })
         );
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![
+                (keeper(), CrankClass::DecisionCritical),
+                (keeper(), CrankClass::DecisionCritical),
+            ]
+        );
         assert_noop!(
             Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 0),
             Error::<Test>::BatchTooLarge
+        );
+        assert_noop!(
+            Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1),
+            Error::<Test>::BadState
+        );
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![
+                (keeper(), CrankClass::DecisionCritical),
+                (keeper(), CrankClass::DecisionCritical),
+            ]
         );
     });
 }

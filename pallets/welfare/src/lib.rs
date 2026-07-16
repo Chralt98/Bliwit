@@ -38,7 +38,10 @@ mod tests;
 
 use alloc::vec::Vec;
 use frame_support::pallet_prelude::DispatchResult;
-use futarchy_primitives::{EpochId, FixedU64, MetricSpecVersion, ProposalId};
+use futarchy_primitives::{
+    keeper::{CrankClass, KeeperRebateSink},
+    EpochId, FixedU64, MetricSpecVersion, ProposalId,
+};
 
 pub use welfare_core::{
     ComponentValue, Error as CoreError, Event as CoreEvent, GateBreachFlags as CoreGateBreachFlags,
@@ -147,6 +150,8 @@ pub mod pallet {
         type Ledger: LedgerSettlement;
         /// Current epoch clock used by metric registration.
         type CurrentEpoch: Get<EpochId>;
+        /// Fail-soft keeper rebate endpoint (08 §6.3).
+        type KeeperRebate: KeeperRebateSink<Self::AccountId>;
         /// Weight information for all extrinsics.
         type WeightInfo: WeightInfo;
         /// Admitted origin construction for benchmarks.
@@ -319,13 +324,14 @@ pub mod pallet {
         /// this stops an early/future call from locking a wrong `W` or consuming
         /// the bounded snapshot window before the real counters exist.
         #[pallet::call_index(1)]
+        // B5: recalibrate for the keeper-rebate sink's additional storage path.
         #[pallet::weight(T::WeightInfo::record_snapshot())]
         pub fn record_snapshot(
             origin: OriginFor<T>,
             epoch: EpochId,
             spec_version: MetricSpecVersion,
         ) -> DispatchResult {
-            let _ = ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
             frame_support::ensure!(
                 epoch < T::CurrentEpoch::get(),
                 Error::<T>::EpochNotFinalized
@@ -337,13 +343,16 @@ pub mod pallet {
                 state
                     .record_snapshot(epoch, spec_version, components, incident, &params)
                     .map(|_| ())
-            })
+            })?;
+            T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
+            Ok(())
         }
 
         /// Permissionless signed keeper crank for a **finalized** epoch's daily
         /// S/C gate sample. Like `record_snapshot`, the epoch must have closed
         /// (`epoch < CurrentEpoch`) so the day's counters are final (05 §4.7).
         #[pallet::call_index(2)]
+        // B5: recalibrate for the keeper-rebate sink's additional storage path.
         #[pallet::weight(T::WeightInfo::record_daily_gate())]
         pub fn record_daily_gate(
             origin: OriginFor<T>,
@@ -351,18 +360,23 @@ pub mod pallet {
             day: u8,
             spec_version: MetricSpecVersion,
         ) -> DispatchResult {
-            let _ = ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
             frame_support::ensure!(
                 epoch < T::CurrentEpoch::get(),
                 Error::<T>::EpochNotFinalized
             );
             let components = T::MetricInputs::daily_components(epoch, day, spec_version);
             let params = Self::live_params()?;
+            let mut changed = false;
             Self::mutate(|state| {
                 state
                     .record_daily_gate(epoch, day, spec_version, components, &params)
-                    .map(|_| ())
-            })
+                    .map(|(_, did_change)| changed = did_change)
+            })?;
+            if changed {
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            Ok(())
         }
     }
 

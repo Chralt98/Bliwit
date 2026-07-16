@@ -34,6 +34,47 @@ pub const KEEPER_BUDGET_EPOCH: Balance = 12_000 * USDC;
 pub const COLLATOR_COMP_EPOCH: Balance = 2_000 * USDC;
 pub const MAX_FUNDED_CORETIME_PERIODS: usize = 8;
 
+/// The two classes governed by the 08 §6.3 keeper meter. Oracle work is paid
+/// separately by [`Treasury::oracle_line_rebate`].
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub enum KeeperMeterClass {
+    DecisionCritical,
+    General,
+}
+
+/// Plain scalar per-epoch keeper meter (08 §6.3).
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Default,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub struct KeeperMeter {
+    pub epoch: EpochId,
+    pub spent: Balance,
+    pub general_spent: Balance,
+    pub low_emitted: bool,
+    pub exhausted_emitted: bool,
+}
+
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum TreasuryAccount {
     Main,
@@ -365,6 +406,9 @@ pub struct Treasury {
     /// `issuance`) live on the meters' `limit_bps` fields, refreshed the same way.
     pub cap_proposal_bps: u32,
     pub stream_threshold_bps: u32,
+    /// Per-epoch 08 §6.3 keeper-rebate meter. The chain is pre-genesis, so the
+    /// corresponding aggregate SCALE-shape change requires no migration.
+    pub keeper_meter: KeeperMeter,
 }
 
 impl Default for Treasury {
@@ -387,11 +431,129 @@ impl Default for Treasury {
             coretime_quotes: Vec::new(),
             cap_proposal_bps: TRS_CAP_PROPOSAL_BPS,
             stream_threshold_bps: TRS_STREAM_THRESHOLD_BPS,
+            keeper_meter: KeeperMeter::default(),
         }
     }
 }
 
 impl Treasury {
+    /// Return the amount payable for one 08 §6.3 metered keeper rebate.
+    ///
+    /// This operation is deliberately infallible and fail-soft: arithmetic,
+    /// tranche, budget, or line-funding failures return zero and never affect
+    /// the useful crank which requested the rebate.
+    pub fn keeper_rebate(
+        &mut self,
+        now_epoch: EpochId,
+        class: KeeperMeterClass,
+        rebate: Balance,
+        budget: Balance,
+    ) -> Balance {
+        if self.keeper_meter.epoch != now_epoch {
+            self.keeper_meter = KeeperMeter {
+                epoch: now_epoch,
+                ..KeeperMeter::default()
+            };
+        }
+        // Exhaustion is a per-epoch payment latch, not merely an alarm latch:
+        // once it fires, a later parameter decrease must not reopen capacity.
+        if self.keeper_meter.exhausted_emitted {
+            return 0;
+        }
+        if rebate == 0 || budget == 0 {
+            return 0;
+        }
+
+        let next_spent = self.keeper_meter.spent.checked_add(rebate);
+        if next_spent.is_none_or(|spent| spent > budget) {
+            if !self.keeper_meter.low_emitted {
+                self.events.push(Event::KeeperBudgetLow {
+                    remaining: budget.saturating_sub(self.keeper_meter.spent),
+                });
+                self.keeper_meter.low_emitted = true;
+            }
+            if !self.keeper_meter.exhausted_emitted {
+                self.events.push(Event::KeeperBudgetExhausted {
+                    epoch: now_epoch,
+                    spent: self.keeper_meter.spent,
+                });
+                self.keeper_meter.exhausted_emitted = true;
+            }
+            return 0;
+        }
+        let Some(next_spent) = next_spent else {
+            return 0;
+        };
+
+        let next_general_spent = if class == KeeperMeterClass::General {
+            let general_cap = budget / 5;
+            let Some(next_general) = self.keeper_meter.general_spent.checked_add(rebate) else {
+                return 0;
+            };
+            if next_general > general_cap {
+                return 0;
+            }
+            Some(next_general)
+        } else {
+            None
+        };
+
+        // The line check is read-only until every meter check has passed;
+        // insufficient funding is a pure no-op with no meter charge/event.
+        let Ok(line_index) = self.debitable_line(BudgetLine::Keeper, rebate) else {
+            return 0;
+        };
+        let Some((_, line_balance)) = self.lines.get_mut(line_index) else {
+            return 0;
+        };
+        let Some(next_line_balance) = line_balance.checked_sub(rebate) else {
+            return 0;
+        };
+        *line_balance = next_line_balance;
+        self.keeper_meter.spent = next_spent;
+        if let Some(next_general) = next_general_spent {
+            self.keeper_meter.general_spent = next_general;
+        }
+
+        // `budget - floor(budget/5)` is ceil(80% of budget), avoiding a
+        // potentially overflowing multiplication and rounding against the
+        // claimant at the threshold boundary.
+        let low_threshold = budget.saturating_sub(budget / 5);
+        if next_spent >= low_threshold && !self.keeper_meter.low_emitted {
+            self.events.push(Event::KeeperBudgetLow {
+                remaining: budget.saturating_sub(next_spent),
+            });
+            self.keeper_meter.low_emitted = true;
+        }
+        if next_spent == budget && !self.keeper_meter.exhausted_emitted {
+            self.events.push(Event::KeeperBudgetExhausted {
+                epoch: now_epoch,
+                spent: next_spent,
+            });
+            self.keeper_meter.exhausted_emitted = true;
+        }
+        rebate
+    }
+
+    /// Return the amount payable from the separate 07 ORACLE budget line.
+    /// Oracle/registry cranks do not consume the 08 §6.3 keeper meter.
+    pub fn oracle_line_rebate(&mut self, rebate: Balance) -> Balance {
+        if rebate == 0 {
+            return 0;
+        }
+        let Ok(line_index) = self.debitable_line(BudgetLine::Oracle, rebate) else {
+            return 0;
+        };
+        let Some((_, line_balance)) = self.lines.get_mut(line_index) else {
+            return 0;
+        };
+        let Some(next_line_balance) = line_balance.checked_sub(rebate) else {
+            return 0;
+        };
+        *line_balance = next_line_balance;
+        rebate
+    }
+
     pub fn fund_budget_line(
         &mut self,
         origin: Origin,
@@ -856,6 +1018,13 @@ impl Treasury {
             self.coretime_quotes.len() <= MAX_FUNDED_CORETIME_PERIODS,
             Error::TooManyObligations
         );
+        // The live keeper budget may shrink mid-epoch, so `spent <= budget`
+        // is intentionally not a standing invariant. Likewise, an over-budget
+        // first attempt may set `exhausted_emitted` while `spent == 0`.
+        ensure!(
+            self.keeper_meter.general_spent <= self.keeper_meter.spent,
+            Error::Overflow
+        );
         Ok(())
     }
     fn ensure_spendable(&self) -> Result<(), Error> {
@@ -889,12 +1058,13 @@ impl Treasury {
     /// (`UnknownBudgetLine`/`InsufficientFunds` otherwise) — a read-only check so
     /// callers can validate a debit before any mutation.
     fn debitable_line(&self, line: BudgetLine, amount: Balance) -> Result<usize, Error> {
-        let idx = self
+        let (idx, (_, balance)) = self
             .lines
             .iter()
-            .position(|(l, _)| *l == line)
+            .enumerate()
+            .find(|(_, (candidate, _))| *candidate == line)
             .ok_or(Error::UnknownBudgetLine)?;
-        ensure!(self.lines[idx].1 >= amount, Error::InsufficientFunds);
+        ensure!(*balance >= amount, Error::InsufficientFunds);
         Ok(idx)
     }
     fn debit_line(&mut self, line: BudgetLine, amount: Balance) -> Result<(), Error> {
@@ -981,6 +1151,205 @@ mod tests {
         t.fund_budget_line(TREASURY, BudgetLine::OpsCoretime, 500_000 * USDC)
             .unwrap();
         t
+    }
+
+    fn rebate_funded(keeper: Balance, oracle: Balance) -> Treasury {
+        let mut t = Treasury::default();
+        if keeper > 0 {
+            t.lines.push((BudgetLine::Keeper, keeper));
+        }
+        if oracle > 0 {
+            t.lines.push((BudgetLine::Oracle, oracle));
+        }
+        t
+    }
+
+    #[test]
+    fn keeper_meter_crosses_eighty_and_one_hundred_percent_exactly_once() {
+        let mut t = rebate_funded(200, 0);
+        for _ in 0..3 {
+            assert_eq!(
+                t.keeper_rebate(7, KeeperMeterClass::DecisionCritical, 20, 100),
+                20
+            );
+        }
+        assert!(t.events.is_empty());
+        assert_eq!(
+            t.keeper_rebate(7, KeeperMeterClass::DecisionCritical, 20, 100),
+            20
+        );
+        assert_eq!(t.events, vec![Event::KeeperBudgetLow { remaining: 20 }]);
+        assert_eq!(
+            t.keeper_rebate(7, KeeperMeterClass::DecisionCritical, 20, 100),
+            20
+        );
+        assert_eq!(
+            t.events,
+            vec![
+                Event::KeeperBudgetLow { remaining: 20 },
+                Event::KeeperBudgetExhausted {
+                    epoch: 7,
+                    spent: 100,
+                },
+            ]
+        );
+        assert_eq!(
+            t.keeper_rebate(7, KeeperMeterClass::DecisionCritical, 1, 100),
+            0
+        );
+        assert_eq!(t.events.len(), 2);
+    }
+
+    #[test]
+    fn keeper_general_tranche_uses_floor_and_preserves_decision_reservation() {
+        let mut t = rebate_funded(200, 0);
+        // floor(101 / 5) = 20: the first general rebate fits exactly, the next
+        // unit is rejected while decision-critical capacity remains available.
+        assert_eq!(t.keeper_rebate(1, KeeperMeterClass::General, 20, 101), 20);
+        assert_eq!(t.keeper_rebate(1, KeeperMeterClass::General, 1, 101), 0);
+        assert_eq!(t.keeper_meter.general_spent, 20);
+        assert_eq!(t.keeper_meter.spent, 20);
+        assert_eq!(
+            t.keeper_rebate(1, KeeperMeterClass::DecisionCritical, 81, 101),
+            81
+        );
+        assert_eq!(t.keeper_meter.spent, 101);
+    }
+
+    #[test]
+    fn keeper_meter_zero_and_unfunded_paths_are_pure_noops() {
+        let mut t = Treasury::default();
+        let before = t.clone();
+        assert_eq!(t.keeper_rebate(0, KeeperMeterClass::General, 0, 100), 0);
+        assert_eq!(t, before);
+        assert_eq!(
+            t.keeper_rebate(0, KeeperMeterClass::DecisionCritical, 1, 0),
+            0
+        );
+        assert_eq!(t, before);
+        assert_eq!(
+            t.keeper_rebate(0, KeeperMeterClass::DecisionCritical, 1, 100),
+            0
+        );
+        assert_eq!(t.keeper_meter.spent, 0);
+        assert!(t.events.is_empty());
+
+        assert_eq!(t.oracle_line_rebate(1), 0);
+        assert_eq!(t.oracle_line_rebate(0), 0);
+        assert!(t.events.is_empty());
+    }
+
+    #[test]
+    fn oracle_line_rebate_is_unmetered_and_line_bounded() {
+        let mut t = rebate_funded(0, 5);
+        assert_eq!(t.oracle_line_rebate(3), 3);
+        assert_eq!(t.line_balance(BudgetLine::Oracle), 2);
+        assert_eq!(t.oracle_line_rebate(3), 0);
+        assert_eq!(t.keeper_meter, KeeperMeter::default());
+        assert!(t.events.is_empty());
+    }
+
+    #[test]
+    fn over_budget_attempt_emits_exhausted_once_without_charging() {
+        let mut t = rebate_funded(500, 0);
+        assert_eq!(
+            t.keeper_rebate(9, KeeperMeterClass::DecisionCritical, 101, 100),
+            0
+        );
+        assert_eq!(t.keeper_meter.spent, 0);
+        assert_eq!(t.line_balance(BudgetLine::Keeper), 500);
+        assert_eq!(
+            t.events,
+            vec![
+                Event::KeeperBudgetLow { remaining: 100 },
+                Event::KeeperBudgetExhausted { epoch: 9, spent: 0 },
+            ]
+        );
+        assert_eq!(
+            t.keeper_rebate(9, KeeperMeterClass::DecisionCritical, 101, 100),
+            0
+        );
+        assert_eq!(t.events.len(), 2);
+    }
+
+    #[test]
+    fn keeper_exhaustion_latches_after_a_rebate_parameter_drop() {
+        let mut t = rebate_funded(500, 0);
+        assert_eq!(
+            t.keeper_rebate(9, KeeperMeterClass::DecisionCritical, 101, 100),
+            0
+        );
+
+        // Even though a later, smaller rebate would fit from spent=0, the
+        // first effective-exhaustion alarm has stopped rebates for this epoch.
+        assert_eq!(
+            t.keeper_rebate(9, KeeperMeterClass::DecisionCritical, 1, 100),
+            0
+        );
+        assert_eq!(t.keeper_meter.spent, 0);
+        assert_eq!(t.line_balance(BudgetLine::Keeper), 500);
+        assert_eq!(t.events.len(), 2);
+    }
+
+    #[test]
+    fn shrunken_budget_emits_low_before_exhausted() {
+        let mut t = rebate_funded(500, 0);
+        assert_eq!(
+            t.keeper_rebate(9, KeeperMeterClass::DecisionCritical, 20, 100),
+            20
+        );
+        assert!(t.events.is_empty());
+
+        assert_eq!(
+            t.keeper_rebate(9, KeeperMeterClass::DecisionCritical, 1, 10),
+            0
+        );
+        assert_eq!(
+            t.events,
+            vec![
+                Event::KeeperBudgetLow { remaining: 0 },
+                Event::KeeperBudgetExhausted {
+                    epoch: 9,
+                    spent: 20,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn keeper_meter_resets_by_epoch_and_survives_mid_epoch_budget_shrink() {
+        let mut t = rebate_funded(500, 0);
+        assert_eq!(
+            t.keeper_rebate(3, KeeperMeterClass::DecisionCritical, 80, 100),
+            80
+        );
+        assert!(t.keeper_meter.low_emitted);
+
+        // Governance may shrink the live budget below already-consumed spend.
+        // A new attempt pays nothing, emits exhaustion once, and try_state
+        // remains valid because it deliberately does not assert spent<=budget.
+        assert_eq!(
+            t.keeper_rebate(3, KeeperMeterClass::DecisionCritical, 1, 50),
+            0
+        );
+        assert_eq!(t.keeper_meter.spent, 80);
+        assert!(t.keeper_meter.exhausted_emitted);
+        assert!(t.try_state().is_ok());
+
+        assert_eq!(
+            t.keeper_rebate(4, KeeperMeterClass::DecisionCritical, 1, 50),
+            1
+        );
+        assert_eq!(
+            t.keeper_meter,
+            KeeperMeter {
+                epoch: 4,
+                spent: 1,
+                general_spent: 0,
+                low_emitted: false,
+                exhausted_emitted: false,
+            }
+        );
     }
     #[test]
     fn spend_requires_treasury_origin_and_caps() {

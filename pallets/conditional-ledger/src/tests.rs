@@ -12,7 +12,8 @@ use conditional_ledger_core::{position as pos, LedgerOrigin, LedgerState};
 use frame_support::{assert_noop, assert_ok, traits::fungibles::Inspect};
 use frame_system::RawOrigin;
 use futarchy_primitives::{
-    kernel, Branch, FixedU64, GateType, MetricSpecVersion, PositionKind, ProposalId, ScalarSide,
+    keeper::CrankClass, kernel, Branch, FixedU64, GateType, MetricSpecVersion, PositionKind,
+    ProposalId, ScalarSide,
 };
 
 type E = Error<Test>;
@@ -493,6 +494,144 @@ fn sweep_dust_reaps_after_archive_delay_and_sweeps_residue() {
             .iter()
             .any(|e| matches!(e, Event::VaultReaped { pid: 1, .. })));
         try_state();
+    });
+}
+
+#[test]
+fn keeper_rebate_is_exactly_once_for_positive_sweep_and_zero_for_error() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 10 * UNIT));
+        assert_ok!(Ledger::resolve(signed(RESOLVER), 1, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            1,
+            FixedU64(500_000_000),
+        ));
+        RecordKeeperRebates::set(true);
+
+        assert_noop!(Ledger::sweep_dust(signed(ALICE), 1), E::ReapNotDue);
+        assert!(KeeperRebates::get().is_empty());
+
+        System::set_block_number(1 + ArchiveDelay::get() + 1);
+        assert_ok!(Ledger::sweep_dust(signed(ALICE), 1));
+        assert_eq!(KeeperRebates::get(), vec![(ALICE, CrankClass::General)]);
+
+        assert_noop!(Ledger::sweep_dust(signed(ALICE), 1), E::ReapNotDue);
+        assert_eq!(KeeperRebates::get(), vec![(ALICE, CrankClass::General)]);
+    });
+}
+
+#[test]
+fn proposal_sweep_rebates_partial_progress_and_zero_residue_full_reap() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 10 * UNIT));
+        assert_ok!(Ledger::resolve(signed(RESOLVER), 1, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            1,
+            FixedU64(500_000_000),
+        ));
+        ReapBatch::set(1);
+        RecordKeeperRebates::set(true);
+        System::set_block_number(1 + ArchiveDelay::get() + 1);
+
+        assert_ok!(Ledger::sweep_dust(signed(ALICE), 1));
+        assert!(Vaults::<Test>::contains_key(1));
+        assert_eq!(KeeperRebates::get(), vec![(ALICE, CrankClass::General)]);
+
+        // The second one-entry batch drains the final position and reaps the
+        // vault; it is a separate progressing batch and earns one rebate.
+        assert_ok!(Ledger::sweep_dust(signed(ALICE), 1));
+        assert!(!Vaults::<Test>::contains_key(1));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(ALICE, CrankClass::General), (ALICE, CrankClass::General),]
+        );
+
+        // Removing an empty terminal vault is real cleanup even with zero
+        // escrow residue.
+        create(2);
+        assert_ok!(Ledger::void(signed(RESOLVER), 2));
+        let terminal = System::block_number();
+        System::set_block_number(terminal + ArchiveDelay::get() + 1);
+        assert_ok!(Ledger::sweep_dust(signed(ALICE), 2));
+        assert!(!Vaults::<Test>::contains_key(2));
+        assert!(ledger_events()
+            .iter()
+            .any(|event| matches!(event, Event::VaultReaped { pid: 2, residue: 0 })));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![
+                (ALICE, CrankClass::General),
+                (ALICE, CrankClass::General),
+                (ALICE, CrankClass::General),
+            ]
+        );
+    });
+}
+
+#[test]
+fn baseline_sweep_has_partial_and_zero_residue_rebate_parity() {
+    new_test_ext().execute_with(|| {
+        create_base(9);
+        assert_ok!(Ledger::split_baseline(signed(ALICE), 9, 5 * UNIT));
+        assert_ok!(Ledger::settle_baseline(
+            signed(SETTLER),
+            9,
+            FixedU64(500_000_000),
+        ));
+        ReapBatch::set(1);
+        RecordKeeperRebates::set(true);
+        System::set_block_number(1 + ArchiveDelay::get() + 1);
+
+        assert_ok!(Ledger::sweep_dust_baseline(signed(ALICE), 9));
+        assert!(crate::BaselineVaults::<Test>::contains_key(9));
+        assert_eq!(KeeperRebates::get(), vec![(ALICE, CrankClass::General)]);
+        assert_ok!(Ledger::sweep_dust_baseline(signed(ALICE), 9));
+        assert!(!crate::BaselineVaults::<Test>::contains_key(9));
+
+        create_base(10);
+        assert_ok!(Ledger::settle_baseline(
+            signed(SETTLER),
+            10,
+            FixedU64(500_000_000),
+        ));
+        let terminal = System::block_number();
+        System::set_block_number(terminal + ArchiveDelay::get() + 1);
+        assert_ok!(Ledger::sweep_dust_baseline(signed(ALICE), 10));
+        assert!(!crate::BaselineVaults::<Test>::contains_key(10));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![
+                (ALICE, CrankClass::General),
+                (ALICE, CrankClass::General),
+                (ALICE, CrankClass::General),
+            ]
+        );
+    });
+}
+
+#[test]
+fn zero_progress_sweep_and_errors_never_rebate() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 10 * UNIT));
+        assert_ok!(Ledger::resolve(signed(RESOLVER), 1, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            1,
+            FixedU64(500_000_000),
+        ));
+        ReapBatch::set(0);
+        RecordKeeperRebates::set(true);
+
+        assert_noop!(Ledger::sweep_dust(signed(ALICE), 99), E::ReapNotDue);
+        System::set_block_number(1 + ArchiveDelay::get() + 1);
+        assert_ok!(Ledger::sweep_dust(signed(ALICE), 1));
+        assert!(Vaults::<Test>::contains_key(1));
+        assert!(KeeperRebates::get().is_empty());
     });
 }
 

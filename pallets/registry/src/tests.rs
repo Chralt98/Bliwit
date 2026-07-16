@@ -8,7 +8,7 @@
 use crate::mock::*;
 use crate::{Aggregates, Error, FilingCount, Filings};
 use frame_support::{assert_noop, assert_ok};
-use futarchy_primitives::FixedU64;
+use futarchy_primitives::{keeper::CrankClass, FixedU64};
 use registry_core::{
     FilingClass, FilingState, RegistryKind, MAX_FILINGS_PER_EPOCH, MAX_LIVE_EPOCHS,
     REG_BOND_INCIDENT, REG_BOND_MILESTONE, REG_CLOSE_BATCH, REG_EXT_WINDOW_BLOCKS,
@@ -199,10 +199,37 @@ fn ack_requires_registered_watchtower_and_dedups() {
         );
         register_watchtower(WT1);
         assert_ok!(IncidentRegistry::ack_observed(signed(WT1), 5, 0));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(acct(WT1), CrankClass::OracleLine)]
+        );
         // One ack per watchtower per filing.
         assert_noop!(
             IncidentRegistry::ack_observed(signed(WT1), 5, 0),
             Error::<Test, IncidentInstance>::DuplicateAck
+        );
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(acct(WT1), CrankClass::OracleLine)]
+        );
+
+        // The second registry instance has its own Config binding and receives
+        // the same mandated keeper-class ack rebate.
+        assert_ok!(MilestoneRegistry::file(
+            signed(ALICE),
+            6,
+            FilingClass::Scope(1),
+            10,
+            H,
+            VER
+        ));
+        assert_ok!(MilestoneRegistry::ack_observed(signed(WT1), 6, 0));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![
+                (acct(WT1), CrankClass::OracleLine),
+                (acct(WT1), CrankClass::OracleLine),
+            ]
         );
     });
 }
@@ -264,6 +291,10 @@ fn crank_close_extends_once_then_rejects_and_refunds() {
             Filings::<Test, IncidentInstance>::get(5, 0).unwrap().state,
             FilingState::Filed { extended: true, .. }
         ));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(acct(BOB), CrankClass::OracleLine)]
+        );
         // Second crank past the extension: rejected-as-unobservable, bond refunded.
         System::set_block_number((REG_WINDOW_BLOCKS + REG_EXT_WINDOW_BLOCKS) as u64 + 3);
         assert_ok!(IncidentRegistry::crank_close(
@@ -277,6 +308,44 @@ fn crank_close_extends_once_then_rejects_and_refunds() {
         ));
         assert_eq!(usdc(&acct(ALICE)), after_file + REG_BOND_INCIDENT);
         assert_eq!(usdc(&incident_account()), 0);
+        // The extension cannot latch twice, and the terminal quorum-failure
+        // rejection is unpaid hygiene work.
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(acct(BOB), CrankClass::OracleLine)]
+        );
+    });
+}
+
+#[test]
+fn quorum_failure_refund_path_cannot_farm_close_rebates() {
+    new_test_ext().execute_with(|| {
+        let before = usdc(&acct(ALICE));
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S3,
+            0,
+            H,
+            VER
+        ));
+        assert_eq!(usdc(&acct(ALICE)), before - REG_BOND_INCIDENT);
+
+        // A keeper first arriving after both windows causes the one-time
+        // extension and rejection in one bounded call. No quorum was supplied,
+        // the filing bond is refunded, and the close earns no rebate.
+        System::set_block_number((REG_WINDOW_BLOCKS + REG_EXT_WINDOW_BLOCKS) as u64 + 3);
+        assert_ok!(IncidentRegistry::crank_close(
+            signed(BOB),
+            5,
+            REG_CLOSE_BATCH as u32
+        ));
+        assert!(matches!(
+            Filings::<Test, IncidentInstance>::get(5, 0).unwrap().state,
+            FilingState::Rejected
+        ));
+        assert_eq!(usdc(&acct(ALICE)), before);
+        assert!(KeeperRebates::get().is_empty());
     });
 }
 
@@ -287,6 +356,82 @@ fn crank_close_rejects_oversized_batch() {
             IncidentRegistry::crank_close(signed(BOB), 5, REG_CLOSE_BATCH as u32 + 1),
             Error::<Test, IncidentInstance>::BatchTooLarge
         );
+    });
+}
+
+#[test]
+fn keeper_rebate_is_instance_scoped_and_skips_noop_or_error_cranks() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S3,
+            0,
+            H,
+            VER
+        ));
+
+        // An open-window crank succeeds but advances nothing: no drain-vector
+        // rebate. A rejected oversized batch likewise never reaches the sink.
+        assert_ok!(IncidentRegistry::crank_close(
+            signed(BOB),
+            5,
+            REG_CLOSE_BATCH as u32
+        ));
+        assert_noop!(
+            IncidentRegistry::crank_close(signed(BOB), 5, REG_CLOSE_BATCH as u32 + 1),
+            Error::<Test, IncidentInstance>::BatchTooLarge
+        );
+        assert!(KeeperRebates::get().is_empty());
+
+        // The due crank advances the filing to its latch-once extension and
+        // earns exactly one rebate.
+        System::set_block_number(REG_WINDOW_BLOCKS as u64 + 2);
+        assert_ok!(IncidentRegistry::crank_close(
+            signed(BOB),
+            5,
+            REG_CLOSE_BATCH as u32
+        ));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(acct(BOB), CrankClass::OracleLine)]
+        );
+
+        // Once the extension expires, the quorum-failure rejection closes and
+        // refunds the filing but earns nothing further.
+        System::set_block_number((REG_WINDOW_BLOCKS + REG_EXT_WINDOW_BLOCKS) as u64 + 3);
+        assert_ok!(IncidentRegistry::crank_close(
+            signed(BOB),
+            5,
+            REG_CLOSE_BATCH as u32
+        ));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(acct(BOB), CrankClass::OracleLine)]
+        );
+
+        // The second instance chooses its own Config seam too. A late
+        // extension-plus-rejection there is equally unpaid.
+        assert_ok!(MilestoneRegistry::file(
+            signed(ALICE),
+            6,
+            FilingClass::Scope(1),
+            10,
+            H,
+            VER
+        ));
+        System::set_block_number(
+            System::block_number()
+                + u64::from(REG_WINDOW_BLOCKS)
+                + u64::from(REG_EXT_WINDOW_BLOCKS)
+                + 1,
+        );
+        assert_ok!(MilestoneRegistry::crank_close(
+            signed(BOB),
+            6,
+            REG_CLOSE_BATCH as u32
+        ));
+        assert_eq!(KeeperRebates::get().len(), 1);
     });
 }
 
@@ -480,6 +625,50 @@ fn reap_epoch_needs_close_out_then_the_archive_delay() {
         assert!(Filings::<Test, IncidentInstance>::get(5, 0).is_none());
         assert!(Aggregates::<Test, IncidentInstance>::get(5).is_none());
         assert_ok!(IncidentRegistry::do_try_state());
+    });
+}
+
+#[test]
+fn reap_epoch_rebates_once_only_after_bounded_cleanup_succeeds() {
+    new_test_ext().execute_with(|| {
+        register_watchtower(WT1);
+        register_watchtower(WT2);
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            VER
+        ));
+        assert_ok!(IncidentRegistry::ack_observed(signed(WT1), 5, 0));
+        assert_ok!(IncidentRegistry::ack_observed(signed(WT2), 5, 0));
+        System::set_block_number(CLOSE_BLOCK);
+        assert_ok!(IncidentRegistry::crank_close(
+            signed(BOB),
+            5,
+            REG_CLOSE_BATCH as u32
+        ));
+        assert_ok!(IncidentRegistry::close_epoch(signed(BOB), 5));
+        KeeperRebates::set(Vec::new());
+
+        assert_noop!(
+            IncidentRegistry::reap_epoch(signed(BOB), 5),
+            Error::<Test, IncidentInstance>::ReapNotDue
+        );
+        assert!(KeeperRebates::get().is_empty());
+
+        System::set_block_number(CLOSE_BLOCK + ARCHIVE_DELAY + 1);
+        assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(acct(BOB), CrankClass::OracleLine)]
+        );
+        assert_noop!(
+            IncidentRegistry::reap_epoch(signed(BOB), 5),
+            Error::<Test, IncidentInstance>::ReapNotDue
+        );
+        assert_eq!(KeeperRebates::get().len(), 1);
     });
 }
 

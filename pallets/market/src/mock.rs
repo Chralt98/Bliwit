@@ -8,7 +8,11 @@ use frame_support::{
     PalletId,
 };
 use frame_system::{EnsureSigned, RawOrigin};
-use futarchy_primitives::{kernel, Balance};
+use futarchy_primitives::{
+    keeper::{CrankClass, KeeperRebateSink},
+    kernel, Balance, MarketId,
+};
+use parity_scale_codec::{Decode, Encode};
 use sp_runtime::{traits::AccountIdConversion, BuildStorage};
 
 pub type AccountId = u64;
@@ -126,6 +130,47 @@ parameter_types! {
     pub const ObsInterval: u64 = 10;
     pub const Kappa1e9: u64 = 5_000_000;
     pub const MarketArchiveDelay: u64 = 100;
+    pub static DecisionWindowMarkets: Vec<MarketId> = Vec::new();
+    pub static RecordKeeperRebates: bool = false;
+}
+
+pub struct TestInDecisionWindow;
+
+impl Contains<MarketId> for TestInDecisionWindow {
+    fn contains(market: &MarketId) -> bool {
+        DecisionWindowMarkets::get().contains(market)
+    }
+}
+
+pub struct KeeperRebates;
+
+impl KeeperRebates {
+    const KEY: &'static [u8] = b":test:market:keeper-rebates";
+
+    pub fn get() -> Vec<(AccountId, CrankClass)> {
+        sp_io::storage::get(Self::KEY)
+            .and_then(|encoded| {
+                let mut input: &[u8] = encoded.as_ref();
+                Vec::<(AccountId, CrankClass)>::decode(&mut input).ok()
+            })
+            .unwrap_or_default()
+    }
+
+    fn push(who: AccountId, class: CrankClass) {
+        let mut rebates = Self::get();
+        rebates.push((who, class));
+        sp_io::storage::set(Self::KEY, &rebates.encode());
+    }
+}
+
+pub struct TestKeeperRebate;
+
+impl KeeperRebateSink<AccountId> for TestKeeperRebate {
+    fn rebate(who: &AccountId, class: CrankClass) {
+        if RecordKeeperRebates::get() {
+            KeeperRebates::push(*who, class);
+        }
+    }
 }
 
 impl pallet_conditional_ledger::Config for Test {
@@ -142,6 +187,7 @@ impl pallet_conditional_ledger::Config for Test {
     type ProtocolAccounts = Protocol;
     type InsuranceAccount = InsuranceAccount;
     type PalletId = LedgerPalletId;
+    type KeeperRebate = ();
     type WeightInfo = ();
 }
 
@@ -153,6 +199,8 @@ impl pallet_market::Config for Test {
     type MarketAdmin = EnsureMarketAdmin;
     type ArchiveDelay = MarketArchiveDelay;
     type PalletId = MarketPalletId;
+    type KeeperRebate = TestKeeperRebate;
+    type InDecisionWindow = TestInDecisionWindow;
 }
 
 pub fn ledger_account() -> AccountId {
@@ -164,6 +212,8 @@ pub fn market_account() -> AccountId {
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
+    DecisionWindowMarkets::set(Vec::new());
+    RecordKeeperRebates::set(false);
     let mut storage = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .expect("mock system genesis builds");

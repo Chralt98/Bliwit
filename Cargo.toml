@@ -1,5 +1,9 @@
 [workspace]
 resolver = "2"
+# `keeper/` is a deliberately separate cargo workspace (B9): the off-chain keeper
+# needs subxt's dependency tree, which must never perturb the `=`-exact
+# polkadot-stable2603 pins of this runtime workspace (01 §9; PLAN V-1).
+exclude = ["keeper"]
 members = [
   "crates/futarchy-fixed",
   "crates/futarchy-primitives",

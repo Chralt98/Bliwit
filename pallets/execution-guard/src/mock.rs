@@ -7,7 +7,10 @@ use frame_support::{
     derive_impl, parameter_types,
     traits::{EnsureOrigin, IsSubType, UnfilteredDispatchable},
 };
-use futarchy_primitives::{BoundedVec as PrimitiveBoundedVec, RejectReason};
+use futarchy_primitives::{
+    keeper::{CrankClass, KeeperRebateSink},
+    BoundedVec as PrimitiveBoundedVec, RejectReason,
+};
 use pallet_origins::SafetyClassifier;
 use parity_scale_codec::{DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
@@ -245,6 +248,22 @@ parameter_types! {
     pub static ObservedSpecName: Vec<u8> = b"test".to_vec();
     pub static Checkpoint: (H256, H256) = ([11; 32], [12; 32]);
     pub static UpgradeDispatchOrigins: Vec<UpgradeDispatchOrigin> = Vec::new();
+    /// Disabled by default, so the mock behaves like the `()` sink unless a
+    /// keeper-rebate regression explicitly enables recording.
+    pub static RecordKeeperRebates: bool = false;
+    pub static KeeperRebates: Vec<(AccountId32, CrankClass)> = Vec::new();
+}
+
+pub struct TestKeeperRebate;
+
+impl KeeperRebateSink<AccountId32> for TestKeeperRebate {
+    fn rebate(who: &AccountId32, class: CrankClass) {
+        if RecordKeeperRebates::get() {
+            let mut rebates = KeeperRebates::get();
+            rebates.push((who.clone(), class));
+            KeeperRebates::set(rebates);
+        }
+    }
 }
 
 pub struct TestEpoch;
@@ -781,6 +800,7 @@ impl pallet_execution_guard::Config for Test {
     type ReleaseChannel = TestReleaseChannel;
     type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
     type Dispatcher = TestDispatcher;
+    type KeeperRebate = TestKeeperRebate;
     type MaxRuntimeCodeBytes = frame_support::traits::ConstU32<2_097_152>;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
@@ -840,6 +860,8 @@ pub fn reset_statics() {
     ObservedSpecName::set(b"test".to_vec());
     Checkpoint::set(([11; 32], [12; 32]));
     UpgradeDispatchOrigins::set(Vec::new());
+    RecordKeeperRebates::set(false);
+    KeeperRebates::set(Vec::new());
     pallet_test_dispatch::DispatchFailure::<Test>::put(false);
     pallet_test_dispatch::EpochLog::<Test>::kill();
     pallet_test_dispatch::ReleaseLog::<Test>::kill();

@@ -29,11 +29,13 @@ mod tests;
 pub mod pallet {
     use crate::weights::WeightInfo;
     use core::marker::PhantomData;
-    use frame_support::{pallet_prelude::*, PalletId};
+    use frame_support::{pallet_prelude::*, traits::Contains, PalletId};
     use frame_system::pallet_prelude::*;
     use futarchy_primitives::{
-        bounds, Balance, Branch, EpochId, FixedU64, GateType, MarketId, MarketKind, PositionId,
-        ProposalId, ScalarSide, TradeSide,
+        bounds,
+        keeper::{CrankClass, KeeperRebateSink},
+        Balance, Branch, EpochId, FixedU64, GateType, MarketId, MarketKind, PositionId, ProposalId,
+        ScalarSide, TradeSide,
     };
     use market_core::{BookKind, MarketBook, MarketParams, MarketPhase};
     use sp_runtime::{
@@ -70,6 +72,12 @@ pub mod pallet {
         /// Market sovereign account; also the ledger's configured MarketAuthority.
         #[pallet::constant]
         type PalletId: Get<PalletId>;
+
+        /// Fail-soft keeper rebate endpoint (08 §6.3).
+        type KeeperRebate: KeeperRebateSink<Self::AccountId>;
+
+        /// Classifies observations made inside a proposal decision window.
+        type InDecisionWindow: frame_support::traits::Contains<MarketId>;
     }
 
     #[pallet::pallet]
@@ -417,9 +425,10 @@ pub mod pallet {
 
         /// Permissionless TWAP observation keeper (04 §7).
         #[pallet::call_index(2)]
+        // B5: recalibrate for the keeper-rebate sink's additional storage path.
         #[pallet::weight(<T as Config>::WeightInfo::crank_observe())]
         pub fn crank_observe(origin: OriginFor<T>, market: MarketId) -> DispatchResult {
-            ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
             // The accumulator is sealed at Close (04 §2): a permissionless keeper must
             // not record observations on a Closed/Settled book (it would mutate the
@@ -435,15 +444,22 @@ pub mod pallet {
             {
                 Markets::<T>::insert(market, book);
                 Self::deposit_trade_event(event)?;
+                let class = if T::InDecisionWindow::contains(&market) {
+                    CrankClass::DecisionCritical
+                } else {
+                    CrankClass::General
+                };
+                <T as Config>::KeeperRebate::rebate(&who, class);
             }
             Ok(())
         }
 
         /// Permissionlessly reap a closed book after `ArchiveDelay` (04 §2).
         #[pallet::call_index(3)]
+        // B5: recalibrate for the keeper-rebate sink's additional storage path.
         #[pallet::weight(<T as Config>::WeightInfo::reap())]
         pub fn reap(origin: OriginFor<T>, market: MarketId) -> DispatchResult {
-            ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
             let book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
             ensure!(
                 matches!(book.phase, MarketPhase::Closed),
@@ -464,6 +480,7 @@ pub mod pallet {
             ClosedAt::<T>::remove(market);
             SeededMarkets::<T>::remove(market);
             Self::deposit_event(Event::MarketReaped { market });
+            <T as Config>::KeeperRebate::rebate(&who, CrankClass::General);
             Ok(())
         }
     }

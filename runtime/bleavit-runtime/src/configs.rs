@@ -7,6 +7,8 @@ use frame_support::{
     dispatch::DispatchClass,
     parameter_types,
     traits::{
+        fungibles::{Inspect, Mutate},
+        tokens::Preservation,
         ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly,
         InstanceFilter, Nothing, TransformOrigin, VariantCountOf, WithdrawReasons,
     },
@@ -33,10 +35,10 @@ use sp_runtime::{
 
 use crate::{
     AccountId, AssetId, Aura, Balance, Balances, Block, CollatorSelection, ConditionalLedger,
-    ConsensusHook, ForeignAssets, Hash, MessageQueue, Migrations, Nonce, PalletInfo,
-    ParachainSystem, PolkadotXcm, Preimage, Referenda, Runtime, RuntimeCall, RuntimeEvent,
-    RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler, Session,
-    SessionKeys, System, XcmpQueue, USDC_ASSET_ID, VERSION,
+    ConsensusHook, ForeignAssets, FutarchyTreasury, Hash, MessageQueue, Migrations, Nonce,
+    PalletInfo, ParachainSystem, PolkadotXcm, Preimage, Referenda, Runtime, RuntimeCall,
+    RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler,
+    Session, SessionKeys, System, XcmpQueue, USDC_ASSET_ID, VERSION,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -922,6 +924,15 @@ pub fn fee_account() -> AccountId {
 pub fn treasury_protocol_account() -> AccountId {
     LedgerPalletId::get().into_sub_account_truncating(*b"TREASRY_")
 }
+/// 08 §1.1 KEEPER USDC custody pot, derived under the canonical `bl/trsry`
+/// pallet id just like the genesis treasury/community/incentive pots.
+pub fn treasury_keeper_account() -> AccountId {
+    TreasuryPalletId::get().into_sub_account_truncating(*b"KEEPER__")
+}
+/// 08 §1.1 ORACLE USDC custody pot.
+pub fn treasury_oracle_account() -> AccountId {
+    TreasuryPalletId::get().into_sub_account_truncating(*b"ORACLE__")
+}
 
 pub struct EnsureMarketAccount;
 impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureMarketAccount {
@@ -1014,6 +1025,7 @@ impl pallet_conditional_ledger::Config for Runtime {
     type ProtocolAccounts = ProtocolAccounts;
     type InsuranceAccount = InsuranceAccount;
     type PalletId = LedgerPalletId;
+    type KeeperRebate = FutarchyTreasury;
     type WeightInfo = pallet_conditional_ledger::weights::SubstrateWeight<Runtime>;
 }
 impl pallet_market::Config for Runtime {
@@ -1024,6 +1036,10 @@ impl pallet_market::Config for Runtime {
     type MarketAdmin = PendingA8Authority;
     type ArchiveDelay = LedgerArchiveDelay;
     type PalletId = MarketPalletId;
+    type KeeperRebate = FutarchyTreasury;
+    // Pending A8 decision-window lookup: classify unknown windows as General,
+    // preserving the reserved tranche until the real adapter lands.
+    type InDecisionWindow = Nothing;
 }
 
 pub struct WelfareParams;
@@ -1111,6 +1127,7 @@ impl pallet_welfare::Config for Runtime {
     type MetricInputs = PendingMetricInputs;
     type Ledger = WelfareLedger;
     type CurrentEpoch = PendingEpochClock;
+    type KeeperRebate = FutarchyTreasury;
     type WeightInfo = pallet_welfare::weights::SubstrateWeight<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
@@ -1153,6 +1170,7 @@ impl pallet_oracle::Config for Runtime {
     // (`xcm_config`: Barrier/AssetTransactor/Trader/XcmSender = ()) is replaced
     // by the bleavit-xcm components (the B4 runtime-integration follow-up).
     type ProbeDispatch = ();
+    type KeeperRebate = FutarchyTreasury;
     type MaxRoundCloseBatch = ConstU32<{ kernel::TICK_BATCH }>;
     type WeightInfo = pallet_oracle::weights::SubstrateWeight<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
@@ -1225,6 +1243,7 @@ macro_rules! registry_config {
             type ResolutionAuthority = pallet_origins::EnsureOracleResolution;
             type InsuranceAccount = InsuranceAccount;
             type PalletId = $id;
+            type KeeperRebate = FutarchyTreasury;
             // SQ-76: registry archive reuses the live ledger archive key.
             type ArchiveDelay = LedgerArchiveDelay;
             type MaxFilingsPerEpoch = ConstU32<{ kernel::REG_MAX_FILINGS_EPOCH }>;
@@ -1256,6 +1275,50 @@ impl pallet_futarchy_treasury::TreasuryParams for TreasuryParams {
     fn inflation_cap_bps() -> u32 {
         u32::from(percent_param(b"iss.inflation")) * 100
     }
+    fn keeper_budget_epoch() -> Balance {
+        balance_param(b"keeper.budget")
+    }
+    fn keeper_rebate() -> Balance {
+        // 13 §1 marks this as a benchmark-time formula, so genesis Params
+        // deliberately omits it. Unlike the other adapters, do not consult
+        // `genesis_params()` as a fallback: absent/wrong-kind means zero until
+        // B5 installs a calibrated raw row (conservative no-outflow default).
+        let key = pallet_constitution::key16(b"keeper.rebate");
+        match live_param(key) {
+            Some(pallet_constitution::ParamValue::Balance(value)) => value,
+            _ => 0,
+        }
+    }
+}
+
+pub struct TreasuryRebatePayout;
+impl pallet_futarchy_treasury::RebatePayout<AccountId> for TreasuryRebatePayout {
+    fn pay(
+        who: &AccountId,
+        amount: Balance,
+        line: pallet_futarchy_treasury::PayoutLine,
+    ) -> frame_support::pallet_prelude::DispatchResult {
+        let source = match line {
+            pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
+            pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
+        };
+        <ForeignAssets as Mutate<AccountId>>::transfer(
+            USDC_ASSET_ID,
+            &source,
+            who,
+            amount,
+            Preservation::Preserve,
+        )
+        .map(|_| ())
+    }
+
+    fn pot_balance(line: pallet_futarchy_treasury::PayoutLine) -> Balance {
+        let source = match line {
+            pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
+            pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
+        };
+        <ForeignAssets as Inspect<AccountId>>::balance(USDC_ASSET_ID, &source)
+    }
 }
 /// B4 pending renewal-dispatch seam: fail-closed (G-1) — every
 /// `execute_coretime_renewal` rolls back until the real
@@ -1276,8 +1339,11 @@ impl pallet_futarchy_treasury::RenewalDispatch for PendingRenewalDispatch {
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
     type Params = TreasuryParams;
+    // PendingEpochClock is fixed at epoch 0, so the keeper meter conservatively
+    // has one total budget and cannot reset until the A8 runtime wiring swaps it.
     type CurrentEpoch = PendingEpochClock;
     type RenewalDispatch = PendingRenewalDispatch;
+    type RebatePayout = TreasuryRebatePayout;
     type WeightInfo = pallet_futarchy_treasury::weights::SubstrateWeight<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;

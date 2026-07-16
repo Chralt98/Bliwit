@@ -154,6 +154,7 @@ pub mod pallet {
         PalletId,
     };
     use frame_system::pallet_prelude::*;
+    use futarchy_primitives::keeper::{CrankClass, KeeperRebateSink};
     use registry_core::{Error as CoreError, Event as CoreEvent, Filing, FilingState, Registry};
     use sp_runtime::{traits::AccountIdConversion, SaturatedConversion, Saturating};
 
@@ -256,6 +257,11 @@ pub mod pallet {
 
         /// Benchmarked weights.
         type WeightInfo: WeightInfo;
+
+        /// Infallible, fail-soft rebate sink for useful registry cranks (07 §7,
+        /// 08 §6.3). This associated type is instance-scoped, like every other
+        /// registry seam, and pays from the separate ORACLE budget line.
+        type KeeperRebate: KeeperRebateSink<Self::AccountId>;
 
         /// Origin/account construction for benchmarking.
         #[cfg(feature = "runtime-benchmarks")]
@@ -563,6 +569,8 @@ pub mod pallet {
                 reg.ack_observed(raw, now, true, epoch, filing_id)
             })?;
             AckRecords::<T, I>::insert((epoch, filing_id, raw), ());
+            // B5 recalibrates this weight for the post-commit rebate write/payout.
+            T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
             Ok(())
         }
 
@@ -572,10 +580,16 @@ pub mod pallet {
         #[pallet::call_index(3)]
         #[pallet::weight(T::WeightInfo::crank_close())]
         pub fn crank_close(origin: OriginFor<T>, epoch: EpochId, batch: u32) -> DispatchResult {
-            ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
             let now = Self::now();
             let batch = batch as usize;
-            Self::run_scoped(epoch, |reg| reg.crank_close(now, batch))
+            let rebate_progress =
+                Self::run_scoped_with_rebate_progress(epoch, |reg| reg.crank_close(now, batch))?;
+            if rebate_progress {
+                // B5 recalibrates this weight for the post-commit rebate write/payout.
+                T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
+            }
+            Ok(())
         }
 
         /// 07 §7. Resolve a challenged filing's counter-round: the loser forfeits
@@ -628,7 +642,7 @@ pub mod pallet {
         #[pallet::call_index(6)]
         #[pallet::weight(T::WeightInfo::reap_epoch())]
         pub fn reap_epoch(origin: OriginFor<T>, epoch: EpochId) -> DispatchResult {
-            ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
             let closed_at = ClosedAt::<T, I>::get(epoch).ok_or(Error::<T, I>::ReapNotDue)?;
             let due = closed_at.saturating_add(T::ArchiveDelay::get());
             ensure!(
@@ -642,6 +656,8 @@ pub mod pallet {
             // `MaxFilingsPerEpoch` filings — the cap enforced in `ack_observed`).
             let limit = registry_core::WT_QUORUM as u32 * T::MaxFilingsPerEpoch::get() + 1;
             let _ = AckRecords::<T, I>::clear_prefix((epoch,), limit, None);
+            // B5 recalibrates this weight for the post-commit rebate write/payout.
+            T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
             Ok(())
         }
     }
@@ -778,6 +794,18 @@ pub mod pallet {
             epoch: EpochId,
             op: impl FnOnce(&mut Registry) -> Result<(), CoreError>,
         ) -> DispatchResult {
+            Self::run_scoped_with_rebate_progress(epoch, op).map(|_| ())
+        }
+
+        /// Run a scoped op and report whether a close crank made payable progress:
+        /// a surviving latch-once extension or an upheld/accepted closure. A
+        /// quorum-failure rejection is deliberately unpaid hygiene work. The
+        /// boolean is returned only after persistence, custody and event sinks
+        /// all succeed, so a failed/no-op crank can never earn a rebate.
+        fn run_scoped_with_rebate_progress(
+            epoch: EpochId,
+            op: impl FnOnce(&mut Registry) -> Result<(), CoreError>,
+        ) -> Result<bool, DispatchError> {
             let LoadCtx {
                 mut reg,
                 pre,
@@ -785,11 +813,32 @@ pub mod pallet {
                 agg_epochs,
             } = Self::load(epoch);
             op(&mut reg).map_err(Self::map_core_error)?;
+            let favorable_closure = reg.events.iter().any(|event| {
+                matches!(
+                    event,
+                    CoreEvent::IncidentUpheld { .. } | CoreEvent::MilestoneAccepted { .. }
+                )
+            });
+            let surviving_extension = reg.events.iter().any(|event| {
+                let CoreEvent::WindowExtended {
+                    epoch, filing_id, ..
+                } = event
+                else {
+                    return false;
+                };
+                reg.filings.iter().any(|((e, id), filing)| {
+                    e == epoch
+                        && id == filing_id
+                        && matches!(filing.state, FilingState::Filed { extended: true, .. })
+                })
+            });
+            let rebate_progress = favorable_closure || surviving_extension;
             Self::persist(epoch, &reg, &pre, &count_epochs, &agg_epochs);
             Self::settle_custody(epoch, &reg.events, &pre)?;
             // Draining may invoke the welfare sink, which can refuse — propagate
             // so the whole op (storage + custody) rolls back on refusal (G-1).
-            Self::drain_events(&mut reg)
+            Self::drain_events(&mut reg)?;
+            Ok(rebate_progress)
         }
 
         // ------------------------------------------------------------- custody

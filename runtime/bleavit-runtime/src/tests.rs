@@ -7,9 +7,10 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use frame_support::{
     dispatch::GetDispatchInfo,
     traits::{
-        fungible::Inspect as FungibleInspect, fungibles::Inspect as FungiblesInspect,
-        tokens::ConversionToAssetBalance, Contains, EnsureOrigin, PalletInfo, PalletsInfoAccess,
-        VestingSchedule,
+        fungible::Inspect as FungibleInspect,
+        fungibles::{Inspect as FungiblesInspect, Mutate as FungiblesMutate},
+        tokens::ConversionToAssetBalance,
+        Contains, EnsureOrigin, PalletInfo, PalletsInfoAccess, VestingSchedule,
     },
     weights::Weight,
 };
@@ -482,6 +483,65 @@ fn development_allocations_match_the_genesis_economics_exactly() {
             );
         }
         assert_eq!(Balances::total_issuance(), currency::VIT_TOTAL_SUPPLY);
+    });
+}
+
+#[test]
+fn treasury_rebate_payout_moves_real_usdc_from_the_selected_pot() {
+    use crate::configs::{treasury_keeper_account, treasury_oracle_account, TreasuryRebatePayout};
+    use pallet_futarchy_treasury::{PayoutLine, RebatePayout, TreasuryParams as _};
+
+    development_ext().execute_with(|| {
+        // `keeper.rebate` is deliberately unseeded until B5 calibration.
+        assert_eq!(crate::configs::TreasuryParams::keeper_rebate(), 0);
+        assert_eq!(
+            crate::configs::TreasuryParams::keeper_budget_epoch(),
+            12_000 * currency::USDC
+        );
+
+        let keeper = account(77);
+        let keeper_pot = treasury_keeper_account();
+        let oracle_pot = treasury_oracle_account();
+        let amount = 10 * currency::USDC;
+        let retained = currency::USDC_CENT;
+        assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
+            USDC_ASSET_ID,
+            &keeper_pot,
+            amount + retained,
+        )
+        .is_ok());
+        assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
+            USDC_ASSET_ID,
+            &oracle_pot,
+            amount + retained,
+        )
+        .is_ok());
+        assert_eq!(
+            TreasuryRebatePayout::pot_balance(PayoutLine::Keeper),
+            amount + retained
+        );
+        assert_eq!(
+            TreasuryRebatePayout::pot_balance(PayoutLine::Oracle),
+            amount + retained
+        );
+
+        assert!(<TreasuryRebatePayout as RebatePayout<AccountId>>::pay(
+            &keeper,
+            amount,
+            PayoutLine::Keeper,
+        )
+        .is_ok());
+        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &keeper), amount);
+        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &keeper_pot), retained);
+
+        assert!(<TreasuryRebatePayout as RebatePayout<AccountId>>::pay(
+            &keeper,
+            amount,
+            PayoutLine::Oracle,
+        )
+        .is_ok());
+        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &keeper), 2 * amount);
+        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &oracle_pot), retained);
     });
 }
 

@@ -2,12 +2,13 @@
 
 use crate as pallet_futarchy_treasury;
 use crate::{
-    TreasuryParams, ISS_INFLATION_CAP_BPS, TRS_CAP_180D_BPS, TRS_CAP_30D_BPS, TRS_CAP_PROPOSAL_BPS,
-    TRS_STREAM_THRESHOLD_BPS,
+    PayoutLine, RebatePayout, TreasuryParams, ISS_INFLATION_CAP_BPS, TRS_CAP_180D_BPS,
+    TRS_CAP_30D_BPS, TRS_CAP_PROPOSAL_BPS, TRS_STREAM_THRESHOLD_BPS,
 };
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
 use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
+use std::cell::{Cell, RefCell};
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -50,6 +51,12 @@ parameter_types! {
     pub static Cap180dBps: u32 = TRS_CAP_180D_BPS;
     pub static StreamThresholdBps: u32 = TRS_STREAM_THRESHOLD_BPS;
     pub static InflationCapBps: u32 = ISS_INFLATION_CAP_BPS;
+    pub static KeeperBudgetEpoch: u128 = futarchy_treasury_core::KEEPER_BUDGET_EPOCH;
+    // `keeper.rebate` is intentionally absent from genesis Params until B5.
+    pub static KeeperRebate: u128 = 0;
+    // Configurable stand-ins for the real KEEPER__/ORACLE__ USDC custody pots.
+    pub static KeeperRebatePotBalance: u128 = 0;
+    pub static OracleRebatePotBalance: u128 = 0;
 }
 
 pub struct TestParams;
@@ -69,6 +76,69 @@ impl TreasuryParams for TestParams {
     fn inflation_cap_bps() -> u32 {
         InflationCapBps::get()
     }
+    fn keeper_budget_epoch() -> u128 {
+        KeeperBudgetEpoch::get()
+    }
+    fn keeper_rebate() -> u128 {
+        KeeperRebate::get()
+    }
+}
+
+std::thread_local! {
+    static REBATE_PAYOUTS: RefCell<Vec<(AccountId32, u128, PayoutLine)>> = const { RefCell::new(Vec::new()) };
+    static FAIL_REBATE_PAYOUT: Cell<bool> = const { Cell::new(false) };
+}
+
+pub struct RecordingRebatePayout;
+
+impl RebatePayout<AccountId32> for RecordingRebatePayout {
+    fn pay(
+        who: &AccountId32,
+        amount: u128,
+        line: PayoutLine,
+    ) -> frame_support::pallet_prelude::DispatchResult {
+        REBATE_PAYOUTS.with(|calls| calls.borrow_mut().push((who.clone(), amount, line)));
+        if FAIL_REBATE_PAYOUT.with(Cell::get) {
+            return Err(sp_runtime::DispatchError::Other("rebate payout failed"));
+        }
+        let available = Self::pot_balance(line);
+        let Some(remaining) = available.checked_sub(amount) else {
+            return Err(sp_runtime::DispatchError::Other(
+                "rebate payout pot underfunded",
+            ));
+        };
+        set_rebate_pot_balance(line, remaining);
+        Ok(())
+    }
+
+    fn pot_balance(line: PayoutLine) -> u128 {
+        match line {
+            PayoutLine::Keeper => KeeperRebatePotBalance::get(),
+            PayoutLine::Oracle => OracleRebatePotBalance::get(),
+        }
+    }
+}
+
+pub fn rebate_payouts() -> Vec<(AccountId32, u128, PayoutLine)> {
+    REBATE_PAYOUTS.with(|calls| calls.borrow().clone())
+}
+
+pub fn set_rebate_payout_failure(fail: bool) {
+    FAIL_REBATE_PAYOUT.with(|value| value.set(fail));
+}
+
+pub fn set_rebate_pot_balance(line: PayoutLine, balance: u128) {
+    match line {
+        PayoutLine::Keeper => KeeperRebatePotBalance::set(balance),
+        PayoutLine::Oracle => OracleRebatePotBalance::set(balance),
+    }
+}
+
+pub fn reset_rebate_payout() {
+    REBATE_PAYOUTS.with(|calls| calls.borrow_mut().clear());
+    set_rebate_payout_failure(false);
+    KeeperRebatePotBalance::set(0);
+    OracleRebatePotBalance::set(0);
 }
 
 /// Test stand-in for the runtime's `pallet-origins`-backed `EnsureFutarchyTreasury`
@@ -99,6 +169,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type Params = TestParams;
     type CurrentEpoch = CurrentEpochValue;
     type RenewalDispatch = ();
+    type RebatePayout = RecordingRebatePayout;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;
@@ -133,7 +204,12 @@ pub fn new_test_ext_with(
     .build_storage()
     .expect("mock genesis must build");
     let mut ext = sp_io::TestExternalities::new(storage);
-    ext.execute_with(|| System::set_block_number(1));
+    ext.execute_with(|| {
+        System::set_block_number(1);
+        KeeperBudgetEpoch::set(futarchy_treasury_core::KEEPER_BUDGET_EPOCH);
+        KeeperRebate::set(0);
+        reset_rebate_payout();
+    });
     ext
 }
 

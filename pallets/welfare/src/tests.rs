@@ -1,7 +1,7 @@
 use crate::mock::*;
 use crate::*;
 use frame_support::{assert_noop, assert_ok, BoundedVec};
-use futarchy_primitives::FixedU64;
+use futarchy_primitives::{keeper::CrankClass, FixedU64};
 
 fn bounded(specs: Vec<MetricSpec>) -> BoundedSpecSet {
     BoundedVec::try_from(specs).expect("test spec set is bounded")
@@ -130,6 +130,91 @@ fn daily_gate_happy_path_persists_and_emits() {
             s_breached: true,
             c_breached: false,
         }));
+    });
+}
+
+#[test]
+fn keeper_rebates_only_after_useful_snapshot_and_daily_gate_work() {
+    new_test_ext().execute_with(|| {
+        RecordKeeperRebates::set(true);
+
+        assert_noop!(
+            Welfare::record_snapshot(RuntimeOrigin::signed(keeper()), FINALIZED_NOW, 1),
+            Error::<Test>::EpochNotFinalized
+        );
+        assert!(KeeperRebates::get().is_empty());
+
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            1,
+        ));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(keeper(), CrankClass::DecisionCritical)]
+        );
+
+        // The duplicate/error retry cannot become a rebate drain vector.
+        assert_noop!(
+            Welfare::record_snapshot(RuntimeOrigin::signed(keeper()), 7, 1),
+            Error::<Test>::DuplicateSnapshot
+        );
+        assert_noop!(
+            Welfare::record_daily_gate(RuntimeOrigin::signed(keeper()), 7, 0, 99),
+            Error::<Test>::SpecNotFound
+        );
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(keeper(), CrankClass::DecisionCritical)]
+        );
+
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            0,
+            1,
+        ));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![
+                (keeper(), CrankClass::DecisionCritical),
+                (keeper(), CrankClass::General),
+            ]
+        );
+
+        // An identical successful re-record is repeat-tolerant but state-neutral,
+        // so it cannot drain the keeper meter.
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            0,
+            1,
+        ));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![
+                (keeper(), CrankClass::DecisionCritical),
+                (keeper(), CrankClass::General),
+            ]
+        );
+
+        // Re-recording the same day with a newly breached gate advances the
+        // epoch-wide latch and therefore earns one further rebate.
+        DailyInput::set(components(800_000_000, ONE, ONE, ONE));
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            7,
+            0,
+            1,
+        ));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![
+                (keeper(), CrankClass::DecisionCritical),
+                (keeper(), CrankClass::General),
+                (keeper(), CrankClass::General),
+            ]
+        );
     });
 }
 

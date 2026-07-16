@@ -24,6 +24,48 @@ pub type AccountId = [u8; 32];
 pub type H256 = [u8; 32];
 pub type BlockNumber = u32;
 
+/// Shared keeper-rebate vocabulary used by permissionless crank pallets.
+pub mod keeper {
+    use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
+    use scale_info::TypeInfo;
+
+    /// Economic class of a useful keeper crank (08 §6.3 / 07).
+    #[derive(
+        Clone,
+        Copy,
+        Debug,
+        Decode,
+        DecodeWithMemTracking,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        TypeInfo,
+    )]
+    pub enum CrankClass {
+        /// Work explicitly reserved at least 80% of the keeper meter.
+        DecisionCritical,
+        /// Best-effort work sharing the at-most-20% general tranche.
+        General,
+        /// Oracle/registry work paid from the separate ORACLE budget line.
+        OracleLine,
+    }
+
+    /// Infallible, fail-soft sink for a useful keeper crank.
+    ///
+    /// A rebate that cannot be paid because its meter or tranche is exhausted,
+    /// its budget line is unfunded, parameters are unknown, or custody payout
+    /// fails silently pays nothing. Implementations MUST NEVER change the
+    /// outcome of the calling crank.
+    pub trait KeeperRebateSink<AccountId> {
+        fn rebate(who: &AccountId, class: CrankClass);
+    }
+
+    impl<AccountId> KeeperRebateSink<AccountId> for () {
+        fn rebate(_: &AccountId, _: CrankClass) {}
+    }
+}
+
 #[derive(
     Clone,
     Copy,

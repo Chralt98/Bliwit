@@ -3,7 +3,10 @@
 use crate as pallet_epoch;
 use crate::*;
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
-use futarchy_primitives::{BoundedVec, Branch, ProposalState, ResourceId};
+use futarchy_primitives::{
+    keeper::{CrankClass, KeeperRebateSink},
+    BoundedVec, Branch, ProposalState, ResourceId,
+};
 use parity_scale_codec::{Decode, Encode};
 use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::IdentityLookup, BuildStorage, DispatchError};
@@ -277,6 +280,22 @@ parameter_types! {
     pub static RetryExhausted: bool = false;
     pub static WelfareScore: FixedU64 = FixedU64(500_000_000);
     pub static PreviousBaselineTwap: Option<FixedU64> = None;
+    /// Disabled by default, so the mock behaves like the `()` sink unless a
+    /// keeper-rebate regression explicitly enables recording.
+    pub static RecordKeeperRebates: bool = false;
+    pub static KeeperRebates: Vec<(AccountId32, CrankClass)> = Vec::new();
+}
+
+pub struct TestKeeperRebate;
+
+impl KeeperRebateSink<AccountId32> for TestKeeperRebate {
+    fn rebate(who: &AccountId32, class: CrankClass) {
+        if RecordKeeperRebates::get() {
+            let mut rebates = KeeperRebates::get();
+            rebates.push((who.clone(), class));
+            KeeperRebates::set(rebates);
+        }
+    }
 }
 
 pub struct TestParams;
@@ -527,6 +546,7 @@ impl pallet_epoch::Config for Test {
     type ExecutionGuard = TestExecutionGuard;
     type Welfare = TestWelfare;
     type Ledger = TestLedger;
+    type KeeperRebate = TestKeeperRebate;
     type GuardianOrigin = TestGuardianOrigin;
     type ExecutionGuardOrigin = TestExecutionGuardOrigin;
     type VoidAuthority = TestVoidAuthority;
@@ -605,6 +625,8 @@ pub fn reset_doubles() {
     RetryExhausted::set(false);
     WelfareScore::set(FixedU64(500_000_000));
     PreviousBaselineTwap::set(None);
+    RecordKeeperRebates::set(false);
+    KeeperRebates::set(Vec::new());
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

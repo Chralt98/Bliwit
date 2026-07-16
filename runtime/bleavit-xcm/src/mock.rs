@@ -117,6 +117,7 @@ impl pallet_oracle::Config for Test {
     type Reporting = TestReporting;
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
     type ProbeDispatch = TestProbeDispatcher;
+    type KeeperRebate = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestOracleBenchmarkHelper;
@@ -157,6 +158,14 @@ impl pallet_futarchy_treasury::TreasuryParams for TestTreasuryParams {
     fn inflation_cap_bps() -> u32 {
         futarchy_treasury_core::ISS_INFLATION_CAP_BPS
     }
+
+    fn keeper_budget_epoch() -> u128 {
+        futarchy_treasury_core::KEEPER_BUDGET_EPOCH
+    }
+
+    fn keeper_rebate() -> u128 {
+        0
+    }
 }
 
 impl pallet_futarchy_treasury::Config for Test {
@@ -164,6 +173,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type Params = TestTreasuryParams;
     type CurrentEpoch = CurrentEpoch;
     type RenewalDispatch = TestRenewalDispatcher;
+    type RebatePayout = ();
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestTreasuryBenchmarkHelper;

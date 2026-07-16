@@ -13,7 +13,10 @@ use frame_support::{
     PalletId,
 };
 use frame_system::{EnsureSigned, RawOrigin};
-use futarchy_primitives::{kernel, Balance};
+use futarchy_primitives::{
+    keeper::{CrankClass, KeeperRebateSink},
+    kernel, Balance,
+};
 use sp_runtime::{traits::AccountIdConversion, BuildStorage};
 
 pub type AccountId = u64;
@@ -106,9 +109,25 @@ parameter_types! {
     pub PositionDeposit: Balance = kernel::POSITION_DEPOSIT_USDC;
     pub const MaxPositionsPerAccount: u32 = MAX_POSITIONS_PER_ACCOUNT;
     pub const ArchiveDelay: u64 = 100; // blocks (short, for tests)
-    pub const ReapBatch: u32 = kernel::REAP_BATCH;
+    pub static ReapBatch: u32 = kernel::REAP_BATCH;
     pub UsdcAssetId: AssetId = USDC;
     pub InsuranceAccount: AccountId = INSURANCE;
+    /// Disabled by default, so the mock behaves like the `()` sink unless a
+    /// keeper-rebate regression explicitly enables recording.
+    pub static RecordKeeperRebates: bool = false;
+    pub static KeeperRebates: Vec<(AccountId, CrankClass)> = Vec::new();
+}
+
+pub struct TestKeeperRebate;
+
+impl KeeperRebateSink<AccountId> for TestKeeperRebate {
+    fn rebate(who: &AccountId, class: CrankClass) {
+        if RecordKeeperRebates::get() {
+            let mut rebates = KeeperRebates::get();
+            rebates.push((*who, class));
+            KeeperRebates::set(rebates);
+        }
+    }
 }
 
 impl pallet_conditional_ledger::Config for Test {
@@ -125,6 +144,7 @@ impl pallet_conditional_ledger::Config for Test {
     type ProtocolAccounts = Protocol;
     type InsuranceAccount = InsuranceAccount;
     type PalletId = LedgerPalletId;
+    type KeeperRebate = TestKeeperRebate;
     type WeightInfo = ();
 }
 
@@ -179,6 +199,11 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     .unwrap();
 
     let mut ext = sp_io::TestExternalities::new(t);
-    ext.execute_with(|| System::set_block_number(1));
+    ext.execute_with(|| {
+        System::set_block_number(1);
+        ReapBatch::set(kernel::REAP_BATCH);
+        RecordKeeperRebates::set(false);
+        KeeperRebates::set(Vec::new());
+    });
     ext
 }

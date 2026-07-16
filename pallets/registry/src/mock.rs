@@ -18,7 +18,10 @@ use frame_support::{
     PalletId,
 };
 use frame_system::{EnsureSigned, RawOrigin};
-use futarchy_primitives::{Balance, EpochId, FixedU64};
+use futarchy_primitives::{
+    keeper::{CrankClass, KeeperRebateSink},
+    Balance, EpochId, FixedU64,
+};
 use registry_core::{RegistryKind, REG_BOND_INCIDENT, REG_BOND_MILESTONE};
 use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
@@ -120,6 +123,9 @@ parameter_types! {
     /// When set, the welfare sink refuses — exercises the G-1 `close_epoch`
     /// rollback path (07 §7 / rule 1).
     pub static WelfareFails: bool = false;
+    /// Per-instance keeper rebates; both registry instances bind the recording
+    /// double so tests cover the 07 §4 mandate on each concrete instance.
+    pub static KeeperRebates: alloc::vec::Vec<(AccountId32, CrankClass)> = alloc::vec::Vec::new();
     pub const MaxFilingsPerEpoch: u32 = registry_core::MAX_FILINGS_PER_EPOCH;
     pub const MaxEvidenceLen: u32 = 32;
     pub UsdcAssetId: AssetId = USDC;
@@ -177,6 +183,13 @@ impl EpochContext for TestEpoch {
     }
 }
 
+pub struct RecordingKeeperRebate;
+impl KeeperRebateSink<AccountId32> for RecordingKeeperRebate {
+    fn rebate(who: &AccountId32, class: CrankClass) {
+        KeeperRebates::mutate(|rebates| rebates.push((who.clone(), class)));
+    }
+}
+
 /// The resolution authority (07 §7): a fixed `RESOLVER` account stands in for the
 /// recompute-keeper / `OracleResolution` path wired in B1a.
 pub struct TestResolutionAuthority;
@@ -209,6 +222,7 @@ impl pallet_registry::Config<IncidentInstance> for Test {
     type MaxFilingsPerEpoch = MaxFilingsPerEpoch;
     type MaxEvidenceLen = MaxEvidenceLen;
     type WeightInfo = ();
+    type KeeperRebate = RecordingKeeperRebate;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;
 }
@@ -228,6 +242,7 @@ impl pallet_registry::Config<MilestoneInstance> for Test {
     type MaxFilingsPerEpoch = MaxFilingsPerEpoch;
     type MaxEvidenceLen = MaxEvidenceLen;
     type WeightInfo = ();
+    type KeeperRebate = RecordingKeeperRebate;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;
 }
@@ -331,6 +346,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         RegisteredWatchtowers::set(alloc::vec::Vec::new());
         WelfareLog::set(alloc::vec::Vec::new());
         WelfareFails::set(false);
+        KeeperRebates::set(alloc::vec::Vec::new());
     });
     ext
 }

@@ -62,8 +62,8 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // (named, not glob — the pallet defines its own `Event`/`Error`).
 pub use futarchy_treasury_core::{
-    bps, vested_amount, AssetKind, BudgetLine, Error as CoreError, Event as CoreEvent,
-    NavComponents, RollingMeter, Stream, StreamInput, Treasury, TreasuryAccount,
+    bps, vested_amount, AssetKind, BudgetLine, Error as CoreError, Event as CoreEvent, KeeperMeter,
+    KeeperMeterClass, NavComponents, RollingMeter, Stream, StreamInput, Treasury, TreasuryAccount,
     DEFAULT_VIT_SUPPLY, ISS_INFLATION_CAP_BPS, MAX_BUDGET_LINES, MAX_FUNDED_CORETIME_PERIODS,
     MAX_PENDING_OUTFLOWS, MAX_POL_COMMITMENTS, MAX_STREAMS, TRS_CAP_180D_BPS, TRS_CAP_30D_BPS,
     TRS_CAP_PROPOSAL_BPS, TRS_STREAM_THRESHOLD_BPS, USDC, VIT,
@@ -98,6 +98,59 @@ pub trait TreasuryParams {
     fn stream_threshold_bps() -> u32;
     /// `iss.inflation_cap` — rolling 365-day issuance ceiling (default 2% = 200 bps).
     fn inflation_cap_bps() -> u32;
+    /// `keeper.budget_epoch` (raw key `keeper.budget`) — per-epoch metered
+    /// keeper budget, default 12,000 USDC (13 §1).
+    fn keeper_budget_epoch() -> futarchy_primitives::Balance;
+    /// `keeper.rebate` — rebate per sanctioned crank. This formula-default row
+    /// is deliberately absent from the genesis Params registry pending B5 fee
+    /// calibration; adapters MUST return zero until the raw row exists. A zero
+    /// rebate makes the entire path a structural no-op and cannot create an
+    /// unbacked outflow.
+    fn keeper_rebate() -> futarchy_primitives::Balance;
+}
+
+/// Custody account from which a rebate is paid.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    parity_scale_codec::Decode,
+    parity_scale_codec::DecodeWithMemTracking,
+    parity_scale_codec::Encode,
+    Eq,
+    parity_scale_codec::MaxEncodedLen,
+    PartialEq,
+    scale_info::TypeInfo,
+)]
+pub enum PayoutLine {
+    Keeper,
+    Oracle,
+}
+
+/// Narrow runtime custody seam for real-USDC keeper payouts.
+pub trait RebatePayout<AccountId> {
+    fn pay(
+        who: &AccountId,
+        amount: futarchy_primitives::Balance,
+        line: PayoutLine,
+    ) -> frame_support::pallet_prelude::DispatchResult;
+
+    /// Real USDC held by the custody pot corresponding to `line`.
+    fn pot_balance(line: PayoutLine) -> futarchy_primitives::Balance;
+}
+
+impl<AccountId> RebatePayout<AccountId> for () {
+    fn pay(
+        _: &AccountId,
+        _: futarchy_primitives::Balance,
+        _: PayoutLine,
+    ) -> frame_support::pallet_prelude::DispatchResult {
+        Ok(())
+    }
+
+    fn pot_balance(_: PayoutLine) -> futarchy_primitives::Balance {
+        0
+    }
 }
 
 /// B4/B1a seam (09 §4): dispatch the DOT funding transfer for a renewal the
@@ -141,7 +194,10 @@ pub mod pallet {
     use sp_runtime::traits::SaturatedConversion;
     use sp_runtime::TryRuntimeError;
 
-    use futarchy_primitives::{Balance, BlockNumber, EpochId, ProposalClass};
+    use futarchy_primitives::{
+        keeper::{CrankClass, KeeperRebateSink},
+        Balance, BlockNumber, EpochId, ProposalClass,
+    };
 
     /// The in-code storage version of this pallet.
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -176,6 +232,10 @@ pub mod pallet {
         /// accounting pallet stays XCM-free; an error rolls the extrinsic back.
         type RenewalDispatch: RenewalDispatch;
 
+        /// Runtime custody adapter which transfers real USDC from the selected
+        /// treasury sub-account. Errors are swallowed by `do_keeper_rebate`.
+        type RebatePayout: RebatePayout<Self::AccountId>;
+
         /// Weight information for extrinsics.
         type WeightInfo: WeightInfo;
 
@@ -207,6 +267,7 @@ pub mod pallet {
         pub vit_lines: BoundedVec<(BudgetLine, Balance), ConstU32<MAX_BUDGET_LINES_BOUND>>,
         pub funded_coretime_periods: BoundedVec<u32, ConstU32<MAX_FUNDED_CORETIME_BOUND>>,
         pub coretime_quotes: BoundedVec<(u32, Balance), ConstU32<MAX_FUNDED_CORETIME_BOUND>>,
+        pub keeper_meter: KeeperMeter,
     }
 
     impl Default for TreasuryState {
@@ -240,6 +301,7 @@ pub mod pallet {
                     t.funded_coretime_periods.clone(),
                 ),
                 coretime_quotes: BoundedVec::truncate_from(t.coretime_quotes.clone()),
+                keeper_meter: t.keeper_meter,
             }
         }
     }
@@ -492,9 +554,13 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::execute_coretime_renewal())]
         pub fn execute_coretime_renewal(origin: OriginFor<T>, period_index: u32) -> DispatchResult {
             let keeper = ensure_signed(origin)?;
-            let keeper = Self::to_core_account(keeper);
-            let amount = Self::mutate(|t| t.execute_coretime_renewal(keeper, period_index))?;
-            T::RenewalDispatch::dispatch_renewal(period_index, amount)
+            let core_keeper = Self::to_core_account(keeper.clone());
+            let amount = Self::mutate(|t| t.execute_coretime_renewal(core_keeper, period_index))?;
+            T::RenewalDispatch::dispatch_renewal(period_index, amount)?;
+            // B5 recalibrates this call's weight for the additional bounded
+            // keeper-meter read/write and custody-transfer path.
+            Self::do_keeper_rebate(&keeper, CrankClass::General);
+            Ok(())
         }
     }
 
@@ -580,6 +646,68 @@ pub mod pallet {
             // `set_reserve_impaired` only flips the flag / pushes an event; the
             // conversion cannot exceed a bound, but persist defensively anyway.
             let _ = Self::persist(t);
+        }
+
+        /// Infallible, fail-soft keeper rebate endpoint (08 §6.3 / 07).
+        ///
+        /// The core mutation is prepared in memory. Custody pays first; only a
+        /// successful payout commits the line debit and meter charge. Any
+        /// payout or conversion failure silently drops the prepared state and
+        /// therefore can never affect the useful crank which called this.
+        /// Caller dispatch weights include this bounded accounting/custody
+        /// work provisionally; milestone B5 recalibrates them by benchmark.
+        pub fn do_keeper_rebate(who: &T::AccountId, class: CrankClass) {
+            let mut t = Self::load();
+            let rebate = T::Params::keeper_rebate();
+            let payable = match class {
+                CrankClass::DecisionCritical => t.keeper_rebate(
+                    T::CurrentEpoch::get(),
+                    KeeperMeterClass::DecisionCritical,
+                    rebate,
+                    T::Params::keeper_budget_epoch(),
+                ),
+                CrankClass::General => t.keeper_rebate(
+                    T::CurrentEpoch::get(),
+                    KeeperMeterClass::General,
+                    rebate,
+                    T::Params::keeper_budget_epoch(),
+                ),
+                CrankClass::OracleLine => t.oracle_line_rebate(rebate),
+            };
+
+            let events = core::mem::take(&mut t.events);
+            if payable == 0 {
+                // Only threshold flags/events (not ordinary zero/unfunded
+                // no-ops) are durable on the zero-pay path.
+                if events.is_empty() {
+                    return;
+                }
+                if let Ok(state) = Self::checked_state(&t) {
+                    State::<T>::put(state);
+                    for event in events {
+                        Self::deposit_core_event(event);
+                    }
+                }
+                return;
+            }
+
+            // Preflight the only fallible accounting conversion before moving
+            // real USDC, so a custody success can always be followed by the
+            // corresponding line/meter commit.
+            let Ok(state) = Self::checked_state(&t) else {
+                return;
+            };
+            let line = match class {
+                CrankClass::OracleLine => PayoutLine::Oracle,
+                CrankClass::DecisionCritical | CrankClass::General => PayoutLine::Keeper,
+            };
+            if T::RebatePayout::pay(who, payable, line).is_err() {
+                return;
+            }
+            State::<T>::put(state);
+            for event in events {
+                Self::deposit_core_event(event);
+            }
         }
 
         /// 09 §4/§6: the runtime notes the current coretime renewal quote read
@@ -716,6 +844,7 @@ pub mod pallet {
                 coretime_quotes: s.coretime_quotes.into_inner(),
                 cap_proposal_bps: T::Params::cap_proposal_bps(),
                 stream_threshold_bps: T::Params::stream_threshold_bps(),
+                keeper_meter: s.keeper_meter,
             };
             // Refresh the metered caps from live Params (rule 4), including the
             // rolling issuance cap `iss.inflation`.
@@ -776,6 +905,7 @@ pub mod pallet {
                     .map_err(|_| Error::<T>::TooManyObligations)?,
                 coretime_quotes: BoundedVec::try_from(t.coretime_quotes.clone())
                     .map_err(|_| Error::<T>::TooManyObligations)?,
+                keeper_meter: t.keeper_meter,
             })
         }
 
@@ -876,6 +1006,21 @@ pub mod pallet {
                     "treasury: minted VIT credited to lines exceeds total supply",
                 ));
             }
+            // Loud custody-drift alarm: accounting a funded payout line does
+            // not itself transfer USDC into its real custody pot. Until the
+            // custody-sync follow-up lands, operators must fund both legs.
+            if t.line_balance(BudgetLine::Keeper) > T::RebatePayout::pot_balance(PayoutLine::Keeper)
+            {
+                return Err(TryRuntimeError::Other(
+                    "treasury: KEEPER line exceeds real USDC custody pot",
+                ));
+            }
+            if t.line_balance(BudgetLine::Oracle) > T::RebatePayout::pot_balance(PayoutLine::Oracle)
+            {
+                return Err(TryRuntimeError::Other(
+                    "treasury: ORACLE line exceeds real USDC custody pot",
+                ));
+            }
             Ok(())
         }
 
@@ -905,6 +1050,12 @@ pub mod pallet {
                 CoreError::ZeroQuote => Error::<T>::ZeroQuote.into(),
                 CoreError::Overflow => Error::<T>::Overflow.into(),
             }
+        }
+    }
+
+    impl<T: Config> KeeperRebateSink<T::AccountId> for Pallet<T> {
+        fn rebate(who: &T::AccountId, class: CrankClass) {
+            Self::do_keeper_rebate(who, class);
         }
     }
 }

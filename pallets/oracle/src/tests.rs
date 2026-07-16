@@ -1239,6 +1239,7 @@ mod probe_dispatch_seam {
     use super::*;
     use crate as pallet_oracle;
     use frame_support::{derive_impl, parameter_types};
+    use futarchy_primitives::keeper::{CrankClass, KeeperRebateSink};
     use sp_runtime::{traits::IdentityLookup, AccountId32, BuildStorage};
     use std::cell::RefCell;
 
@@ -1280,6 +1281,7 @@ mod probe_dispatch_seam {
 
     std::thread_local! {
         static DISPATCHED: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+        static REBATES: RefCell<Vec<(AccountId32, CrankClass)>> = const { RefCell::new(Vec::new()) };
     }
 
     pub struct RecordingProbeDispatch;
@@ -1287,6 +1289,14 @@ mod probe_dispatch_seam {
     impl pallet_oracle::ProbeDispatch for RecordingProbeDispatch {
         fn probe_due(query_id: u64) {
             DISPATCHED.with(|ids| ids.borrow_mut().push(query_id));
+        }
+    }
+
+    pub struct RecordingKeeperRebate;
+
+    impl KeeperRebateSink<AccountId32> for RecordingKeeperRebate {
+        fn rebate(who: &AccountId32, class: CrankClass) {
+            REBATES.with(|rebates| rebates.borrow_mut().push((who.clone(), class)));
         }
     }
 
@@ -1299,6 +1309,7 @@ mod probe_dispatch_seam {
         type Reporting = DispatchReporting;
         type MaxRoundCloseBatch = MaxRoundCloseBatch;
         type ProbeDispatch = RecordingProbeDispatch;
+        type KeeperRebate = RecordingKeeperRebate;
         type WeightInfo = ();
         #[cfg(feature = "runtime-benchmarks")]
         type BenchmarkHelper = DispatchBenchmarkHelper;
@@ -1322,38 +1333,299 @@ mod probe_dispatch_seam {
         .build_storage()
         .expect("probe-dispatch test genesis must build");
         let mut ext = sp_io::TestExternalities::new(storage);
-        ext.execute_with(|| System::set_block_number(1));
+        ext.execute_with(|| {
+            System::set_block_number(1);
+            DISPATCHED.with(|ids| ids.borrow_mut().clear());
+            REBATES.with(|rebates| rebates.borrow_mut().clear());
+        });
         ext
     }
 
     #[test]
     fn reserve_probe_crank_dispatches_only_a_fresh_pending_query() {
         new_ext().execute_with(|| {
-            DISPATCHED.with(|ids| ids.borrow_mut().clear());
-
+            let keeper = AccountId32::new([9; 32]);
             System::set_block_number(u64::from(RES_PROBE_INTERVAL));
             assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(
-                AccountId32::new([9; 32])
+                keeper.clone()
             )));
             assert_eq!(
                 pallet_oracle::ReserveHealth::<DispatchTest>::get().last_query_id,
                 1
             );
             DISPATCHED.with(|ids| assert_eq!(&*ids.borrow(), &[1]));
+            REBATES.with(|rebates| {
+                assert_eq!(
+                    &*rebates.borrow(),
+                    &[(keeper.clone(), CrankClass::OracleLine)]
+                )
+            });
 
             // The timeout matures before the next send interval. This crank
             // commits the fail-static fold but creates no pending query, so the
             // runtime dispatcher must not be invoked a second time (07 §8).
             System::set_block_number(u64::from(RES_PROBE_INTERVAL + RES_PROBE_TIMEOUT));
             assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(
-                AccountId32::new([9; 32])
+                keeper.clone()
             )));
             let health = pallet_oracle::ReserveHealth::<DispatchTest>::get();
             assert_eq!(health.last_query_id, 1);
             assert_eq!(health.pending_since, None);
             assert_eq!(health.consecutive_fails, 1);
             DISPATCHED.with(|ids| assert_eq!(&*ids.borrow(), &[1]));
+            // The live dispatcher makes the fail-static timeout fold genuine
+            // state-advancing keeper work, paid once even without a fresh send.
+            REBATES.with(|rebates| {
+                assert_eq!(
+                    &*rebates.borrow(),
+                    &[
+                        (keeper.clone(), CrankClass::OracleLine),
+                        (keeper, CrankClass::OracleLine),
+                    ]
+                )
+            });
         });
+    }
+
+    #[test]
+    fn round_close_rebates_progress_once_but_not_an_idempotent_noop() {
+        new_ext().execute_with(|| {
+            let reporter = AccountId32::new([1; 32]);
+            let keeper = AccountId32::new([9; 32]);
+            assert_ok!(Oracle::register_reporter(RuntimeOrigin::signed(
+                reporter.clone()
+            )));
+            assert_ok!(Oracle::report(
+                RuntimeOrigin::signed(reporter),
+                C,
+                E,
+                V,
+                reported_value(),
+                h(9)
+            ));
+
+            // Open-window crank is a successful no-op: the drain-vector case.
+            assert_ok!(Oracle::crank_round_close(
+                RuntimeOrigin::signed(keeper.clone()),
+                1
+            ));
+            REBATES.with(|rebates| assert!(rebates.borrow().is_empty()));
+
+            System::set_block_number(u64::from(ORC_WINDOW_BLOCKS + 1));
+            assert_ok!(Oracle::crank_round_close(
+                RuntimeOrigin::signed(keeper.clone()),
+                1
+            ));
+            // The latch-once extension is genuine progress and pays exactly once.
+            REBATES.with(|rebates| {
+                assert_eq!(
+                    &*rebates.borrow(),
+                    &[(keeper.clone(), CrankClass::OracleLine)]
+                )
+            });
+
+            // An immediate retry cannot re-extend the latched window and pays
+            // nothing further.
+            assert_ok!(Oracle::crank_round_close(
+                RuntimeOrigin::signed(keeper.clone()),
+                1
+            ));
+            REBATES.with(|rebates| {
+                assert_eq!(
+                    &*rebates.borrow(),
+                    &[(keeper.clone(), CrankClass::OracleLine)]
+                )
+            });
+
+            System::set_block_number(u64::from(ORC_WINDOW_BLOCKS + 1 + ORC_EXT_WINDOW_BLOCKS));
+            assert_ok!(Oracle::crank_round_close(
+                RuntimeOrigin::signed(keeper.clone()),
+                1
+            ));
+            REBATES.with(|rebates| {
+                assert_eq!(
+                    &*rebates.borrow(),
+                    &[
+                        (keeper.clone(), CrankClass::OracleLine),
+                        (keeper, CrankClass::OracleLine),
+                    ]
+                )
+            });
+        });
+    }
+
+    #[test]
+    fn watchtower_ack_rebates_once_and_duplicate_pays_nothing() {
+        new_ext().execute_with(|| {
+            let reporter = AccountId32::new([1; 32]);
+            let watchtower = AccountId32::new([2; 32]);
+            assert_ok!(Oracle::register_reporter(RuntimeOrigin::signed(
+                reporter.clone()
+            )));
+            assert_ok!(Oracle::register_watchtower(RuntimeOrigin::signed(
+                watchtower.clone()
+            )));
+            assert_ok!(Oracle::report(
+                RuntimeOrigin::signed(reporter),
+                C,
+                E,
+                V,
+                reported_value(),
+                h(9)
+            ));
+            let round = pallet_oracle::Rounds::<DispatchTest>::get((C, E, V))
+                .expect("report opens a round");
+
+            assert_ok!(Oracle::ack_observed(
+                RuntimeOrigin::signed(watchtower.clone()),
+                C,
+                E,
+                V,
+                round.round,
+                round.report_hash,
+            ));
+            REBATES.with(|rebates| {
+                assert_eq!(
+                    &*rebates.borrow(),
+                    &[(watchtower.clone(), CrankClass::OracleLine)]
+                )
+            });
+
+            assert_noop!(
+                Oracle::ack_observed(
+                    RuntimeOrigin::signed(watchtower.clone()),
+                    C,
+                    E,
+                    V,
+                    round.round,
+                    round.report_hash,
+                ),
+                pallet_oracle::Error::<DispatchTest>::DuplicateAck
+            );
+            REBATES.with(|rebates| {
+                assert_eq!(&*rebates.borrow(), &[(watchtower, CrankClass::OracleLine)])
+            });
+        });
+    }
+
+    #[test]
+    fn recompute_rebates_exactly_once_only_after_resolution() {
+        new_ext().execute_with(|| {
+            let reporter = AccountId32::new([1; 32]);
+            let keeper = AccountId32::new([5; 32]);
+            let proof = proof_for(reported_value());
+            assert_ok!(Oracle::note_recomputable(C, V));
+            assert_ok!(Oracle::register_reporter(RuntimeOrigin::signed(
+                reporter.clone()
+            )));
+            assert_ok!(Oracle::report(
+                RuntimeOrigin::signed(reporter),
+                C,
+                E,
+                V,
+                reported_value(),
+                hash_evidence(&proof)
+            ));
+            assert_ok!(Oracle::recompute_proof(
+                RuntimeOrigin::signed(keeper.clone()),
+                C,
+                E,
+                V,
+                proof_arg(proof.clone())
+            ));
+            REBATES.with(|rebates| {
+                assert_eq!(
+                    &*rebates.borrow(),
+                    &[(keeper.clone(), CrankClass::OracleLine)]
+                )
+            });
+
+            assert_noop!(
+                Oracle::recompute_proof(RuntimeOrigin::signed(keeper), C, E, V, proof_arg(proof)),
+                Error::<DispatchTest>::RoundNotFound
+            );
+            REBATES.with(|rebates| assert_eq!(rebates.borrow().len(), 1));
+        });
+    }
+
+    mod unit_dispatcher {
+        use super::*;
+
+        type Block = frame_system::mocking::MockBlock<NoDispatchTest>;
+
+        frame_support::construct_runtime!(
+            pub enum NoDispatchTest {
+                System: frame_system,
+                Oracle: pallet_oracle,
+            }
+        );
+
+        #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
+        impl frame_system::Config for NoDispatchTest {
+            type Block = Block;
+            type AccountId = AccountId32;
+            type Lookup = IdentityLookup<AccountId32>;
+        }
+
+        impl pallet_oracle::Config for NoDispatchTest {
+            type AdjudicationOrigin = frame_system::EnsureRoot<AccountId32>;
+            type Reporting = DispatchReporting;
+            type MaxRoundCloseBatch = MaxRoundCloseBatch;
+            type ProbeDispatch = ();
+            type KeeperRebate = RecordingKeeperRebate;
+            type WeightInfo = ();
+            #[cfg(feature = "runtime-benchmarks")]
+            type BenchmarkHelper = NoDispatchBenchmarkHelper;
+        }
+
+        #[cfg(feature = "runtime-benchmarks")]
+        pub struct NoDispatchBenchmarkHelper;
+
+        #[cfg(feature = "runtime-benchmarks")]
+        impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for NoDispatchBenchmarkHelper {
+            fn adjudication_origin() -> RuntimeOrigin {
+                RuntimeOrigin::root()
+            }
+        }
+
+        fn new_ext() -> sp_io::TestExternalities {
+            let storage = RuntimeGenesisConfig {
+                system: Default::default(),
+                oracle: Default::default(),
+            }
+            .build_storage()
+            .expect("no-dispatch test genesis must build");
+            let mut ext = sp_io::TestExternalities::new(storage);
+            ext.execute_with(|| {
+                System::set_block_number(1);
+                REBATES.with(|rebates| rebates.borrow_mut().clear());
+            });
+            ext
+        }
+
+        #[test]
+        fn unit_probe_dispatcher_creates_health_work_but_never_rebates() {
+            new_ext().execute_with(|| {
+                let keeper = AccountId32::new([9; 32]);
+                System::set_block_number(u64::from(RES_PROBE_INTERVAL));
+                assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(
+                    keeper.clone()
+                )));
+                assert_eq!(
+                    pallet_oracle::ReserveHealth::<NoDispatchTest>::get().last_query_id,
+                    1
+                );
+                REBATES.with(|rebates| assert!(rebates.borrow().is_empty()));
+
+                System::set_block_number(u64::from(RES_PROBE_INTERVAL + RES_PROBE_TIMEOUT));
+                assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(keeper)));
+                assert_eq!(
+                    pallet_oracle::ReserveHealth::<NoDispatchTest>::get().consecutive_fails,
+                    1
+                );
+                REBATES.with(|rebates| assert!(rebates.borrow().is_empty()));
+            });
+        }
     }
 }
 

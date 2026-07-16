@@ -4,8 +4,9 @@
 //! differential (Python M3 ≡ Rust core ≡ this pallet at default parameters).
 
 use crate::mock::*;
-use crate::{Error, Event};
+use crate::{Error, Event, PayoutLine};
 use frame_support::{assert_err, assert_noop, assert_ok};
+use futarchy_primitives::keeper::CrankClass;
 use futarchy_treasury_core::{
     AssetKind, BudgetLine, Stream, Treasury as CoreTreasury, DAYS_365_BLOCKS, DAY_BLOCKS,
     MAX_STREAMS, TRS_CAP_PROPOSAL_BPS, TRS_STREAM_THRESHOLD_BPS, USDC, VIT,
@@ -299,6 +300,200 @@ fn issuance_is_line_scoped_and_capped_at_two_percent() {
 
 // ---- coretime renewal (09 §4) -----------------------------------------------
 
+#[test]
+fn absent_keeper_rebate_param_is_a_structural_noop() {
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            100 * USDC
+        ));
+        System::reset_events();
+        let before = Treasury::treasury();
+
+        // Mock default mirrors production: the formula-default `keeper.rebate`
+        // row is absent until B5, so the adapter supplies zero.
+        assert_eq!(KeeperRebate::get(), 0);
+        crate::Pallet::<Test>::do_keeper_rebate(&acc(7), CrankClass::DecisionCritical);
+
+        assert_eq!(Treasury::treasury(), before);
+        assert!(rebate_payouts().is_empty());
+        assert!(System::events().is_empty());
+    });
+}
+
+#[test]
+fn keeper_and_oracle_rebates_pay_from_the_selected_lines() {
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            100 * USDC
+        ));
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Oracle,
+            100 * USDC
+        ));
+        KeeperBudgetEpoch::set(100 * USDC);
+        KeeperRebate::set(10 * USDC);
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::Keeper, 100 * USDC);
+        set_rebate_pot_balance(PayoutLine::Oracle, 100 * USDC);
+
+        crate::Pallet::<Test>::do_keeper_rebate(&acc(7), CrankClass::General);
+        let metered = Treasury::treasury().keeper_meter;
+        assert_eq!(metered.spent, 10 * USDC);
+        assert_eq!(metered.general_spent, 10 * USDC);
+
+        crate::Pallet::<Test>::do_keeper_rebate(&acc(8), CrankClass::OracleLine);
+        assert_eq!(Treasury::treasury().keeper_meter, metered);
+        assert_eq!(
+            rebate_payouts(),
+            vec![
+                (acc(7), 10 * USDC, PayoutLine::Keeper),
+                (acc(8), 10 * USDC, PayoutLine::Oracle),
+            ]
+        );
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
+#[test]
+fn payout_failure_drops_line_meter_and_events() {
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            100 * USDC
+        ));
+        KeeperBudgetEpoch::set(100 * USDC);
+        KeeperRebate::set(80 * USDC);
+        System::reset_events();
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::Keeper, 100 * USDC);
+        set_rebate_payout_failure(true);
+        let before = Treasury::treasury();
+
+        crate::Pallet::<Test>::do_keeper_rebate(&acc(7), CrankClass::DecisionCritical);
+
+        assert_eq!(Treasury::treasury(), before);
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 80 * USDC, PayoutLine::Keeper)]
+        );
+        assert!(System::events().is_empty());
+    });
+}
+
+#[test]
+fn threshold_events_map_and_zero_pay_exhaustion_flag_persists_once() {
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            200 * USDC
+        ));
+        KeeperBudgetEpoch::set(100 * USDC);
+        KeeperRebate::set(20 * USDC);
+        System::reset_events();
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::Keeper, 200 * USDC);
+
+        for _ in 0..4 {
+            crate::Pallet::<Test>::do_keeper_rebate(&acc(7), CrankClass::DecisionCritical);
+        }
+        System::assert_last_event(RuntimeEvent::Treasury(Event::KeeperBudgetLow {
+            remaining: 20 * USDC,
+        }));
+        crate::Pallet::<Test>::do_keeper_rebate(&acc(7), CrankClass::DecisionCritical);
+        System::assert_last_event(RuntimeEvent::Treasury(Event::KeeperBudgetExhausted {
+            epoch: 0,
+            spent: 100 * USDC,
+        }));
+        let event_count = System::events().len();
+        crate::Pallet::<Test>::do_keeper_rebate(&acc(7), CrankClass::DecisionCritical);
+        assert_eq!(System::events().len(), event_count);
+        assert_eq!(rebate_payouts().len(), 5);
+    });
+}
+
+#[test]
+fn shrunken_budget_alarms_low_then_exhausted_and_latches_rebates() {
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            100 * USDC
+        ));
+        KeeperBudgetEpoch::set(100 * USDC);
+        KeeperRebate::set(20 * USDC);
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::Keeper, 100 * USDC);
+
+        crate::Pallet::<Test>::do_keeper_rebate(&acc(7), CrankClass::DecisionCritical);
+        System::reset_events();
+
+        // A governance shrink makes already-spent capacity effectively
+        // exhausted. The mandatory 80% alarm is emitted first.
+        KeeperBudgetEpoch::set(10 * USDC);
+        KeeperRebate::set(USDC);
+        crate::Pallet::<Test>::do_keeper_rebate(&acc(7), CrankClass::DecisionCritical);
+        assert_eq!(
+            System::events()
+                .into_iter()
+                .map(|record| record.event)
+                .collect::<Vec<_>>(),
+            vec![
+                RuntimeEvent::Treasury(Event::KeeperBudgetLow { remaining: 0 }),
+                RuntimeEvent::Treasury(Event::KeeperBudgetExhausted {
+                    epoch: 0,
+                    spent: 20 * USDC,
+                }),
+            ]
+        );
+
+        // Restoring budget headroom and retaining the smaller rebate parameter
+        // cannot reopen the meter after its per-epoch exhaustion latch fired.
+        KeeperBudgetEpoch::set(100 * USDC);
+        crate::Pallet::<Test>::do_keeper_rebate(&acc(7), CrankClass::DecisionCritical);
+        assert_eq!(rebate_payouts().len(), 1);
+        assert_eq!(Treasury::treasury().keeper_meter.spent, 20 * USDC);
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
+#[test]
+fn successful_coretime_renewal_self_rebates_the_keeper_once() {
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            100 * USDC
+        ));
+        KeeperBudgetEpoch::set(100 * USDC);
+        KeeperRebate::set(10 * USDC);
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::Keeper, 100 * USDC);
+        assert_ok!(crate::Pallet::<Test>::note_coretime_renewal_quote(
+            77,
+            100_000 * USDC
+        ));
+
+        assert_ok!(Treasury::execute_coretime_renewal(
+            RuntimeOrigin::signed(acc(7)),
+            77
+        ));
+
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 10 * USDC, PayoutLine::Keeper)]
+        );
+        assert_eq!(Treasury::treasury().keeper_meter.general_spent, 10 * USDC);
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
 mod renewal_dispatch_seam {
     use super::*;
     use crate as pallet_futarchy_treasury;
@@ -345,6 +540,14 @@ mod renewal_dispatch_seam {
         fn inflation_cap_bps() -> u32 {
             futarchy_treasury_core::ISS_INFLATION_CAP_BPS
         }
+
+        fn keeper_budget_epoch() -> u128 {
+            futarchy_treasury_core::KEEPER_BUDGET_EPOCH
+        }
+
+        fn keeper_rebate() -> u128 {
+            0
+        }
     }
 
     std::thread_local! {
@@ -377,6 +580,7 @@ mod renewal_dispatch_seam {
         type Params = DispatchParams;
         type CurrentEpoch = CurrentEpoch;
         type RenewalDispatch = RecordingRenewalDispatch;
+        type RebatePayout = ();
         type WeightInfo = ();
         #[cfg(feature = "runtime-benchmarks")]
         type BenchmarkHelper = DispatchBenchmarkHelper;
@@ -878,6 +1082,41 @@ fn error_paths_bad_duration_and_stream_not_claimable() {
 // ---- try_state (15 §1) ------------------------------------------------------
 
 #[test]
+fn try_state_reconciles_rebate_lines_against_real_custody_pots() {
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            50 * USDC
+        ));
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Oracle,
+            30 * USDC
+        ));
+        // Funding the internal ledger is not a custody transfer. The mismatch
+        // is deliberately loud until the follow-up sync mechanism is built.
+        assert!(matches!(
+            crate::Pallet::<Test>::do_try_state(),
+            Err(sp_runtime::TryRuntimeError::Other(
+                "treasury: KEEPER line exceeds real USDC custody pot"
+            ))
+        ));
+
+        set_rebate_pot_balance(PayoutLine::Keeper, 50 * USDC);
+        assert!(matches!(
+            crate::Pallet::<Test>::do_try_state(),
+            Err(sp_runtime::TryRuntimeError::Other(
+                "treasury: ORACLE line exceeds real USDC custody pot"
+            ))
+        ));
+
+        set_rebate_pot_balance(PayoutLine::Oracle, 30 * USDC);
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
+#[test]
 fn try_state_holds_after_ops_and_catches_a_broken_stream() {
     funded_ext().execute_with(|| {
         assert_ok!(Treasury::open_stream(
@@ -888,6 +1127,17 @@ fn try_state_holds_after_ops_and_catches_a_broken_stream() {
             0,
             100
         ));
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+
+        // Corrupt the keeper meter's tranche relation and confirm its standing
+        // invariant is enforced independently of the mutable live budget.
+        let mut t = crate::Pallet::<Test>::treasury();
+        t.keeper_meter.spent = 1;
+        t.keeper_meter.general_spent = 2;
+        crate::Pallet::<Test>::seed(&t);
+        assert!(crate::Pallet::<Test>::do_try_state().is_err());
+        t.keeper_meter.general_spent = 1;
+        crate::Pallet::<Test>::seed(&t);
         assert_ok!(crate::Pallet::<Test>::do_try_state());
 
         // Corrupt a stream (claimed > total) and confirm try_state rejects it.

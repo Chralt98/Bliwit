@@ -51,6 +51,17 @@ if [[ ${#i24_existing[@]} -gt 0 ]]; then
   fi
 fi
 
+# Off-chain keeper reference implementation (B9): a separate cargo workspace so
+# subxt's dependency tree cannot perturb the runtime workspace's `=`-exact pins.
+if [[ -d keeper ]]; then
+  (
+    cd keeper
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets --locked -- -D warnings
+    cargo test --workspace --locked
+  )
+fi
+
 if [[ -d reference-model/tests ]]; then
   PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
 fi

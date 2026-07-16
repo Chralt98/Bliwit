@@ -8,7 +8,7 @@ use crate::{mock::*, BaselineMarketOf, ClosedAt, Error, Event, Markets};
 use frame_support::{assert_err, assert_noop, assert_ok, traits::fungibles::Inspect};
 use frame_system::RawOrigin;
 use futarchy_primitives::{
-    Balance, Branch, MarketId, PositionId, PositionKind, ScalarSide, TradeSide,
+    keeper::CrankClass, Balance, Branch, MarketId, PositionId, PositionKind, ScalarSide, TradeSide,
 };
 use market_core::{BookKind, MarketBook, MarketPhase, MarketState, MIN_TRADE};
 use pallet_conditional_ledger::core_ledger::{baseline, position, LedgerState};
@@ -819,6 +819,65 @@ fn crank_observe_records_on_grid_then_noops_within_interval() {
         assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
         assert_eq!(Markets::<Test>::get(MARKET_ID), Some(before));
         assert_eq!(observed(&market_events()), 1);
+        assert_try_state();
+    });
+}
+
+#[test]
+fn crank_observe_rebates_once_per_recorded_observation_with_the_window_class() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        RecordKeeperRebates::set(true);
+
+        DecisionWindowMarkets::set(vec![MARKET_ID]);
+        System::set_block_number(ObsInterval::get());
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(BOB, CrankClass::DecisionCritical)]
+        );
+
+        // A too-early retry is a successful pure no-op and must not drain the
+        // keeper budget. An error path likewise earns nothing.
+        System::set_block_number(ObsInterval::get() + ObsInterval::get() / 2);
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        assert_noop!(Market::crank_observe(signed(BOB), 999), E::UnknownMarket);
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![(BOB, CrankClass::DecisionCritical)]
+        );
+
+        DecisionWindowMarkets::set(Vec::new());
+        System::set_block_number(ObsInterval::get() * 2);
+        assert_ok!(Market::crank_observe(signed(CHARLIE), MARKET_ID));
+        assert_eq!(
+            KeeperRebates::get(),
+            vec![
+                (BOB, CrankClass::DecisionCritical),
+                (CHARLIE, CrankClass::General),
+            ]
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn reap_rebates_only_after_a_book_is_actually_reaped() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(5);
+        assert_ok!(Market::close(signed(MARKET_ADMIN), MARKET_ID));
+        RecordKeeperRebates::set(true);
+
+        System::set_block_number(5 + MarketArchiveDelay::get() - 1);
+        assert_noop!(Market::reap(signed(BOB), MARKET_ID), E::NotReapable);
+        assert!(KeeperRebates::get().is_empty());
+
+        System::set_block_number(5 + MarketArchiveDelay::get());
+        assert_ok!(Market::reap(signed(BOB), MARKET_ID));
+        assert_eq!(KeeperRebates::get(), vec![(BOB, CrankClass::General)]);
         assert_try_state();
     });
 }

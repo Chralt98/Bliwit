@@ -69,6 +69,7 @@ pub mod pallet {
     };
     use frame_system::pallet_prelude::*;
     use futarchy_primitives::{
+        keeper::{CrankClass, KeeperRebateSink},
         kernel, Balance, Branch, EpochId, FixedU64, GateType, MetricSpecVersion, PositionId,
         PositionKind, ProposalId, ScalarSide,
     };
@@ -150,6 +151,9 @@ pub mod pallet {
         /// escrow and held deposits (03 §1).
         #[pallet::constant]
         type PalletId: Get<PalletId>;
+
+        /// Fail-soft keeper rebate sink (08 §6). It must never affect a crank.
+        type KeeperRebate: KeeperRebateSink<Self::AccountId>;
 
         /// Benchmarked weights.
         type WeightInfo: WeightInfo;
@@ -750,16 +754,26 @@ pub mod pallet {
         #[pallet::call_index(21)]
         #[pallet::weight(T::WeightInfo::sweep_dust())]
         pub fn sweep_dust(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
-            ensure_signed(origin)?;
-            Self::do_sweep_proposal(pid)
+            let who = ensure_signed(origin)?;
+            let advanced = Self::do_sweep_proposal(pid)?;
+            if advanced {
+                // B5 recalibrates this weight for the rebate sink's treasury writes.
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            Ok(())
         }
 
         /// 03 §5.4. Keeper crank for Baseline vaults.
         #[pallet::call_index(22)]
         #[pallet::weight(T::WeightInfo::sweep_dust_baseline())]
         pub fn sweep_dust_baseline(origin: OriginFor<T>, epoch: EpochId) -> DispatchResult {
-            ensure_signed(origin)?;
-            Self::do_sweep_baseline(epoch)
+            let who = ensure_signed(origin)?;
+            let advanced = Self::do_sweep_baseline(epoch)?;
+            if advanced {
+                // B5 recalibrates this weight for the rebate sink's treasury writes.
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            Ok(())
         }
     }
 
@@ -1383,7 +1397,7 @@ pub mod pallet {
             terminal_at.saturating_add(T::ArchiveDelay::get())
         }
 
-        fn do_sweep_proposal(pid: ProposalId) -> DispatchResult {
+        fn do_sweep_proposal(pid: ProposalId) -> Result<bool, DispatchError> {
             let terminal_at = VaultTerminalAt::<T>::get(pid).ok_or(Error::<T>::ReapNotDue)?;
             ensure!(
                 frame_system::Pallet::<T>::block_number() >= Self::reap_eligible_at(terminal_at),
@@ -1422,10 +1436,10 @@ pub mod pallet {
                 VaultTerminalAt::<T>::remove(pid);
                 Self::deposit_event(Event::VaultReaped { pid, residue });
             }
-            Ok(())
+            Ok(drained > 0 || fully_drained)
         }
 
-        fn do_sweep_baseline(epoch: EpochId) -> DispatchResult {
+        fn do_sweep_baseline(epoch: EpochId) -> Result<bool, DispatchError> {
             let terminal_at = BaselineTerminalAt::<T>::get(epoch).ok_or(Error::<T>::ReapNotDue)?;
             ensure!(
                 frame_system::Pallet::<T>::block_number() >= Self::reap_eligible_at(terminal_at),
@@ -1464,7 +1478,7 @@ pub mod pallet {
                 BaselineTerminalAt::<T>::remove(epoch);
                 Self::deposit_event(Event::BaselineVaultReaped { epoch, residue });
             }
-            Ok(())
+            Ok(drained > 0 || fully_drained)
         }
 
         /// Reap one `Positions` entry: drop it, decrement its instrument total, and

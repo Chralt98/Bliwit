@@ -8,7 +8,10 @@ use crate::{
     W_A as CORE_W_A, W_P as CORE_W_P,
 };
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
-use futarchy_primitives::{EpochId, FixedU64, MetricSpecVersion, ProposalId};
+use futarchy_primitives::{
+    keeper::{CrankClass, KeeperRebateSink},
+    EpochId, FixedU64, MetricSpecVersion, ProposalId,
+};
 use parity_scale_codec::{Decode, Encode};
 use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
@@ -131,6 +134,38 @@ parameter_types! {
     pub static DailyInputsByVersion: Vec<(MetricSpecVersion, Vec<ComponentValue>)> = Vec::new();
     pub static IncidentInput: FixedU64 = FixedU64(ONE);
     pub static LedgerFailure: Option<LedgerCall> = None;
+    pub static RecordKeeperRebates: bool = false;
+}
+
+pub struct KeeperRebates;
+
+impl KeeperRebates {
+    const KEY: &'static [u8] = b":test:welfare:keeper-rebates";
+
+    pub fn get() -> Vec<(AccountId32, CrankClass)> {
+        sp_io::storage::get(Self::KEY)
+            .and_then(|encoded| {
+                let mut input: &[u8] = encoded.as_ref();
+                Vec::<(AccountId32, CrankClass)>::decode(&mut input).ok()
+            })
+            .unwrap_or_default()
+    }
+
+    fn push(who: AccountId32, class: CrankClass) {
+        let mut rebates = Self::get();
+        rebates.push((who, class));
+        sp_io::storage::set(Self::KEY, &rebates.encode());
+    }
+}
+
+pub struct TestKeeperRebate;
+
+impl KeeperRebateSink<AccountId32> for TestKeeperRebate {
+    fn rebate(who: &AccountId32, class: CrankClass) {
+        if RecordKeeperRebates::get() {
+            KeeperRebates::push(who.clone(), class);
+        }
+    }
 }
 
 pub struct LedgerCalls;
@@ -268,6 +303,7 @@ impl pallet_welfare::Config for Test {
     type MetricInputs = TestMetricInputs;
     type Ledger = TestLedger;
     type CurrentEpoch = CurrentEpochValue;
+    type KeeperRebate = TestKeeperRebate;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;
@@ -297,6 +333,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     DailyInputsByVersion::set(Vec::new());
     IncidentInput::set(FixedU64(ONE));
     LedgerFailure::set(None);
+    RecordKeeperRebates::set(false);
 
     let storage = RuntimeGenesisConfig {
         system: Default::default(),

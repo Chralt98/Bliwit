@@ -193,6 +193,7 @@ pub mod pallet {
     };
     use frame_system::pallet_prelude::*;
     use futarchy_primitives::{
+        keeper::{CrankClass, KeeperRebateSink},
         DispatchOutcomeCode, ExecutionRecord, RejectReason, INTEGRATION_CONTRACT_VERSION,
     };
     use parity_scale_codec::{Compact, Decode, DecodeWithMemTracking, Encode};
@@ -217,6 +218,8 @@ pub mod pallet {
         type ReleaseChannel: ReleaseChannelWriter;
         type RatifyOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type Dispatcher: BatchDispatcher<Self::RuntimeCall>;
+        /// Fail-soft keeper rebate sink (08 §6). It must never affect a crank.
+        type KeeperRebate: KeeperRebateSink<Self::AccountId>;
         /// Runtime-assembly bound for candidate Wasm. This is intentionally
         /// distinct from the 64 KiB proposal-call batch bound.
         #[pallet::constant]
@@ -489,8 +492,13 @@ pub mod pallet {
         #[pallet::call_index(0)]
         #[pallet::weight(T::WeightInfo::execute(MAX_CALLS_BOUND))]
         pub fn execute(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
-            let _ = ensure_signed(origin)?;
-            with_storage_layer(|| Self::do_execute(pid))
+            let who = ensure_signed(origin)?;
+            let result = with_storage_layer(|| Self::do_execute(pid));
+            if result.is_ok() && !Queue::<T>::contains_key(pid) {
+                // B5 recalibrates this weight for the rebate sink's treasury writes.
+                T::KeeperRebate::rebate(&who, CrankClass::General);
+            }
+            result
         }
 
         /// Permissionless second phase of the authorized-upgrade flow.

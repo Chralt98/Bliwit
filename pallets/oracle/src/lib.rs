@@ -146,10 +146,19 @@ pub trait ReportingContext {
 /// the Asset Hub program. Infallible by design: a failed or missing send simply
 /// leaves the probe pending until the fail-static timeout (07 §8, I-24).
 pub trait ProbeDispatch {
+    /// Whether this runtime binding can actually send the probe program.
+    fn live() -> bool {
+        true
+    }
+
     fn probe_due(query_id: u64);
 }
 
 impl ProbeDispatch for () {
+    fn live() -> bool {
+        false
+    }
+
     fn probe_due(_: u64) {}
 }
 
@@ -168,7 +177,10 @@ pub mod pallet {
     use frame_support::pallet_prelude::*;
     use frame_support::traits::EnsureOrigin;
     use frame_system::pallet_prelude::*;
-    use futarchy_primitives::{Balance, FixedU64, H256};
+    use futarchy_primitives::{
+        keeper::{CrankClass, KeeperRebateSink},
+        Balance, FixedU64, H256,
+    };
     use sp_runtime::{traits::SaturatedConversion, TryRuntimeError};
 
     /// The in-code storage version of this pallet.
@@ -204,6 +216,10 @@ pub mod pallet {
         /// Runtime XCM adapter invoked only after a fresh reserve probe commits
         /// (07 §8; B4/B1a). The pallet remains XCM-free by construction.
         type ProbeDispatch: ProbeDispatch;
+
+        /// Infallible, fail-soft rebate sink for useful oracle cranks (07 §13,
+        /// 08 §6.3). Oracle work is paid from the separate ORACLE budget line.
+        type KeeperRebate: KeeperRebateSink<Self::AccountId>;
 
         /// Origin construction for benchmarking (see [`BenchmarkHelper`]).
         #[cfg(feature = "runtime-benchmarks")]
@@ -563,13 +579,17 @@ pub mod pallet {
             spec_version: MetricSpecVersion,
             proof: BoundedVec<u8, ConstU32<MAX_PROOF_BYTES_BOUND>>,
         ) -> DispatchResult {
-            let prover: [u8; 32] = ensure_signed(origin)?.into();
+            let who = ensure_signed(origin)?;
+            let prover: [u8; 32] = who.clone().into();
             let key = RoundKey {
                 component,
                 epoch,
                 spec_version,
             };
-            Self::mutate_core(|o| o.recompute_proof(prover, key, proof.as_slice()))
+            Self::mutate_core(|o| o.recompute_proof(prover, key, proof.as_slice()))?;
+            // B5 recalibrates this weight for the post-commit rebate write/payout.
+            T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
+            Ok(())
         }
 
         /// `oracle.register_watchtower` — permissionless-with-stake entry,
@@ -595,14 +615,18 @@ pub mod pallet {
             round: u8,
             report_hash: H256,
         ) -> DispatchResult {
-            let who: [u8; 32] = ensure_signed(origin)?.into();
+            let who = ensure_signed(origin)?;
+            let raw_who: [u8; 32] = who.clone().into();
             let now = Self::now();
             let key = RoundKey {
                 component,
                 epoch,
                 spec_version,
             };
-            Self::mutate_core(|o| o.ack_observed(who, now, key, round, report_hash))
+            Self::mutate_core(|o| o.ack_observed(raw_who, now, key, round, report_hash))?;
+            // B5 recalibrates this weight for the post-commit rebate write/payout.
+            T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
+            Ok(())
         }
 
         /// `oracle.crank_round_close(batch)` — permissionless bounded crank that
@@ -611,10 +635,16 @@ pub mod pallet {
         #[pallet::call_index(7)]
         #[pallet::weight(T::WeightInfo::crank_round_close(T::MaxRoundCloseBatch::get()))]
         pub fn crank_round_close(origin: OriginFor<T>, batch: u32) -> DispatchResult {
-            ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
             let now = Self::now();
             let batch = batch.min(T::MaxRoundCloseBatch::get()) as usize;
-            Self::mutate_core(|o| o.crank_round_close(now, batch))
+            let progressed =
+                Self::mutate_core_with_rebate_progress(|o| o.crank_round_close(now, batch))?;
+            if progressed {
+                // B5 recalibrates this weight for the post-commit rebate write/payout.
+                T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
+            }
+            Ok(())
         }
 
         /// `oracle.crank_reserve_probe` — permissionless probe crank: first counts
@@ -626,9 +656,10 @@ pub mod pallet {
         #[pallet::call_index(8)]
         #[pallet::weight(T::WeightInfo::crank_reserve_probe())]
         pub fn crank_reserve_probe(origin: OriginFor<T>) -> DispatchResult {
-            ensure_signed(origin)?;
+            let who = ensure_signed(origin)?;
             let now = Self::now();
             let mut fresh_query_id = None;
+            let mut folded_timeout = false;
             Self::mutate_core(|o| {
                 let mut folded = false;
                 if let Some(since) = o.reserve_health.pending_since {
@@ -637,6 +668,7 @@ pub mod pallet {
                         // never healthy (07 §8) — count it before sending anew.
                         o.crank_probe_timeout(now)?;
                         folded = true;
+                        folded_timeout = true;
                     }
                 }
                 // Send the next probe only when the interval has elapsed. If it
@@ -657,8 +689,15 @@ pub mod pallet {
                     Err(CoreError::ProbeTooEarly)
                 }
             })?;
-            if let Some(query_id) = fresh_query_id {
-                T::ProbeDispatch::probe_due(query_id);
+            let dispatch_live = T::ProbeDispatch::live();
+            if dispatch_live {
+                if let Some(query_id) = fresh_query_id {
+                    T::ProbeDispatch::probe_due(query_id);
+                }
+            }
+            if dispatch_live && (fresh_query_id.is_some() || folded_timeout) {
+                // B5 recalibrates this weight for the post-commit rebate write/payout.
+                T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
             }
             Ok(())
         }
@@ -816,6 +855,8 @@ pub mod pallet {
         }
 
         /// Reap a settled value at cohort settlement (07 §13; A8/B1a wiring).
+        /// This is an internal sibling-pallet seam, not a Signed extrinsic, so it
+        /// deliberately carries no keeper rebate.
         pub fn reap_component(component: MetricId, epoch: EpochId, version: MetricSpecVersion) {
             ComponentValues::<T>::remove((component, epoch, version));
         }
@@ -860,12 +901,30 @@ pub mod pallet {
         /// On `Err` nothing is written (both because we return before `persist`
         /// and because FRAME rolls the dispatch back — G-1 status quo).
         fn mutate_core(op: impl FnOnce(&mut Oracle) -> Result<(), CoreError>) -> DispatchResult {
+            Self::mutate_core_with_rebate_progress(op).map(|_| ())
+        }
+
+        /// Hydrate → run → persist and report whether a round advanced through
+        /// settlement, escalation, or its latch-once window extension. The
+        /// result is returned only after storage/events commit, so no-op/error
+        /// calls cannot earn rebates.
+        fn mutate_core_with_rebate_progress(
+            op: impl FnOnce(&mut Oracle) -> Result<(), CoreError>,
+        ) -> Result<bool, DispatchError> {
             let before = Self::load();
             let mut oracle = before.clone();
             op(&mut oracle).map_err(Self::map_core_error)?;
+            let rebate_progress = oracle.events.iter().any(|event| {
+                matches!(
+                    event,
+                    CoreEvent::RoundEscalated { .. }
+                        | CoreEvent::ComponentSettled { .. }
+                        | CoreEvent::WindowExtended { .. }
+                )
+            });
             Self::persist(&before, &oracle);
             Self::deposit_core_events(core::mem::take(&mut oracle.events));
-            Ok(())
+            Ok(rebate_progress)
         }
 
         /// Write only what changed between `before` and `after` (minimal storage
