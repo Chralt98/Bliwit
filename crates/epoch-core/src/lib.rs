@@ -5,18 +5,16 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use conditional_ledger_core::{LedgerOrigin, LedgerState};
 use futarchy_primitives::phase_offsets;
 use futarchy_primitives::{
     Branch, CohortSummary, DecisionOutcome, EpochId, EpochPhase, EpochStatusView, FixedU64,
-    GateType, MetricSpecVersion, ProposalClass, ProposalId, ProposalState, RejectReason, H256,
+    MetricSpecVersion, ProposalClass, ProposalId, ProposalState, RejectReason, H256,
 };
 // Single-homed in `futarchy-primitives` (02 §2; 05 §1.2 frozen layout); re-exported
 // so the historical `epoch_core::{MarketSet, Proposal}` path keeps resolving.
 pub use futarchy_primitives::{Balance, BlockNumber, MarketSet, Proposal};
-use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
-use welfare_core::WelfareState;
 
 macro_rules! ensure {
     ($cond:expr, $err:expr $(,)?) => {
@@ -27,30 +25,234 @@ macro_rules! ensure {
 }
 
 pub const DEFAULT_EPOCH_LENGTH: BlockNumber = 302_400;
-pub const MIN_EPOCH_LENGTH: BlockNumber = 201_600;
+pub const MIN_EPOCH_LENGTH: BlockNumber = futarchy_primitives::kernel::MIN_EPOCH_LENGTH_BLOCKS;
 pub const PHASE_DENOM: BlockNumber = futarchy_primitives::phase_offsets::DENOMINATOR;
-pub const MAX_INTAKE_QUEUE: usize = 64;
-pub const MAX_LIVE_PROPOSALS: usize = 32;
-pub const MAX_ACTIVE_PER_EPOCH: usize = 5;
-pub const MAX_NON_TERMINAL_COHORTS: usize = 4;
-pub const RECENT_COHORTS: usize = 32;
-pub const MAX_RESOURCES_PER_PROPOSAL: usize = 8;
-pub const DECISION_WINDOW: BlockNumber = 43_200;
+pub const MAX_INTAKE_QUEUE: usize = futarchy_primitives::bounds::INTAKE_QUEUE as usize;
+pub const MAX_LIVE_PROPOSALS: usize = futarchy_primitives::bounds::MAX_LIVE_PROPOSALS as usize;
+pub const MAX_ACTIVE_PER_EPOCH: usize = futarchy_primitives::bounds::MAX_COHORT_PROPOSALS as usize;
+pub const MAX_NON_TERMINAL_COHORTS: usize =
+    futarchy_primitives::bounds::MAX_NON_TERMINAL_COHORTS as usize;
+pub const RECENT_COHORTS: usize = futarchy_primitives::bounds::RECENT_COHORT_SUMMARIES as usize;
+pub const MAX_RESOURCES_PER_PROPOSAL: usize =
+    futarchy_primitives::bounds::MAX_RESOURCES_PER_PROPOSAL as usize;
 pub const DECISION_EXTENSION: BlockNumber = futarchy_primitives::kernel::DEC_EXTENSION_BLOCKS;
-pub const TRAILING_WINDOW: BlockNumber = 14_400;
 pub const STALE_EPOCH_BOUND: BlockNumber = futarchy_primitives::kernel::STALE_EPOCH_BOUND_BLOCKS;
 pub const ONE: u64 = 1_000_000_000;
-pub const ONE_PP: u64 = 10_000_000;
-/// Convergence bound `dec.delta_max` — default 0.05 (13 §2; 05 §5.2/§5.4 step 8).
-/// The spot-vs-window TWAP gap must sit within this for both decision books.
-pub const DELTA_MAX_1E9: u64 = 50_000_000;
-pub const SF: u128 = 3;
-/// Gate-veto absolute ruin cap `gate.p_max` — default 0.05 (13 §2; kernel ceiling
-/// 0.10). The ADOPT gate-book TWAP above this vetoes before any welfare upside
-/// is weighed (05 §5.1).
-pub const GATE_P_MAX_1E9: u64 = 50_000_000;
-/// Gate-veto relative margin `gate.eps` — default 0.02 (13 §2; 05 §5.1).
-pub const GATE_EPS_1E9: u64 = 20_000_000;
+pub const ONE_PP: u64 = futarchy_primitives::kernel::RERUN_HURDLE_BUMP_1E9;
+
+/// Live 13 §1 epoch/decision parameters captured at one dispatch boundary.
+/// The FRAME shell rebuilds this value from `pallet-constitution::Params`; the
+/// defaults keep the frame-free oracle behavior deterministic in standalone
+/// tests. Kernel bounds remain single-homed in `futarchy-primitives`.
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+pub struct EpochParams {
+    pub epoch_length: BlockNumber,
+    pub epoch_slots: u8,
+    pub horizon_k: u8,
+    pub decision_window: BlockNumber,
+    pub trailing_window: BlockNumber,
+    pub delta: [FixedU64; 5],
+    pub sigma: [FixedU64; 5],
+    pub delta_max: FixedU64,
+    pub coverage_pct: u8,
+    pub v_min: [Balance; 5],
+    pub gate_v_min: [Balance; 5],
+    pub gate_p_max: [FixedU64; 2],
+    pub gate_eps: [FixedU64; 2],
+    pub gate_nb_coverage_pct: u8,
+    pub gate_nb_convergence: FixedU64,
+    pub timelock: [BlockNumber; 5],
+    pub grace: [BlockNumber; 5],
+    pub intake_max_per_account: u8,
+}
+
+impl EpochParams {
+    pub const DEFAULT: Self = Self {
+        epoch_length: DEFAULT_EPOCH_LENGTH,
+        epoch_slots: 5,
+        horizon_k: 2,
+        decision_window: 43_200,
+        trailing_window: 14_400,
+        delta: [
+            FixedU64(15_000_000),
+            FixedU64(25_000_000),
+            FixedU64(40_000_000),
+            FixedU64(60_000_000),
+            FixedU64(ONE),
+        ],
+        sigma: [
+            FixedU64(3_000_000),
+            FixedU64(5_000_000),
+            FixedU64(8_000_000),
+            FixedU64(10_000_000),
+            FixedU64(0),
+        ],
+        delta_max: FixedU64(50_000_000),
+        coverage_pct: 95,
+        v_min: [
+            100_000_000_000,
+            250_000_000_000,
+            600_000_000_000,
+            1_200_000_000_000,
+            0,
+        ],
+        gate_v_min: [
+            10_000_000_000,
+            25_000_000_000,
+            60_000_000_000,
+            120_000_000_000,
+            0,
+        ],
+        gate_p_max: [FixedU64(50_000_000), FixedU64(50_000_000)],
+        gate_eps: [FixedU64(20_000_000), FixedU64(20_000_000)],
+        gate_nb_coverage_pct: 98,
+        gate_nb_convergence: FixedU64(10_000_000),
+        timelock: [28_800, 43_200, 100_800, 201_600, 0],
+        grace: [201_600, 201_600, 201_600, 201_600, 0],
+        intake_max_per_account: 4,
+    };
+
+    pub fn validate(&self) -> Result<(), Error> {
+        ensure!(
+            self.epoch_length >= MIN_EPOCH_LENGTH
+                && self.epoch_length % PHASE_DENOM == 0
+                && self.decision_window
+                    <= self
+                        .epoch_length
+                        .saturating_mul(phase_offsets::DECIDE_NUM - phase_offsets::TRADE_NUM)
+                        / PHASE_DENOM
+                && self.trailing_window <= self.decision_window
+                && self.epoch_slots > 0
+                && usize::from(self.epoch_slots) <= MAX_ACTIVE_PER_EPOCH
+                && self.horizon_k > 0
+                && usize::from(self.horizon_k) <= MAX_NON_TERMINAL_COHORTS
+                && self.intake_max_per_account > 0
+                && usize::from(self.intake_max_per_account) <= MAX_INTAKE_QUEUE
+                && self.coverage_pct <= 100
+                && self.gate_nb_coverage_pct <= 100
+                && self.delta_max.0 <= ONE
+                && self.gate_nb_convergence.0 <= ONE
+                && self
+                    .gate_p_max
+                    .iter()
+                    .all(|v| { v.0 <= futarchy_primitives::kernel::GATE_P_MAX_CEILING_1E9 })
+                && self.delta.iter().all(|v| v.0 <= ONE)
+                && self.sigma.iter().all(|v| v.0 <= ONE),
+            Error::BadParams
+        );
+        Ok(())
+    }
+
+    pub fn class_delta(&self, class: ProposalClass) -> u64 {
+        let [param, treasury, code, meta, constitutional] = self.delta;
+        match class {
+            ProposalClass::Param => param.0,
+            ProposalClass::Treasury => treasury.0,
+            ProposalClass::Code => code.0,
+            ProposalClass::Meta => meta.0,
+            ProposalClass::Constitutional => constitutional.0,
+        }
+    }
+
+    pub fn class_sigma(&self, class: ProposalClass) -> u64 {
+        let [param, treasury, code, meta, constitutional] = self.sigma;
+        match class {
+            ProposalClass::Param => param.0,
+            ProposalClass::Treasury => treasury.0,
+            ProposalClass::Code => code.0,
+            ProposalClass::Meta => meta.0,
+            ProposalClass::Constitutional => constitutional.0,
+        }
+    }
+
+    pub fn class_timelock(&self, class: ProposalClass) -> BlockNumber {
+        let [param, treasury, code, meta, constitutional] = self.timelock;
+        match class {
+            ProposalClass::Param => param,
+            ProposalClass::Treasury => treasury,
+            ProposalClass::Code => code,
+            ProposalClass::Meta => meta,
+            ProposalClass::Constitutional => constitutional,
+        }
+    }
+
+    pub fn class_grace(&self, class: ProposalClass) -> BlockNumber {
+        let [param, treasury, code, meta, constitutional] = self.grace;
+        match class {
+            ProposalClass::Param => param,
+            ProposalClass::Treasury => treasury,
+            ProposalClass::Code => code,
+            ProposalClass::Meta => meta,
+            ProposalClass::Constitutional => constitutional,
+        }
+    }
+}
+
+impl Default for EpochParams {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Minimal resolve/void/create seam. Production implementations call the
+/// conditional-ledger pallet; standalone tests use an in-memory implementation.
+pub trait LedgerOps<AccountId> {
+    fn create_vault(&mut self, pid: ProposalId, spec: MetricSpecVersion) -> Result<(), Error>;
+    fn resolve(&mut self, pid: ProposalId, branch: Branch) -> Result<(), Error>;
+    fn void(&mut self, pid: ProposalId) -> Result<(), Error>;
+}
+
+/// Welfare is the sole settlement authority (05 §6). This seam deliberately
+/// exposes no ledger settlement method, preventing epoch from double-settling.
+pub trait WelfareOps {
+    fn compute_settlement(
+        &mut self,
+        cohort_epoch: EpochId,
+        spec: MetricSpecVersion,
+        target: SettlementTarget,
+    ) -> Result<FixedU64, Error>;
+}
+
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+pub enum SettlementTarget {
+    Proposal {
+        pid: ProposalId,
+        has_gate_books: bool,
+    },
+    Baseline,
+}
+
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+pub struct DecisionGuards {
+    pub preimage_ok: bool,
+    pub resource_locks_held: bool,
+    pub process_hold: bool,
+}
+
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+pub struct TickInputs {
+    pub static_checks_pass: bool,
+    pub active_metric_spec_version: MetricSpecVersion,
+    pub markets: Option<MarketSet>,
+    pub review_window_closed: bool,
+    pub queue_reject_reason: Option<RejectReason>,
+    pub retry_exhausted: bool,
+    pub process_hold: bool,
+}
+
+impl Default for TickInputs {
+    fn default() -> Self {
+        Self {
+            static_checks_pass: true,
+            active_metric_spec_version: 1,
+            markets: None,
+            review_window_closed: false,
+            queue_reject_reason: None,
+            retry_exhausted: false,
+            process_hold: false,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub enum Origin {
@@ -59,9 +261,21 @@ pub enum Origin {
     Root,
     GuardianHold,
     ExecutionGuard,
+    VoidAuthority,
 }
 
-#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
 pub enum CohortStatus {
     Measuring { until_epoch: EpochId },
     AwaitingOracle,
@@ -98,6 +312,8 @@ pub struct DecisionInputs {
     pub accept_spot: FixedU64,
     pub reject_spot: FixedU64,
     pub welfare_grade_ok: bool,
+    pub baseline_grade_ok: bool,
+    pub previous_settled_baseline_twap: Option<FixedU64>,
     pub welfare_second_insufficient: bool,
     pub gate_grade_ok: bool,
     pub gate_twaps: Option<[FixedU64; 4]>,
@@ -148,6 +364,13 @@ pub enum Event {
         epoch: EpochId,
         s: FixedU64,
     },
+    CohortVoided {
+        epoch: EpochId,
+    },
+    BaselineCarried {
+        pid: ProposalId,
+        epoch: EpochId,
+    },
     ProposalForceRejected {
         pid: ProposalId,
         reason: RejectReason,
@@ -174,7 +397,9 @@ pub enum Error {
     TooManyCohorts,
     TooManyCohortProposals,
     BadEpochLength,
+    BadParams,
     BadDecisionInput,
+    BatchTooLarge,
     ArithmeticOverflow,
     Ledger,
     Welfare,
@@ -193,6 +418,22 @@ pub struct EpochState<AccountId> {
     pub dead_man_armed: bool,
     pub ledger_frozen: bool,
     pub phase_flags: u32,
+    /// Monotone proposal-id high-water mark; reaping never decreases it.
+    pub proposal_id_high_water: ProposalId,
+    /// Internal T6 rollover counters, bounded by the intake queue.
+    pub rollovers: Vec<(ProposalId, u8)>,
+    /// First block at which the dead-man pause was observed.
+    pub dead_man_paused_at: Option<BlockNumber>,
+    /// The one full proposal-free recovery epoch, if active.
+    pub recovery_epoch: Option<EpochId>,
+    /// High-water snapshot for proposals affected by a stale-clock incident.
+    pub stale_epoch_cutoff: Option<ProposalId>,
+    /// `(last carried epoch, consecutive carried epochs)` for Baseline fallback.
+    pub baseline_carry: Option<(EpochId, u8)>,
+    /// Live `epoch.horizon_k`, refreshed from Params by the shell before any
+    /// transition that may create a cohort. It is not persisted independently;
+    /// the resulting `until_epoch` is creation-time frozen in `CohortInfo`.
+    pub horizon_k: u8,
 }
 
 impl<AccountId: Clone + Eq> EpochState<AccountId> {
@@ -215,6 +456,13 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             dead_man_armed: false,
             ledger_frozen: false,
             phase_flags: 0,
+            proposal_id_high_water: 0,
+            rollovers: Vec::new(),
+            dead_man_paused_at: None,
+            recovery_epoch: None,
+            stale_epoch_cutoff: None,
+            baseline_carry: None,
+            horizon_k: EpochParams::DEFAULT.horizon_k,
         }
     }
     pub fn status_view(&self) -> EpochStatusView {
@@ -232,12 +480,13 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         &mut self,
         origin: Origin,
         length: BlockNumber,
+        params: &EpochParams,
     ) -> Result<(), Error> {
         ensure!(matches!(origin, Origin::Root), Error::BadOrigin);
         ensure!(
             length >= MIN_EPOCH_LENGTH
                 && length % PHASE_DENOM == 0
-                && DECISION_WINDOW
+                && params.decision_window
                     <= length.saturating_mul(phase_offsets::DECIDE_NUM - phase_offsets::TRADE_NUM)
                         / PHASE_DENOM,
             Error::BadEpochLength
@@ -246,7 +495,48 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         Ok(())
     }
     pub fn sync_phase(&mut self, now: BlockNumber) {
-        while now
+        if self.epoch.length == 0 || self.epoch.next_length == 0 {
+            return;
+        }
+        // Latch before phase catch-up can erase the persisted overdue boundary.
+        // Every clock-sync caller therefore observes T20 stale status, even when
+        // `decide` or `settle_cohort` is invoked before `tick`.
+        self.latch_stale_epoch(now);
+        if self.dead_man_armed {
+            self.dead_man_paused_at.get_or_insert(now);
+            return;
+        }
+        if let Some(paused_at) = self.dead_man_paused_at.take() {
+            let paused_for = now.saturating_sub(paused_at);
+            for proposal in &mut self.proposals {
+                if matches!(
+                    proposal.state,
+                    ProposalState::Trading | ProposalState::Extended
+                ) {
+                    proposal.decide_at = proposal.decide_at.saturating_add(paused_for);
+                }
+                if matches!(
+                    proposal.state,
+                    ProposalState::Queued
+                        | ProposalState::Suspended
+                        | ProposalState::FailedExecuted
+                ) {
+                    proposal.maturity = proposal.maturity.map(|at| at.saturating_add(paused_for));
+                    proposal.grace_end = proposal.grace_end.map(|at| at.saturating_add(paused_for));
+                }
+            }
+            // Recovery is a fresh, full, proposal-free logical epoch (05 §4.8).
+            self.epoch.index = self.epoch.index.saturating_add(1);
+            self.epoch.epoch_start_block = now;
+            self.epoch.length = self.epoch.next_length;
+            self.epoch.phase = EpochPhase::Intake;
+            self.epoch.phase_start_block = now;
+            self.recovery_epoch = Some(self.epoch.index);
+            return;
+        }
+        let recovery_epoch = self.recovery_epoch;
+        let mut crossed_epoch = false;
+        if now
             >= self
                 .epoch
                 .epoch_start_block
@@ -258,36 +548,98 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                 .saturating_add(self.epoch.length);
             self.epoch.index = self.epoch.index.saturating_add(1);
             self.epoch.length = self.epoch.next_length;
+            crossed_epoch = true;
+
+            // After the first boundary the already-staged `next_length` applies
+            // uniformly. Arithmetic catch-up keeps a long-idle permissionless
+            // crank constant-time (I-20) instead of looping once per missed epoch.
+            let additional = now.saturating_sub(self.epoch.epoch_start_block) / self.epoch.length;
+            self.epoch.epoch_start_block = self
+                .epoch
+                .epoch_start_block
+                .saturating_add(self.epoch.length.saturating_mul(additional));
+            self.epoch.index = self.epoch.index.saturating_add(additional);
+        }
+        if crossed_epoch && recovery_epoch.is_some_and(|epoch| self.epoch.index > epoch) {
+            self.recovery_epoch = None;
+            // Preserve pre-pause intake without stranding it on an epoch that can
+            // never qualify. A late post-recovery crank carries directly to the
+            // current epoch rather than replaying missed logical epochs.
+            let current_epoch = self.epoch.index;
+            for proposal in &mut self.proposals {
+                if proposal.state == ProposalState::Submitted
+                    && self.intake_queue.contains(&proposal.id)
+                {
+                    proposal.epoch = current_epoch;
+                }
+            }
         }
         let phase = phase_at(
             now.saturating_sub(self.epoch.epoch_start_block),
             self.epoch.length,
         );
-        if phase != self.epoch.phase {
+        if phase != self.epoch.phase || crossed_epoch {
             self.epoch.phase = phase;
             self.epoch.phase_start_block = self.phase_start(phase);
         }
     }
-    pub fn submit(&mut self, origin: Origin, proposal: Proposal<AccountId>) -> Result<(), Error> {
+    pub fn submit(
+        &mut self,
+        origin: Origin,
+        proposal: Proposal<AccountId>,
+        params: &EpochParams,
+    ) -> Result<(), Error> {
         ensure!(matches!(origin, Origin::Signed), Error::BadOrigin);
+        params.validate()?;
+        self.horizon_k = params.horizon_k;
+        ensure!(
+            !self.dead_man_armed
+                && self.dead_man_paused_at.is_none()
+                && self.recovery_epoch.is_none(),
+            Error::BadPhase
+        );
         ensure!(self.epoch.phase == EpochPhase::Intake, Error::BadPhase);
         ensure!(
             self.intake_queue.len() < MAX_INTAKE_QUEUE,
             Error::IntakeFull
         );
+        // Bound the current-epoch admission ledger as well as the live queue.
+        // Withdrawn/cancelled entries remain counted until the next epoch so
+        // churn cannot create unbounded history or reset account limits.
         ensure!(
-            self.proposals.len() < MAX_LIVE_PROPOSALS,
-            Error::TooManyLiveProposals
+            self.proposals
+                .iter()
+                .filter(|existing| existing.epoch == self.epoch.index)
+                .count()
+                < MAX_INTAKE_QUEUE,
+            Error::IntakeFull
+        );
+        ensure!(
+            self.proposals
+                .iter()
+                .filter(|p| is_live_state(p.state))
+                .count()
+                < MAX_LIVE_PROPOSALS,
+            Error::TooManyLiveProposals,
+        );
+        ensure!(
+            self.proposals
+                .iter()
+                .filter(|p| p.epoch == self.epoch.index && p.proposer == proposal.proposer)
+                .count()
+                < usize::from(params.intake_max_per_account),
+            Error::IntakeFull,
         );
         ensure!(
             proposal.resources.len() <= MAX_RESOURCES_PER_PROPOSAL,
             Error::TooManyResources
         );
         ensure!(
-            self.proposals.iter().all(|p| p.id != proposal.id),
+            proposal.id > self.proposal_id_high_water,
             Error::DuplicateProposal
         );
         ensure!(proposal.state == ProposalState::Submitted, Error::BadState);
+        self.proposal_id_high_water = proposal.id;
         self.intake_queue.push(proposal.id);
         self.events.push(Event::ProposalSubmitted(proposal.id));
         self.proposals.push(proposal);
@@ -308,6 +660,7 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         );
         p.state = ProposalState::Cancelled;
         self.intake_queue.retain(|x| *x != pid);
+        self.rollovers.retain(|(proposal, _)| *proposal != pid);
         self.events.push(Event::ProposalWithdrawn(pid));
         Ok(())
     }
@@ -316,9 +669,18 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         origin: Origin,
         pid: ProposalId,
         static_checks_pass: bool,
+        active_metric_spec_version: MetricSpecVersion,
+        params: &EpochParams,
     ) -> Result<(), Error> {
         ensure!(matches!(origin, Origin::Keeper), Error::BadOrigin);
+        params.validate()?;
+        self.horizon_k = params.horizon_k;
+        ensure!(self.recovery_epoch.is_none(), Error::BadPhase);
         ensure!(self.epoch.phase == EpochPhase::Qualify, Error::BadPhase);
+        ensure!(
+            self.proposal(pid)?.epoch == self.epoch.index,
+            Error::BadState
+        );
         let active = self
             .proposals
             .iter()
@@ -345,17 +707,31 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             self.cancel(pid, RejectReason::ConstitutionViolation, true)?;
             return Ok(());
         }
-        if active >= MAX_ACTIVE_PER_EPOCH {
-            self.proposal_mut(pid)?.state = ProposalState::Submitted;
-            self.events.push(Event::ProposalDeferred(pid));
-            return Ok(());
+        let remaining = usize::from(params.epoch_slots).saturating_sub(active);
+        // On-chain ranking prevents a lower-bond candidate from stealing a slot.
+        // Static eligibility arrives one bounded keeper item at a time, so the
+        // keeper must still crank candidates in this same deterministic order;
+        // a future batch-screening transition can remove that residual obligation.
+        let mut candidates = self
+            .proposals
+            .iter()
+            .filter(|proposal| {
+                proposal.epoch == self.epoch.index && proposal.state == ProposalState::Submitted
+            })
+            .map(|proposal| (proposal.bond, proposal.id))
+            .collect::<Vec<_>>();
+        candidates.sort_by(|(bond_a, pid_a), (bond_b, pid_b)| {
+            bond_b.cmp(bond_a).then_with(|| pid_a.cmp(pid_b))
+        });
+        if remaining == 0 || !candidates.iter().take(remaining).any(|(_, id)| *id == pid) {
+            return self.rollover_or_refund(pid);
         }
-        ensure!(
-            resources
-                .iter()
-                .all(|r| self.resource_locks.iter().all(|(l, _)| l != r)),
-            Error::LockConflict
-        );
+        if !resources
+            .iter()
+            .all(|r| self.resource_locks.iter().all(|(l, _)| l != r))
+        {
+            return self.rollover_or_refund(pid);
+        }
         let decide_at = self.epoch.epoch_start_block.saturating_add(
             self.epoch.length.saturating_mul(phase_offsets::DECIDE_NUM) / PHASE_DENOM,
         );
@@ -364,19 +740,22 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         }
         let p = self.proposal_mut(pid)?;
         p.state = ProposalState::Qualified;
+        p.metric_spec = active_metric_spec_version;
         p.decide_at = decide_at;
         self.intake_queue.retain(|x| *x != pid);
+        self.rollovers.retain(|(proposal, _)| *proposal != pid);
         self.events.push(Event::ProposalQualified(pid));
         Ok(())
     }
-    pub fn open_markets(
+    pub fn open_markets<L: LedgerOps<AccountId>>(
         &mut self,
         origin: Origin,
-        ledger: &mut LedgerState<AccountId>,
+        ledger: &mut L,
         pid: ProposalId,
         markets: MarketSet,
     ) -> Result<(), Error> {
         ensure!(matches!(origin, Origin::Keeper), Error::BadOrigin);
+        ensure!(self.recovery_epoch.is_none(), Error::BadPhase);
         ensure!(self.epoch.phase == EpochPhase::Seed, Error::BadPhase);
         let spec = self.proposal(pid)?.metric_spec;
         let p = self.proposal_mut(pid)?;
@@ -384,25 +763,78 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             p.state == ProposalState::Qualified || p.state == ProposalState::Rerun,
             Error::BadState
         );
+        ensure!(
+            !matches!(p.class, ProposalClass::Code | ProposalClass::Meta)
+                || markets.gates.is_some(),
+            Error::BadDecisionInput
+        );
         if p.state == ProposalState::Qualified {
-            ledger.create_vault(pid, spec).map_err(|_| Error::Ledger)?;
+            ledger.create_vault(pid, spec)?;
         }
         p.markets = Some(markets);
         p.state = ProposalState::Trading;
         self.events.push(Event::MarketsOpened(pid));
         Ok(())
     }
-    pub fn decide(
+    /// Compatibility entry point for standalone callers. The production shell
+    /// uses [`Self::decide_with`] so the step-1/2 guards and live Params are
+    /// injected from trusted runtime seams.
+    pub fn decide<L: LedgerOps<AccountId>>(
         &mut self,
         origin: Origin,
-        ledger: &mut LedgerState<AccountId>,
+        ledger: &mut L,
         pid: ProposalId,
         now: BlockNumber,
         input: DecisionInputs,
     ) -> Result<DecisionOutcome, Error> {
+        self.decide_with(
+            origin,
+            ledger,
+            pid,
+            now,
+            input,
+            DecisionGuards {
+                preimage_ok: true,
+                resource_locks_held: true,
+                process_hold: false,
+            },
+            &EpochParams::DEFAULT,
+        )
+    }
+
+    pub fn decide_with<L: LedgerOps<AccountId>>(
+        &mut self,
+        origin: Origin,
+        ledger: &mut L,
+        pid: ProposalId,
+        now: BlockNumber,
+        input: DecisionInputs,
+        guards: DecisionGuards,
+        params: &EpochParams,
+    ) -> Result<DecisionOutcome, Error> {
         ensure!(matches!(origin, Origin::Keeper), Error::BadOrigin);
+        params.validate()?;
+        self.horizon_k = params.horizon_k;
+        self.epoch.next_length = params.epoch_length;
+        self.sync_phase(now);
+        ensure!(self.recovery_epoch.is_none(), Error::BadPhase);
+        if self.stale_process_hold(pid) {
+            self.force_reject_process_hold(Origin::Keeper, ledger, pid)?;
+            return Ok(DecisionOutcome::Reject(RejectReason::ProcessHold));
+        }
+        if self.force_reject_if_cohort_void(ledger, pid)? {
+            return Ok(DecisionOutcome::Reject(RejectReason::ProcessHold));
+        }
         ensure!(now >= self.proposal(pid)?.decide_at, Error::BadPhase);
-        let out = self.decide_engine(pid, &input)?;
+        let out = if !guards.preimage_ok {
+            DecisionOutcome::Reject(RejectReason::ConstitutionViolation)
+        } else if !guards.resource_locks_held {
+            DecisionOutcome::Reject(RejectReason::ResourceConflict)
+        } else if guards.process_hold || self.dead_man_armed || self.ledger_frozen {
+            DecisionOutcome::Reject(RejectReason::ProcessHold)
+        } else {
+            self.decide_engine(pid, &input, params)?
+        };
         match out {
             DecisionOutcome::Extend => {
                 let p = self.proposal_mut(pid)?;
@@ -416,13 +848,19 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                 self.events.push(Event::DecisionExtended(pid));
             }
             DecisionOutcome::Adopt => {
-                let maturity = now.saturating_add(timelock(self.proposal(pid)?.class));
+                let maturity = now
+                    .checked_add(params.class_timelock(self.proposal(pid)?.class))
+                    .ok_or(Error::ArithmeticOverflow)?;
                 let payload_hash;
                 {
                     let p = self.proposal_mut(pid)?;
                     p.state = ProposalState::Queued;
                     p.maturity = Some(maturity);
-                    p.grace_end = Some(maturity.saturating_add(grace(p.class)));
+                    p.grace_end = Some(
+                        maturity
+                            .checked_add(params.class_grace(p.class))
+                            .ok_or(Error::ArithmeticOverflow)?,
+                    );
                     p.decision = Some(out);
                     payload_hash = p.payload_hash;
                 }
@@ -468,6 +906,7 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         now: BlockNumber,
     ) -> Result<(), Error> {
         ensure!(matches!(origin, Origin::Keeper), Error::BadOrigin);
+        ensure!(self.recovery_epoch.is_none(), Error::BadPhase);
         ensure!(self.epoch.phase == EpochPhase::Seed, Error::BadPhase);
         let p = self.proposal_mut(pid)?;
         ensure!(p.state == ProposalState::Rerun, Error::BadState);
@@ -478,10 +917,10 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         self.events.push(Event::RerunOpened(pid));
         Ok(())
     }
-    pub fn force_reject_process_hold(
+    pub fn force_reject_process_hold<L: LedgerOps<AccountId>>(
         &mut self,
         origin: Origin,
-        ledger: &mut LedgerState<AccountId>,
+        ledger: &mut L,
         pid: ProposalId,
     ) -> Result<(), Error> {
         ensure!(
@@ -501,37 +940,91 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             return Ok(());
         }
         if self.proposal(pid)?.markets.is_some() {
-            ledger
-                .void(LedgerOrigin::ResolveAuthority, pid)
-                .map_err(|_| Error::Ledger)?;
+            ledger.void(pid)?;
         }
         self.proposal_mut(pid)?.state = ProposalState::Rejected(RejectReason::ProcessHold);
-        self.events.push(Event::ProposalRejected {
-            pid,
-            reason: RejectReason::ProcessHold,
-        });
+        self.intake_queue.retain(|queued| *queued != pid);
+        self.rollovers.retain(|(proposal, _)| *proposal != pid);
+        self.resource_locks.retain(|(_, owner)| *owner != pid);
         self.events.push(Event::ProposalForceRejected {
             pid,
             reason: RejectReason::ProcessHold,
         });
+        self.maybe_clear_stale_epoch();
         Ok(())
     }
-    pub fn mark_executed(
+
+    /// PB-ORACLE-VOID cohort path (06 §6.2; 05 §7).
+    pub fn void_cohort<L: LedgerOps<AccountId>>(
         &mut self,
         origin: Origin,
-        ledger: &mut LedgerState<AccountId>,
+        ledger: &mut L,
+        epoch: EpochId,
+    ) -> Result<(), Error> {
+        ensure!(matches!(origin, Origin::VoidAuthority), Error::BadOrigin);
+        let idx = self
+            .cohorts
+            .iter()
+            .position(|cohort| cohort.epoch == epoch)
+            .ok_or(Error::BadState)?;
+        ensure!(
+            matches!(self.cohorts[idx].status, CohortStatus::Measuring { .. }),
+            Error::BadState
+        );
+        let proposals = self.cohorts[idx].proposals.clone();
+        for pid in &proposals {
+            ledger.void(*pid)?;
+        }
+        for pid in proposals {
+            let proposal = self.proposal_mut(pid)?;
+            proposal.state = ProposalState::Rejected(RejectReason::ProcessHold);
+            proposal.decision = Some(DecisionOutcome::Reject(RejectReason::ProcessHold));
+            self.intake_queue.retain(|queued| *queued != pid);
+            self.rollovers.retain(|(proposal, _)| *proposal != pid);
+            self.resource_locks.retain(|(_, owner)| *owner != pid);
+            self.events.push(Event::ProposalForceRejected {
+                pid,
+                reason: RejectReason::ProcessHold,
+            });
+        }
+        self.cohorts[idx].status = CohortStatus::Void;
+        self.events.push(Event::CohortVoided { epoch });
+        Ok(())
+    }
+    /// T24 guardian review callback.
+    pub fn veto_upheld<L: LedgerOps<AccountId>>(
+        &mut self,
+        origin: Origin,
+        ledger: &mut L,
+        pid: ProposalId,
+    ) -> Result<(), Error> {
+        ensure!(matches!(origin, Origin::GuardianHold), Error::BadOrigin);
+        ensure!(
+            self.proposal(pid)?.state == ProposalState::Suspended,
+            Error::BadState
+        );
+        self.reject_to_measurement(ledger, pid, RejectReason::VetoUpheldByReview)
+    }
+
+    pub fn mark_executed<L: LedgerOps<AccountId>>(
+        &mut self,
+        origin: Origin,
+        ledger: &mut L,
         pid: ProposalId,
     ) -> Result<(), Error> {
         ensure!(matches!(origin, Origin::ExecutionGuard), Error::BadOrigin);
-        let p = self.proposal_mut(pid)?;
         ensure!(
-            p.state == ProposalState::Queued || p.state == ProposalState::FailedExecuted,
+            matches!(
+                self.proposal(pid)?.state,
+                ProposalState::Queued | ProposalState::FailedExecuted
+            ),
             Error::BadState
         );
-        p.state = ProposalState::Executed;
-        ledger
-            .resolve(LedgerOrigin::ResolveAuthority, pid, Branch::Accept)
-            .map_err(|_| Error::Ledger)?;
+        if self.force_reject_if_cohort_void(ledger, pid)? {
+            return Ok(());
+        }
+        self.ensure_can_start_measurement(pid)?;
+        ledger.resolve(pid, Branch::Accept)?;
         self.start_measurement(pid)
     }
     /// T18 (05 §2.1): `execute` dispatched but the payload atomically reverted.
@@ -554,10 +1047,10 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
     /// proposal is measured as **executed-with-failure** — vault `resolve(Accept)`
     /// (the adopted world, including the failure's consequences, is what W
     /// measures) then `FailedExecuted → Measuring`.
-    pub fn retry_exhausted_to_measurement(
+    pub fn retry_exhausted_to_measurement<L: LedgerOps<AccountId>>(
         &mut self,
         origin: Origin,
-        ledger: &mut LedgerState<AccountId>,
+        ledger: &mut L,
         pid: ProposalId,
     ) -> Result<(), Error> {
         ensure!(matches!(origin, Origin::ExecutionGuard), Error::BadOrigin);
@@ -565,15 +1058,17 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             self.proposal(pid)?.state == ProposalState::FailedExecuted,
             Error::BadState
         );
-        ledger
-            .resolve(LedgerOrigin::ResolveAuthority, pid, Branch::Accept)
-            .map_err(|_| Error::Ledger)?;
+        if self.force_reject_if_cohort_void(ledger, pid)? {
+            return Ok(());
+        }
+        self.ensure_can_start_measurement(pid)?;
+        ledger.resolve(pid, Branch::Accept)?;
         self.start_measurement(pid)
     }
-    pub fn expire_or_stale_queue(
+    pub fn expire_or_stale_queue<L: LedgerOps<AccountId>>(
         &mut self,
         origin: Origin,
-        ledger: &mut LedgerState<AccountId>,
+        ledger: &mut L,
         pid: ProposalId,
         reason: Option<RejectReason>,
     ) -> Result<(), Error> {
@@ -583,6 +1078,9 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         );
         let p = self.proposal_mut(pid)?;
         ensure!(p.state == ProposalState::Queued, Error::BadState);
+        if self.force_reject_if_cohort_void(ledger, pid)? {
+            return Ok(());
+        }
         match reason {
             // 09 §1.2(3)/(4)/(5): dispatch-time rejections that carry a live vault
             // to the REJECT branch (T16/T21). `AttestationMissing` is the §1.2(5)
@@ -594,24 +1092,111 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                 | RejectReason::AttestationMissing),
             ) => self.reject_to_measurement(ledger, pid, r),
             None => {
+                self.ensure_can_start_measurement(pid)?;
+                ledger.resolve(pid, Branch::Reject)?;
                 self.proposal_mut(pid)?.state = ProposalState::Expired;
                 self.events.push(Event::MandateExpired(pid));
-                self.reject_branch_measurement(ledger, pid)
+                self.start_measurement(pid)
             }
             _ => Err(Error::BadDecisionInput),
         }
     }
-    pub fn settle_cohort(
+
+    /// One bounded keeper item. The FRAME call supplies at most `TickBatch`
+    /// items and invokes this method once per item after synchronizing trusted
+    /// seam inputs. Re-invocation in a state with no due transition is benign.
+    pub fn tick<L: LedgerOps<AccountId>>(
         &mut self,
         origin: Origin,
-        welfare: &mut WelfareState,
-        ledger: &mut LedgerState<AccountId>,
+        ledger: &mut L,
+        pid: ProposalId,
+        now: BlockNumber,
+        input: TickInputs,
+        params: &EpochParams,
+    ) -> Result<(), Error> {
+        ensure!(matches!(origin, Origin::Keeper), Error::BadOrigin);
+        params.validate()?;
+        self.horizon_k = params.horizon_k;
+        self.epoch.next_length = params.epoch_length;
+        self.sync_phase(now);
+
+        let state = self.proposal(pid)?.state;
+        if (input.process_hold || self.stale_process_hold(pid))
+            && !matches!(
+                state,
+                ProposalState::Executed
+                    | ProposalState::Measuring
+                    | ProposalState::Settled
+                    | ProposalState::Cancelled
+                    | ProposalState::Expired
+                    | ProposalState::Rejected(_)
+            )
+        {
+            return self.force_reject_process_hold(Origin::Keeper, ledger, pid);
+        }
+
+        if self.recovery_epoch.is_some() {
+            self.events.push(Event::NoOp);
+            return Ok(());
+        }
+
+        match state {
+            ProposalState::Submitted
+                if self.epoch.phase == EpochPhase::Qualify
+                    && self.proposal(pid)?.epoch == self.epoch.index =>
+            {
+                self.qualify(
+                    Origin::Keeper,
+                    pid,
+                    input.static_checks_pass,
+                    input.active_metric_spec_version,
+                    params,
+                )
+            }
+            ProposalState::Qualified if self.epoch.phase == EpochPhase::Seed => {
+                let markets = input.markets.ok_or(Error::BadDecisionInput)?;
+                self.open_markets(Origin::Keeper, ledger, pid, markets)
+            }
+            ProposalState::Suspended if input.review_window_closed => {
+                self.schedule_rerun(Origin::Keeper, pid)
+            }
+            ProposalState::Rerun if self.epoch.phase == EpochPhase::Seed => {
+                self.open_rerun(Origin::Keeper, pid, now)
+            }
+            ProposalState::Queued => {
+                if let Some(reason) = input.queue_reject_reason {
+                    self.expire_or_stale_queue(Origin::Keeper, ledger, pid, Some(reason))
+                } else if self.proposal(pid)?.grace_end.is_some_and(|end| now > end) {
+                    self.expire_or_stale_queue(Origin::Keeper, ledger, pid, None)
+                } else {
+                    self.events.push(Event::NoOp);
+                    Ok(())
+                }
+            }
+            ProposalState::FailedExecuted if input.retry_exhausted => {
+                self.retry_exhausted_to_measurement(Origin::ExecutionGuard, ledger, pid)
+            }
+            _ => {
+                self.events.push(Event::NoOp);
+                Ok(())
+            }
+        }
+    }
+    pub fn settle_cohort<W: WelfareOps>(
+        &mut self,
+        origin: Origin,
+        welfare: &mut W,
         epoch: EpochId,
-        spec: MetricSpecVersion,
+        batch: u32,
         baseline_twap: FixedU64,
         now: BlockNumber,
     ) -> Result<FixedU64, Error> {
         ensure!(matches!(origin, Origin::Keeper), Error::BadOrigin);
+        ensure!(
+            batch > 0 && batch <= futarchy_primitives::kernel::SETTLE_COHORT_MAX_ITEMS,
+            Error::BatchTooLarge
+        );
+        ensure!(self.recovery_epoch.is_none(), Error::BadPhase);
         ensure!(
             self.epoch.phase == EpochPhase::Housekeeping,
             Error::BadPhase
@@ -621,62 +1206,114 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             .iter()
             .position(|c| c.epoch == epoch)
             .ok_or(Error::BadState)?;
-        let score = welfare
-            .compute_settlement(epoch, spec)
-            .map_err(|_| Error::Welfare)?;
-        // 05 §4.7/§5.1/§6: the gate books settle on the daily breach flags — the
-        // Survival gate on the S floor-breach flag and the Security gate on the C
-        // floor-breach flag, set iff the flag fired on >= 1 day across the two
-        // measurement epochs e+1..e+2. Only C_onchain and S drive these; no attested
-        // value can flip a gate outcome.
-        let f1 = welfare.gate_breach(epoch.saturating_add(1));
-        let f2 = welfare.gate_breach(epoch.saturating_add(2));
-        let survival_breached = f1.s_breached || f2.s_breached;
-        let security_breached = f1.c_breached || f2.c_breached;
-        for pid in self.cohorts[idx].proposals.clone() {
-            if let Some(p) = self.proposals.iter_mut().find(|p| p.id == pid) {
-                ledger
-                    .settle_scalar(LedgerOrigin::SettleAuthority, pid, score)
-                    .map_err(|_| Error::Ledger)?;
-                // Gate books exist only for gate-bearing proposals (05 §5.1:
-                // CODE | META | TREASURY > 1% NAV). Settle those on the breach
-                // flags and propagate failures rather than masking them; a
-                // gateless proposal has no gate market to settle.
-                if requires_gate(p.class, p.ask) {
-                    ledger
-                        .settle_gate(
-                            LedgerOrigin::SettleAuthority,
-                            pid,
-                            GateType::Survival,
-                            survival_breached,
-                        )
-                        .map_err(|_| Error::Ledger)?;
-                    ledger
-                        .settle_gate(
-                            LedgerOrigin::SettleAuthority,
-                            pid,
-                            GateType::Security,
-                            security_breached,
-                        )
-                        .map_err(|_| Error::Ledger)?;
-                }
-                p.state = ProposalState::Settled;
-                p.decision.get_or_insert(DecisionOutcome::Adopt);
+        let cohort = self.cohorts.get(idx).ok_or(Error::BadState)?;
+        let proposals = cohort.proposals.clone();
+        ensure!(!proposals.is_empty(), Error::BadState);
+        let first = proposals.first().copied().ok_or(Error::BadState)?;
+        let spec = self.proposal(first)?.metric_spec;
+        ensure!(
+            proposals
+                .iter()
+                .all(|pid| self.proposal(*pid).is_ok_and(|p| p.metric_spec == spec)),
+            Error::TryStateViolation
+        );
+        let cursor = match cohort.status {
+            CohortStatus::Measuring { until_epoch } => {
+                ensure!(
+                    self.epoch.index >= until_epoch.saturating_add(1),
+                    Error::BadState
+                );
+                0usize
             }
+            CohortStatus::AwaitingOracle => 0usize,
+            CohortStatus::Settling { cursor } => cursor as usize,
+            CohortStatus::Settled | CohortStatus::Void => return Err(Error::BadState),
+        };
+        let total = proposals.len().saturating_add(1); // one Baseline target
+        let end = cursor.saturating_add(batch as usize).min(total);
+        let mut score = None;
+        for item in cursor..end {
+            let value = if item < proposals.len() {
+                let pid = proposals.get(item).copied().ok_or(Error::BadState)?;
+                let has_gate_books = self
+                    .proposal(pid)?
+                    .markets
+                    .is_some_and(|markets| markets.gates.is_some());
+                welfare.compute_settlement(
+                    epoch,
+                    spec,
+                    SettlementTarget::Proposal {
+                        pid,
+                        has_gate_books,
+                    },
+                )?
+            } else {
+                welfare.compute_settlement(epoch, spec, SettlementTarget::Baseline)?
+            };
+            score = Some(value);
         }
-        ledger
-            .settle_baseline(LedgerOrigin::SettleAuthority, epoch, score)
-            .ok();
-        self.cohorts[idx].status = CohortStatus::Settled;
-        self.push_summary(epoch, score, baseline_twap, now)?;
-        self.events.push(Event::CohortSettled { epoch, s: score });
-        Ok(score)
+
+        if end < total {
+            self.cohorts.get_mut(idx).ok_or(Error::BadState)?.status =
+                CohortStatus::Settling { cursor: end as u32 };
+            return score.ok_or(Error::Welfare);
+        }
+
+        let final_score = score.ok_or(Error::Welfare)?;
+        for pid in &proposals {
+            let p = self.proposal_mut(*pid)?;
+            p.state = ProposalState::Settled;
+            p.decision.get_or_insert(DecisionOutcome::Adopt);
+        }
+        self.push_summary(epoch, final_score, baseline_twap, now)?;
+        self.events.push(Event::CohortSettled {
+            epoch,
+            s: final_score,
+        });
+        self.cohorts.remove(idx);
+        self.proposals.retain(|p| !proposals.contains(&p.id));
+        self.resource_locks
+            .retain(|(_, pid)| !proposals.contains(pid));
+        Ok(final_score)
     }
     pub fn try_state(&self) -> Result<(), Error> {
+        let intake = self
+            .proposals
+            .iter()
+            .filter(|p| matches!(p.state, ProposalState::Submitted | ProposalState::Screening))
+            .count();
+        let live = self
+            .proposals
+            .iter()
+            .filter(|p| is_live_state(p.state))
+            .count();
         ensure!(
-            self.proposals.len() <= MAX_LIVE_PROPOSALS
+            intake <= MAX_INTAKE_QUEUE
+                && live <= MAX_LIVE_PROPOSALS
                 && self.intake_queue.len() <= MAX_INTAKE_QUEUE
-                && self.recent.len() <= RECENT_COHORTS,
+                && self.recent.len() <= RECENT_COHORTS
+                && self.epoch.length >= MIN_EPOCH_LENGTH
+                && self.epoch.next_length >= MIN_EPOCH_LENGTH
+                && self.epoch.length % PHASE_DENOM == 0
+                && self.epoch.next_length % PHASE_DENOM == 0
+                && self.rollovers.len() <= MAX_INTAKE_QUEUE,
+            Error::TryStateViolation
+        );
+        ensure!(
+            self.proposals.iter().enumerate().all(|(i, p)| self
+                .proposals
+                .iter()
+                .take(i)
+                .all(|seen| seen.id != p.id))
+                && self.intake_queue.iter().enumerate().all(|(i, pid)| self
+                    .intake_queue
+                    .iter()
+                    .take(i)
+                    .all(|seen| seen != pid))
+                && self.intake_queue.iter().all(|pid| self
+                    .proposals
+                    .iter()
+                    .any(|p| p.id == *pid && p.state == ProposalState::Submitted)),
             Error::TryStateViolation
         );
         ensure!(
@@ -703,9 +1340,59 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                 ensure!(p.markets.is_some(), Error::TryStateViolation);
             }
         }
-        for (i, (r, pid)) in self.resource_locks.iter().enumerate() {
+        ensure!(
+            self.rollovers
+                .iter()
+                .enumerate()
+                .all(|(index, (pid, count))| {
+                    *count == 1
+                        && self
+                            .rollovers
+                            .iter()
+                            .take(index)
+                            .all(|(seen, _)| seen != pid)
+                        && self.proposals.iter().any(|proposal| {
+                            proposal.id == *pid && proposal.state == ProposalState::Submitted
+                        })
+                }),
+            Error::TryStateViolation
+        );
+        for cohort in &self.cohorts {
             ensure!(
-                self.resource_locks[..i].iter().all(|(seen, _)| seen != r)
+                cohort.proposals.len() <= MAX_ACTIVE_PER_EPOCH
+                    && cohort.proposals.iter().all(|pid| self
+                        .proposals
+                        .iter()
+                        .any(|p| p.id == *pid && p.epoch == cohort.epoch)),
+                Error::TryStateViolation
+            );
+            if let CohortStatus::Settling { cursor } = cohort.status {
+                ensure!(
+                    cursor as usize <= cohort.proposals.len().saturating_add(1),
+                    Error::TryStateViolation
+                );
+            }
+            if let Some(first) = cohort
+                .proposals
+                .first()
+                .and_then(|pid| self.proposals.iter().find(|p| p.id == *pid))
+            {
+                ensure!(
+                    cohort.proposals.iter().all(|pid| self
+                        .proposals
+                        .iter()
+                        .any(|p| p.id == *pid && p.metric_spec == first.metric_spec)),
+                    Error::TryStateViolation
+                );
+            }
+        }
+        for (i, (r, pid)) in self.resource_locks.iter().enumerate() {
+            let prior = self
+                .resource_locks
+                .get(..i)
+                .ok_or(Error::TryStateViolation)?;
+            ensure!(
+                prior.iter().all(|(seen, _)| seen != r)
                     && self.proposals.iter().any(|p| p.id == *pid),
                 Error::TryStateViolation
             );
@@ -713,65 +1400,117 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         Ok(())
     }
 
-    fn decide_engine(&self, pid: ProposalId, i: &DecisionInputs) -> Result<DecisionOutcome, Error> {
+    pub fn decide_engine(
+        &mut self,
+        pid: ProposalId,
+        i: &DecisionInputs,
+        params: &EpochParams,
+    ) -> Result<DecisionOutcome, Error> {
         let p = self.proposal(pid)?;
+        params.validate()?;
         ensure!(
             matches!(p.state, ProposalState::Trading | ProposalState::Extended),
             Error::BadState
         );
-        if self.dead_man_armed || self.ledger_frozen {
-            return Ok(DecisionOutcome::Reject(RejectReason::ProcessHold));
-        }
-        if requires_gate(p.class, p.ask) {
-            ensure!(i.gate_twaps.is_some(), Error::BadDecisionInput);
+        let class = p.class;
+        let proposal_epoch = p.epoch;
+        let rerun = p.rerun;
+        let extended = p.extended;
+        let has_gate_markets = p.markets.is_some_and(|markets| markets.gates.is_some());
+        if has_gate_markets {
             if !i.gate_grade_ok {
                 return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
             }
-            let g = i.gate_twaps.unwrap();
+            let Some([s_adopt, s_reject, c_adopt, c_reject]) = i.gate_twaps else {
+                return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
+            };
+            let [s_p_max, c_p_max] = params.gate_p_max;
+            let [s_eps, c_eps] = params.gate_eps;
             // 05 §5.1: veto iff adopt TWAP exceeds the absolute ruin cap p_max, or
             // exceeds the reject TWAP by more than the relative margin eps, for either
             // gate. Ordered before welfare — no upside overrides a veto (G-4, I-14).
-            if g[0].0 > GATE_P_MAX_1E9 || g[0].0 > g[1].0.saturating_add(GATE_EPS_1E9) {
+            if s_adopt.0 > s_p_max.0 || s_adopt.0 > s_reject.0.saturating_add(s_eps.0) {
                 return Ok(DecisionOutcome::Reject(RejectReason::GateVetoSurvival));
             }
-            if g[2].0 > GATE_P_MAX_1E9 || g[2].0 > g[3].0.saturating_add(GATE_EPS_1E9) {
+            if c_adopt.0 > c_p_max.0 || c_adopt.0 > c_reject.0.saturating_add(c_eps.0) {
                 return Ok(DecisionOutcome::Reject(RejectReason::GateVetoSecurity));
             }
+        } else if matches!(class, ProposalClass::Code | ProposalClass::Meta) {
+            return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
         }
         if !i.welfare_grade_ok {
-            return Ok(if !p.extended && !i.welfare_second_insufficient {
+            return Ok(if !extended && !i.welfare_second_insufficient {
                 DecisionOutcome::Extend
             } else {
                 DecisionOutcome::Reject(RejectReason::NotDecisionGrade)
             });
         }
-        let delta = class_delta(p.class).saturating_add(if p.rerun { ONE_PP } else { 0 });
+        let (baseline_full, baseline_trailing) = if i.baseline_grade_ok {
+            (i.baseline_full, i.baseline_trailing)
+        } else if let Some(carried) = i.previous_settled_baseline_twap {
+            let (consecutive, advances_tracker) = match self.baseline_carry {
+                Some((epoch, count)) if proposal_epoch > epoch => (
+                    if epoch.saturating_add(1) == proposal_epoch {
+                        count.saturating_add(1)
+                    } else {
+                        1
+                    },
+                    true,
+                ),
+                Some((epoch, count)) if proposal_epoch == epoch => (count, false),
+                // An older rerun neither rewinds the current streak nor inherits
+                // a future epoch's count for its own decision.
+                Some(_) => (1, false),
+                None => (1, true),
+            };
+            if advances_tracker {
+                self.baseline_carry = Some((proposal_epoch, consecutive));
+            }
+            self.events.push(Event::BaselineCarried {
+                pid,
+                epoch: proposal_epoch,
+            });
+            if has_gate_markets && consecutive >= 2 {
+                return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
+            }
+            (carried, carried)
+        } else {
+            return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
+        };
+        let delta = params
+            .class_delta(class)
+            .saturating_add(if rerun { ONE_PP } else { 0 });
         let r_eff = i
             .reject_full
             .0
-            .max(i.baseline_full.0.saturating_sub(class_sigma(p.class)));
+            .max(baseline_full.0.saturating_sub(params.class_sigma(class)));
         let full = i.accept_full.0 >= r_eff.saturating_add(delta);
-        let tail_eff = i
-            .reject_trailing
-            .0
-            .max(i.baseline_trailing.0.saturating_sub(class_sigma(p.class)));
+        let tail_eff = i.reject_trailing.0.max(
+            baseline_trailing
+                .0
+                .saturating_sub(params.class_sigma(class)),
+        );
         let tail = i.accept_trailing.0 >= tail_eff.saturating_add(delta);
-        let conv = i.accept_spot.0.abs_diff(i.accept_full.0) <= DELTA_MAX_1E9
-            && i.reject_spot.0.abs_diff(i.reject_full.0) <= DELTA_MAX_1E9;
+        let conv = i.accept_spot.0.abs_diff(i.accept_full.0) <= params.delta_max.0
+            && i.reject_spot.0.abs_diff(i.reject_full.0) <= params.delta_max.0;
         if !(full && tail && conv) {
-            return Ok(match (full != tail, p.extended, conv) {
+            return Ok(match (full != tail, extended, conv) {
                 (true, false, _) => DecisionOutcome::Extend,
                 (true, true, _) => DecisionOutcome::Reject(RejectReason::SecondExtensionFailed),
                 (false, _, true) => DecisionOutcome::Reject(RejectReason::HurdleNotMet),
                 _ => DecisionOutcome::Reject(RejectReason::ConvergenceFailed),
             });
         }
-        let attack = attack_cost_hat(i.measured_depth, i.published_flow_per_day)?;
+        let attack = attack_cost_hat(
+            i.measured_depth,
+            i.published_flow_per_day,
+            params.decision_window,
+        )?;
         let prize = i.in_cap_prize.ok_or(Error::BadDecisionInput)?;
-        if prize.saturating_mul(SF) > attack {
+        if prize.saturating_mul(futarchy_primitives::kernel::SECURITY_FACTOR) > attack {
             return Ok(DecisionOutcome::Reject(RejectReason::SecuritySizing));
         }
-        if matches!(p.class, ProposalClass::Code | ProposalClass::Meta) && !i.attestation_quorate {
+        if matches!(class, ProposalClass::Code | ProposalClass::Meta) && !i.attestation_quorate {
             return Ok(DecisionOutcome::Reject(RejectReason::AttestationMissing));
         }
         if !i.constitution_queue_ok {
@@ -779,10 +1518,30 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         }
         Ok(DecisionOutcome::Adopt)
     }
+    fn rollover_or_refund(&mut self, pid: ProposalId) -> Result<(), Error> {
+        let rolled = self
+            .rollovers
+            .iter()
+            .find_map(|(proposal, count)| (*proposal == pid).then_some(*count))
+            .unwrap_or(0);
+        if rolled == 0 {
+            ensure!(self.rollovers.len() < MAX_INTAKE_QUEUE, Error::IntakeFull);
+            self.rollovers.push((pid, 1));
+            self.proposal_mut(pid)?.epoch = self.epoch.index.saturating_add(1);
+        } else {
+            self.proposal_mut(pid)?.state = ProposalState::Cancelled;
+            self.intake_queue.retain(|queued| *queued != pid);
+            self.rollovers.retain(|(proposal, _)| *proposal != pid);
+        }
+        self.events.push(Event::ProposalDeferred(pid));
+        Ok(())
+    }
+
     fn cancel(&mut self, pid: ProposalId, reason: RejectReason, slash: bool) -> Result<(), Error> {
         let bond = self.proposal(pid)?.bond;
         self.proposal_mut(pid)?.state = ProposalState::Cancelled;
         self.intake_queue.retain(|x| *x != pid);
+        self.rollovers.retain(|(proposal, _)| *proposal != pid);
         self.events.push(Event::ProposalCancelled { pid, reason });
         if slash {
             self.events.push(Event::IntakeSlashed {
@@ -793,36 +1552,94 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         }
         Ok(())
     }
-    fn reject_to_measurement(
+
+    /// Latch an overdue persisted phase boundary before catch-up erases the
+    /// evidence. The high-water snapshot makes later submissions immune while
+    /// bounded tick batches drain every proposal affected by the incident.
+    pub fn latch_stale_epoch(&mut self, now: BlockNumber) {
+        if self.stale_epoch_cutoff.is_none()
+            && !self.dead_man_armed
+            && self.dead_man_paused_at.is_none()
+            && self.recovery_epoch.is_none()
+            && now > self.next_boundary().saturating_add(STALE_EPOCH_BOUND)
+        {
+            self.stale_epoch_cutoff = Some(self.proposal_id_high_water);
+        }
+        self.maybe_clear_stale_epoch();
+    }
+
+    pub fn stale_process_hold(&self, pid: ProposalId) -> bool {
+        self.stale_epoch_cutoff.is_some_and(|cutoff| pid <= cutoff)
+    }
+
+    fn maybe_clear_stale_epoch(&mut self) {
+        if let Some(cutoff) = self.stale_epoch_cutoff {
+            let affected_remains = self
+                .proposals
+                .iter()
+                .any(|proposal| proposal.id <= cutoff && is_force_rejectable_state(proposal.state));
+            if !affected_remains {
+                self.stale_epoch_cutoff = None;
+            }
+        }
+    }
+    fn reject_to_measurement<L: LedgerOps<AccountId>>(
         &mut self,
-        ledger: &mut LedgerState<AccountId>,
+        ledger: &mut L,
         pid: ProposalId,
         r: RejectReason,
     ) -> Result<(), Error> {
+        if self.force_reject_if_cohort_void(ledger, pid)? {
+            return Ok(());
+        }
+        let has_markets = self.proposal(pid)?.markets.is_some();
+        if has_markets {
+            self.ensure_can_start_measurement(pid)?;
+            ledger.resolve(pid, Branch::Reject)?;
+        }
+        self.rollovers.retain(|(proposal, _)| *proposal != pid);
         self.proposal_mut(pid)?.state = ProposalState::Rejected(r);
+        self.proposal_mut(pid)?.decision = Some(DecisionOutcome::Reject(r));
         self.events.push(Event::ProposalRejected { pid, reason: r });
-        if self.proposal(pid)?.markets.is_some() {
-            self.reject_branch_measurement(ledger, pid)?;
+        if has_markets {
+            self.start_measurement(pid)?;
+        } else {
+            self.resource_locks.retain(|(_, owner)| *owner != pid);
         }
         Ok(())
     }
-    fn reject_branch_measurement(
-        &mut self,
-        ledger: &mut LedgerState<AccountId>,
-        pid: ProposalId,
-    ) -> Result<(), Error> {
-        // T21 (05 §2.1): a rejected/expired proposal whose markets were deployed
-        // resolves its vault to the REJECT branch before measurement, so the REJECT
-        // leg trades through and settle_cohort can settle a `Resolved` vault. Without
-        // this the vault stays `Open` and `settle_scalar` errors, stranding the cohort.
-        ledger
-            .resolve(LedgerOrigin::ResolveAuthority, pid, Branch::Reject)
-            .map_err(|_| Error::Ledger)?;
-        self.start_measurement(pid)
+    fn ensure_can_start_measurement(&self, pid: ProposalId) -> Result<(), Error> {
+        let epoch = self.proposal(pid)?.epoch;
+        if let Some(cohort) = self.cohorts.iter().find(|cohort| cohort.epoch == epoch) {
+            ensure!(
+                !matches!(cohort.status, CohortStatus::Settled | CohortStatus::Void),
+                Error::BadState
+            );
+            ensure!(
+                cohort.proposals.contains(&pid) || cohort.proposals.len() < MAX_ACTIVE_PER_EPOCH,
+                Error::TooManyCohortProposals
+            );
+        } else {
+            ensure!(
+                self.cohorts
+                    .iter()
+                    .filter(|cohort| {
+                        !matches!(cohort.status, CohortStatus::Settled | CohortStatus::Void)
+                    })
+                    .count()
+                    < MAX_NON_TERMINAL_COHORTS,
+                Error::TooManyCohorts
+            );
+        }
+        Ok(())
     }
     fn start_measurement(&mut self, pid: ProposalId) -> Result<(), Error> {
         let epoch = self.proposal(pid)?.epoch;
         if let Some(c) = self.cohorts.iter_mut().find(|c| c.epoch == epoch) {
+            ensure!(
+                !matches!(c.status, CohortStatus::Settled | CohortStatus::Void),
+                Error::BadState
+            );
             if !c.proposals.contains(&pid) {
                 ensure!(
                     c.proposals.len() < MAX_ACTIVE_PER_EPOCH,
@@ -843,14 +1660,35 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                 epoch,
                 proposals: alloc::vec![pid],
                 status: CohortStatus::Measuring {
-                    until_epoch: epoch.saturating_add(2),
+                    until_epoch: epoch.saturating_add(self.horizon_k.into()),
                 },
             });
         }
+        self.rollovers.retain(|(proposal, _)| *proposal != pid);
         self.proposal_mut(pid)?.state = ProposalState::Measuring;
         self.events
             .push(Event::MeasurementStarted { cohort: epoch });
         Ok(())
+    }
+
+    /// A VOIDed epoch cannot accept a late proposal into its frozen cohort.
+    /// Fail closed through T20 without changing the cohort's I-16 binding.
+    fn force_reject_if_cohort_void<L: LedgerOps<AccountId>>(
+        &mut self,
+        ledger: &mut L,
+        pid: ProposalId,
+    ) -> Result<bool, Error> {
+        let epoch = self.proposal(pid)?.epoch;
+        if !self
+            .cohorts
+            .iter()
+            .any(|cohort| cohort.epoch == epoch && cohort.status == CohortStatus::Void)
+        {
+            return Ok(false);
+        }
+        self.force_reject_process_hold(Origin::Keeper, ledger, pid)?;
+        self.proposal_mut(pid)?.decision = Some(DecisionOutcome::Reject(RejectReason::ProcessHold));
+        Ok(true)
     }
     fn push_summary(
         &mut self,
@@ -905,15 +1743,27 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
     fn phase_start(&self, phase: EpochPhase) -> BlockNumber {
         self.epoch.epoch_start_block.saturating_add(match phase {
             EpochPhase::Intake => 0,
-            EpochPhase::Qualify => self.epoch.length * phase_offsets::QUALIFY_NUM / PHASE_DENOM,
-            EpochPhase::Seed => self.epoch.length * phase_offsets::SEED_NUM / PHASE_DENOM,
-            EpochPhase::Trade => self.epoch.length * phase_offsets::TRADE_NUM / PHASE_DENOM,
-            EpochPhase::Decide => self.epoch.length * phase_offsets::DECIDE_NUM / PHASE_DENOM,
+            EpochPhase::Qualify => {
+                self.epoch.length.saturating_mul(phase_offsets::QUALIFY_NUM) / PHASE_DENOM
+            }
+            EpochPhase::Seed => {
+                self.epoch.length.saturating_mul(phase_offsets::SEED_NUM) / PHASE_DENOM
+            }
+            EpochPhase::Trade => {
+                self.epoch.length.saturating_mul(phase_offsets::TRADE_NUM) / PHASE_DENOM
+            }
+            EpochPhase::Decide => {
+                self.epoch.length.saturating_mul(phase_offsets::DECIDE_NUM) / PHASE_DENOM
+            }
             EpochPhase::Review | EpochPhase::Execute => {
-                self.epoch.length * phase_offsets::DECIDE_NUM / PHASE_DENOM + 1
+                (self.epoch.length.saturating_mul(phase_offsets::DECIDE_NUM) / PHASE_DENOM)
+                    .saturating_add(1)
             }
             EpochPhase::Housekeeping => {
-                self.epoch.length * phase_offsets::HOUSEKEEPING_NUM / PHASE_DENOM
+                self.epoch
+                    .length
+                    .saturating_mul(phase_offsets::HOUSEKEEPING_NUM)
+                    / PHASE_DENOM
             }
         })
     }
@@ -925,15 +1775,15 @@ impl<AccountId: Clone + Eq> Default for EpochState<AccountId> {
 }
 
 fn phase_at(offset: BlockNumber, l: BlockNumber) -> EpochPhase {
-    if offset < l * phase_offsets::QUALIFY_NUM / PHASE_DENOM {
+    if offset < l.saturating_mul(phase_offsets::QUALIFY_NUM) / PHASE_DENOM {
         EpochPhase::Intake
-    } else if offset < l * phase_offsets::SEED_NUM / PHASE_DENOM {
+    } else if offset < l.saturating_mul(phase_offsets::SEED_NUM) / PHASE_DENOM {
         EpochPhase::Qualify
-    } else if offset < l * phase_offsets::TRADE_NUM / PHASE_DENOM {
+    } else if offset < l.saturating_mul(phase_offsets::TRADE_NUM) / PHASE_DENOM {
         EpochPhase::Seed
-    } else if offset < l * phase_offsets::DECIDE_NUM / PHASE_DENOM {
+    } else if offset < l.saturating_mul(phase_offsets::DECIDE_NUM) / PHASE_DENOM {
         EpochPhase::Trade
-    } else if offset < l * phase_offsets::HOUSEKEEPING_NUM / PHASE_DENOM {
+    } else if offset < l.saturating_mul(phase_offsets::HOUSEKEEPING_NUM) / PHASE_DENOM {
         EpochPhase::Decide
     } else {
         EpochPhase::Housekeeping
@@ -943,66 +1793,76 @@ fn phase_len(p: EpochPhase, l: BlockNumber) -> BlockNumber {
     // Phase durations = the gap to the next phase-start offset (13 §3.1).
     match p {
         EpochPhase::Intake => {
-            l * (phase_offsets::QUALIFY_NUM - phase_offsets::INTAKE_NUM) / PHASE_DENOM
+            l.saturating_mul(phase_offsets::QUALIFY_NUM - phase_offsets::INTAKE_NUM) / PHASE_DENOM
         }
         EpochPhase::Qualify | EpochPhase::Seed => l / PHASE_DENOM,
         EpochPhase::Trade => {
-            l * (phase_offsets::DECIDE_NUM - phase_offsets::TRADE_NUM) / PHASE_DENOM
+            l.saturating_mul(phase_offsets::DECIDE_NUM - phase_offsets::TRADE_NUM) / PHASE_DENOM
         }
         EpochPhase::Decide => {
-            l * (phase_offsets::HOUSEKEEPING_NUM - phase_offsets::DECIDE_NUM) / PHASE_DENOM
+            l.saturating_mul(phase_offsets::HOUSEKEEPING_NUM - phase_offsets::DECIDE_NUM)
+                / PHASE_DENOM
         }
         EpochPhase::Review | EpochPhase::Execute => 0,
         EpochPhase::Housekeeping => l / PHASE_DENOM,
     }
 }
-fn requires_gate(c: ProposalClass, ask: Balance) -> bool {
-    matches!(c, ProposalClass::Code | ProposalClass::Meta)
-        || (matches!(c, ProposalClass::Treasury) && ask > 0)
+fn is_live_state(state: ProposalState) -> bool {
+    !matches!(
+        state,
+        ProposalState::Submitted
+            | ProposalState::Screening
+            | ProposalState::Cancelled
+            | ProposalState::Settled
+            | ProposalState::Rejected(_)
+            | ProposalState::Expired
+    )
 }
-// `dec.delta` per class — the hurdle floors of the Ask-scaled schedule
-// (13 §2; 05 §5.4 step 6). PARAM/TREASURY/CODE/META = 0.015/0.025/0.040/0.060.
-// CONSTITUTIONAL is unreachable through this engine (hurdle 1.0).
-fn class_delta(c: ProposalClass) -> u64 {
-    match c {
-        ProposalClass::Param => 15_000_000,
-        ProposalClass::Treasury => 25_000_000,
-        ProposalClass::Code => 40_000_000,
-        ProposalClass::Meta => 60_000_000,
-        ProposalClass::Constitutional => ONE,
-    }
+fn is_force_rejectable_state(state: ProposalState) -> bool {
+    !matches!(
+        state,
+        ProposalState::Executed
+            | ProposalState::Measuring
+            | ProposalState::Settled
+            | ProposalState::Cancelled
+            | ProposalState::Expired
+            | ProposalState::Rejected(_)
+    )
 }
-// `dec.sigma` per class — the reject-leg baseline slack (13 §2; 05 §5.3/§5.4).
-// PARAM/TREASURY/CODE/META = 0.003/0.005/0.008/0.010.
-fn class_sigma(c: ProposalClass) -> u64 {
-    match c {
-        ProposalClass::Param => 3_000_000,
-        ProposalClass::Treasury => 5_000_000,
-        ProposalClass::Code => 8_000_000,
-        ProposalClass::Meta => 10_000_000,
-        ProposalClass::Constitutional => 0,
-    }
-}
-fn timelock(c: ProposalClass) -> BlockNumber {
-    match c {
-        ProposalClass::Param => 14_400,
-        ProposalClass::Treasury => 43_200,
-        ProposalClass::Code | ProposalClass::Meta => 86_400,
-        ProposalClass::Constitutional => 0,
-    }
-}
-fn grace(c: ProposalClass) -> BlockNumber {
-    match c {
-        ProposalClass::Param => 43_200,
-        ProposalClass::Treasury => 86_400,
-        ProposalClass::Code | ProposalClass::Meta => 201_600,
-        ProposalClass::Constitutional => 0,
-    }
-}
-fn attack_cost_hat(depth: Balance, flow: Option<Balance>) -> Result<Balance, Error> {
+fn attack_cost_hat(
+    depth: Balance,
+    flow: Option<Balance>,
+    decision_window: BlockNumber,
+) -> Result<Balance, Error> {
     let l_half = depth.checked_div(2).ok_or(Error::ArithmeticOverflow)?;
     let f = flow.map(|x| x.min(l_half)).unwrap_or(l_half);
-    f.checked_mul(3).ok_or(Error::ArithmeticOverflow)
+    let t_dec = (decision_window / futarchy_primitives::kernel::BLOCKS_PER_DAY).max(1);
+    f.checked_mul(t_dec.into()).ok_or(Error::ArithmeticOverflow)
+}
+
+// Backwards-compatible in-memory adapter for `execution-guard-core`. Production
+// `pallet-epoch` never depends on the conditional-ledger pallet; B1a supplies a
+// Config seam implementation instead.
+impl<AccountId: Clone + Eq> LedgerOps<AccountId>
+    for conditional_ledger_core::LedgerState<AccountId>
+{
+    fn create_vault(&mut self, pid: ProposalId, spec: MetricSpecVersion) -> Result<(), Error> {
+        self.create_vault(pid, spec).map_err(|_| Error::Ledger)
+    }
+
+    fn resolve(&mut self, pid: ProposalId, branch: Branch) -> Result<(), Error> {
+        self.resolve(
+            conditional_ledger_core::LedgerOrigin::ResolveAuthority,
+            pid,
+            branch,
+        )
+        .map_err(|_| Error::Ledger)
+    }
+
+    fn void(&mut self, pid: ProposalId) -> Result<(), Error> {
+        self.void(conditional_ledger_core::LedgerOrigin::ResolveAuthority, pid)
+            .map_err(|_| Error::Ledger)
+    }
 }
 
 #[cfg(feature = "runtime-benchmarks")]
@@ -1018,9 +1878,8 @@ pub mod benchmarking {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use conditional_ledger_core::Event as LedgerEvent;
+    use conditional_ledger_core::{Event as LedgerEvent, LedgerState};
     use futarchy_primitives::BoundedVec;
-    use welfare_core::{GateBreachFlags, Snapshot};
     fn acct(x: u8) -> [u8; 32] {
         [x; 32]
     }
@@ -1060,6 +1919,8 @@ mod tests {
             accept_spot: FixedU64(600_000_000),
             reject_spot: FixedU64(500_000_000),
             welfare_grade_ok: true,
+            baseline_grade_ok: true,
+            previous_settled_baseline_twap: None,
             welfare_second_insufficient: false,
             gate_grade_ok: true,
             gate_twaps: None,
@@ -1077,7 +1938,8 @@ mod tests {
         assert_eq!(s.epoch.phase, EpochPhase::Intake);
         s.sync_phase(43_200);
         assert_eq!(s.epoch.phase, EpochPhase::Qualify);
-        s.set_next_epoch_length(Origin::Root, 201_600).unwrap();
+        s.set_next_epoch_length(Origin::Root, 201_600, &EpochParams::DEFAULT)
+            .unwrap();
         s.sync_phase(302_400);
         assert_eq!(s.epoch.length, 201_600);
     }
@@ -1085,10 +1947,15 @@ mod tests {
     fn submit_qualify_decide_adopt() {
         let mut s = EpochState::new();
         let mut ledger = LedgerState::<[u8; 32]>::new();
-        s.submit(Origin::Signed, prop(1, ProposalState::Submitted))
-            .unwrap();
+        s.submit(
+            Origin::Signed,
+            prop(1, ProposalState::Submitted),
+            &EpochParams::DEFAULT,
+        )
+        .unwrap();
         s.sync_phase(43_200);
-        s.qualify(Origin::Keeper, 1, true).unwrap();
+        s.qualify(Origin::Keeper, 1, true, 1, &EpochParams::DEFAULT)
+            .unwrap();
         s.epoch.phase = EpochPhase::Trade;
         s.proposal_mut(1).unwrap().state = ProposalState::Trading;
         s.proposal_mut(1).unwrap().markets = Some(MarketSet {
@@ -1156,6 +2023,74 @@ mod tests {
         );
     }
     #[test]
+    fn security_sizing_uses_decision_window_days_at_floor() {
+        let mut s = EpochState::new();
+        let mut p = prop(1, ProposalState::Trading);
+        p.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: None,
+            baseline: 3,
+        });
+        s.proposals.push(p);
+        let mut input = pass_input();
+        input.measured_depth = 600;
+        input.in_cap_prize = Some(101);
+        assert_eq!(
+            s.decide_engine(1, &input, &EpochParams::DEFAULT),
+            Ok(DecisionOutcome::Adopt)
+        );
+        let mut floor = EpochParams::DEFAULT;
+        floor.decision_window = futarchy_primitives::kernel::BLOCKS_PER_DAY;
+        assert_eq!(
+            s.decide_engine(1, &input, &floor),
+            Ok(DecisionOutcome::Reject(RejectReason::SecuritySizing))
+        );
+    }
+    #[test]
+    fn submit_rejects_id_at_or_below_high_water_after_reap() {
+        let mut s = EpochState::<[u8; 32]>::new();
+        s.proposal_id_high_water = 5;
+        assert_eq!(
+            s.submit(
+                Origin::Signed,
+                prop(5, ProposalState::Submitted),
+                &EpochParams::DEFAULT,
+            ),
+            Err(Error::DuplicateProposal)
+        );
+        s.submit(
+            Origin::Signed,
+            prop(6, ProposalState::Submitted),
+            &EpochParams::DEFAULT,
+        )
+        .unwrap();
+        assert_eq!(s.proposal_id_high_water, 6);
+    }
+    #[test]
+    fn t20_emits_only_the_force_rejected_event() {
+        let mut s = EpochState::<[u8; 32]>::new();
+        let mut ledger = LedgerState::<[u8; 32]>::new();
+        ledger.create_vault(1, 1).unwrap();
+        let mut p = prop(1, ProposalState::Trading);
+        p.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: None,
+            baseline: 3,
+        });
+        s.proposals.push(p);
+        s.force_reject_process_hold(Origin::Keeper, &mut ledger, 1)
+            .unwrap();
+        assert_eq!(
+            s.events,
+            alloc::vec![Event::ProposalForceRejected {
+                pid: 1,
+                reason: RejectReason::ProcessHold,
+            }]
+        );
+    }
+    #[test]
     fn recent_ring_is_bounded() {
         let mut s = EpochState::<[u8; 32]>::new();
         for e in 0..40 {
@@ -1174,17 +2109,70 @@ mod tests {
     }
     #[test]
     fn class_hurdle_params_match_spec() {
-        // 13 §2: dec.delta = 0.015/0.025/0.040/0.060 and dec.sigma =
+        // 13 §1: dec.delta = 0.015/0.025/0.040/0.060 and dec.sigma =
         // 0.003/0.005/0.008/0.010 for PARAM/TREASURY/CODE/META. CODE and META
         // must differ (they were conflated at 0.040/0 previously).
-        assert_eq!(class_delta(ProposalClass::Param), 15_000_000);
-        assert_eq!(class_delta(ProposalClass::Treasury), 25_000_000);
-        assert_eq!(class_delta(ProposalClass::Code), 40_000_000);
-        assert_eq!(class_delta(ProposalClass::Meta), 60_000_000);
-        assert_eq!(class_sigma(ProposalClass::Param), 3_000_000);
-        assert_eq!(class_sigma(ProposalClass::Treasury), 5_000_000);
-        assert_eq!(class_sigma(ProposalClass::Code), 8_000_000);
-        assert_eq!(class_sigma(ProposalClass::Meta), 10_000_000);
+        let params = EpochParams::DEFAULT;
+        assert_eq!(params.class_delta(ProposalClass::Param), 15_000_000);
+        assert_eq!(params.class_delta(ProposalClass::Treasury), 25_000_000);
+        assert_eq!(params.class_delta(ProposalClass::Code), 40_000_000);
+        assert_eq!(params.class_delta(ProposalClass::Meta), 60_000_000);
+        assert_eq!(params.class_sigma(ProposalClass::Param), 3_000_000);
+        assert_eq!(params.class_sigma(ProposalClass::Treasury), 5_000_000);
+        assert_eq!(params.class_sigma(ProposalClass::Code), 8_000_000);
+        assert_eq!(params.class_sigma(ProposalClass::Meta), 10_000_000);
+    }
+    #[test]
+    fn epoch_params_default_pins_every_13_section_1_value() {
+        // Pin the A8 genesis/known-good fallback to every 13 §1 epoch/decision
+        // default; production behavior still reads the live Params provider.
+        assert_eq!(
+            EpochParams::DEFAULT,
+            EpochParams {
+                epoch_length: 302_400,
+                epoch_slots: 5,
+                horizon_k: 2,
+                decision_window: 43_200,
+                trailing_window: 14_400,
+                delta: [
+                    FixedU64(15_000_000),
+                    FixedU64(25_000_000),
+                    FixedU64(40_000_000),
+                    FixedU64(60_000_000),
+                    FixedU64(ONE),
+                ],
+                sigma: [
+                    FixedU64(3_000_000),
+                    FixedU64(5_000_000),
+                    FixedU64(8_000_000),
+                    FixedU64(10_000_000),
+                    FixedU64(0),
+                ],
+                delta_max: FixedU64(50_000_000),
+                coverage_pct: 95,
+                v_min: [
+                    100_000_000_000,
+                    250_000_000_000,
+                    600_000_000_000,
+                    1_200_000_000_000,
+                    0,
+                ],
+                gate_v_min: [
+                    10_000_000_000,
+                    25_000_000_000,
+                    60_000_000_000,
+                    120_000_000_000,
+                    0,
+                ],
+                gate_p_max: [FixedU64(50_000_000), FixedU64(50_000_000)],
+                gate_eps: [FixedU64(20_000_000), FixedU64(20_000_000)],
+                gate_nb_coverage_pct: 98,
+                gate_nb_convergence: FixedU64(10_000_000),
+                timelock: [28_800, 43_200, 100_800, 201_600, 0],
+                grace: [201_600, 201_600, 201_600, 201_600, 0],
+                intake_max_per_account: 4,
+            }
+        );
     }
     #[test]
     fn param_hurdle_adopts_at_spec_delta() {
@@ -1212,7 +2200,7 @@ mod tests {
     }
     #[test]
     fn gate_veto_uses_configured_cap() {
-        // 13 §2 / 05 §5.1: an adopt-gate Survival TWAP of 0.10 sits above the
+        // 13 §1 / 05 §5.1: an adopt-gate Survival TWAP of 0.10 sits above the
         // p_max=0.05 ruin cap and must veto, though it fell under the old
         // hardcoded 0.20. reject TWAP equals adopt, so only the absolute cap fires.
         let mut s = EpochState::<[u8; 32]>::new();
@@ -1233,34 +2221,75 @@ mod tests {
             FixedU64(0),           // reject Security
         ]);
         assert_eq!(
-            s.decide_engine(1, &i),
+            s.decide_engine(1, &i, &EpochParams::DEFAULT),
             Ok(DecisionOutcome::Reject(RejectReason::GateVetoSurvival))
         );
     }
-    fn wsnapshot(epoch: EpochId, welfare: u64) -> Snapshot {
-        Snapshot {
-            epoch,
-            spec_version: 1,
-            s_pillar: FixedU64(welfare),
-            c_onchain: FixedU64(welfare),
-            c_attested: FixedU64(welfare),
-            p_pillar: FixedU64(welfare),
-            a_pillar: FixedU64(welfare),
-            gate_s: FixedU64(ONE),
-            gate_c: FixedU64(ONE),
-            welfare: FixedU64(welfare),
-            components: Vec::new(),
+
+    #[test]
+    fn code_without_physically_deployed_gates_rejects_not_decision_grade() {
+        let mut s = EpochState::<[u8; 32]>::new();
+        let mut p = prop(1, ProposalState::Trading);
+        p.class = ProposalClass::Code;
+        p.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: None,
+            baseline: 3,
+        });
+        s.proposals.push(p);
+        assert_eq!(
+            s.decide_engine(1, &pass_input(), &EpochParams::DEFAULT),
+            Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade))
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingWelfare {
+        calls: Vec<(EpochId, MetricSpecVersion, SettlementTarget)>,
+    }
+
+    impl WelfareOps for RecordingWelfare {
+        fn compute_settlement(
+            &mut self,
+            cohort_epoch: EpochId,
+            spec: MetricSpecVersion,
+            target: SettlementTarget,
+        ) -> Result<FixedU64, Error> {
+            self.calls.push((cohort_epoch, spec, target));
+            Ok(FixedU64(500_000_000))
         }
     }
+
+    struct RefusingLedger;
+
+    impl LedgerOps<[u8; 32]> for RefusingLedger {
+        fn create_vault(
+            &mut self,
+            _pid: ProposalId,
+            _spec: MetricSpecVersion,
+        ) -> Result<(), Error> {
+            Err(Error::Ledger)
+        }
+
+        fn resolve(&mut self, _pid: ProposalId, _branch: Branch) -> Result<(), Error> {
+            Err(Error::Ledger)
+        }
+
+        fn void(&mut self, _pid: ProposalId) -> Result<(), Error> {
+            Err(Error::Ledger)
+        }
+    }
+
     #[test]
-    fn settle_cohort_reads_gate_breach_flags() {
-        // 05 §4.7/§6: gate books settle on the daily breach flags over e+1..e+2,
-        // not a hardcoded `false`. A Survival breach recorded at e+1 must settle the
-        // Survival gate `true` while Security (unbreached) settles `false`.
+    fn settle_cohort_delegates_every_target_only_to_welfare() {
+        // 05 §6: epoch has no SettleAuthority and cannot double-settle the ledger.
+        // Its seam is limited to welfare's proposal/baseline endpoint.
         let mut s = EpochState::<[u8; 32]>::new();
         s.epoch.phase = EpochPhase::Housekeeping;
+        s.epoch.index = 3;
         let mut p = prop(1, ProposalState::Measuring);
-        p.class = ProposalClass::Code; // gate-bearing: carries gate books
+        p.class = ProposalClass::Code;
         p.markets = Some(MarketSet {
             accept: 1,
             reject: 2,
@@ -1274,41 +2303,83 @@ mod tests {
             status: CohortStatus::Measuring { until_epoch: 2 },
         });
 
-        let mut welfare = WelfareState::new();
-        welfare.snapshots.push(wsnapshot(1, 500_000_000));
-        welfare.snapshots.push(wsnapshot(2, 500_000_000));
-        welfare.gate_flags.push((
-            1,
-            GateBreachFlags {
-                s_breached: true,
-                c_breached: false,
-                day_bitmap: [0; 2],
-            },
-        ));
-
-        let mut ledger = LedgerState::<[u8; 32]>::new();
-        ledger.create_vault(1, 1).unwrap();
-        ledger
-            .resolve(LedgerOrigin::ResolveAuthority, 1, Branch::Accept)
-            .unwrap();
-
+        let mut welfare = RecordingWelfare::default();
         s.settle_cohort(
             Origin::Keeper,
             &mut welfare,
-            &mut ledger,
             0,
             1,
             FixedU64(500_000_000),
             100,
         )
         .unwrap();
-        assert!(ledger
-            .events
-            .iter()
-            .any(|e| matches!(e, LedgerEvent::GateSettled(1, _, GateType::Survival, true))));
-        assert!(ledger
-            .events
-            .iter()
-            .any(|e| matches!(e, LedgerEvent::GateSettled(1, _, GateType::Security, false))));
+        assert_eq!(s.cohorts[0].status, CohortStatus::Settling { cursor: 1 });
+        s.settle_cohort(
+            Origin::Keeper,
+            &mut welfare,
+            0,
+            1,
+            FixedU64(500_000_000),
+            101,
+        )
+        .unwrap();
+        assert_eq!(
+            welfare.calls,
+            vec![
+                (
+                    0,
+                    1,
+                    SettlementTarget::Proposal {
+                        pid: 1,
+                        has_gate_books: true,
+                    },
+                ),
+                (0, 1, SettlementTarget::Baseline),
+            ]
+        );
+        assert!(s.cohorts.is_empty());
+        assert!(s.proposals.is_empty());
+        assert_eq!(s.recent.len(), 1);
+    }
+
+    #[test]
+    fn refusing_ledger_leaves_the_core_at_status_quo() {
+        let mut state = EpochState::<[u8; 32]>::new();
+        let mut proposal = prop(1, ProposalState::Trading);
+        proposal.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: None,
+            baseline: 3,
+        });
+        state.proposals.push(proposal);
+        let before = state.clone();
+        let mut input = pass_input();
+        input.constitution_queue_ok = false;
+        assert_eq!(
+            state.decide(Origin::Keeper, &mut RefusingLedger, 1, 0, input,),
+            Err(Error::Ledger)
+        );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn injected_params_change_the_hurdle_without_changing_defaults() {
+        let mut s = EpochState::<[u8; 32]>::new();
+        s.proposals.push(prop(1, ProposalState::Trading));
+        let mut input = pass_input();
+        input.accept_full = FixedU64(517_000_000);
+        input.accept_trailing = FixedU64(517_000_000);
+        input.accept_spot = FixedU64(517_000_000);
+        assert_eq!(
+            s.decide_engine(1, &input, &EpochParams::DEFAULT),
+            Ok(DecisionOutcome::Adopt)
+        );
+        let mut strict = EpochParams::DEFAULT;
+        strict.delta[0] = FixedU64(20_000_000);
+        assert_eq!(
+            s.decide_engine(1, &input, &strict),
+            Ok(DecisionOutcome::Reject(RejectReason::HurdleNotMet))
+        );
     }
 }

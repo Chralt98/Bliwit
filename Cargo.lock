@@ -1034,7 +1034,6 @@ dependencies = [
  "futarchy-primitives",
  "parity-scale-codec",
  "scale-info",
- "welfare-core",
 ]
 
 [[package]]
@@ -2266,11 +2265,15 @@ name = "pallet-epoch"
 version = "0.1.0"
 dependencies = [
  "epoch-core",
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
  "futarchy-primitives",
- "pallet-conditional-ledger",
- "pallet-welfare",
  "parity-scale-codec",
  "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
 ]
 
 [[package]]
