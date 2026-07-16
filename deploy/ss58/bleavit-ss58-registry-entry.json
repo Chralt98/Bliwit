@@ -1,0 +1,9 @@
+{
+  "prefix": 7777,
+  "network": "bleavit",
+  "displayName": "Bleavit",
+  "symbols": ["VIT"],
+  "decimals": [12],
+  "standardAccount": "*25519",
+  "website": "https://github.com/bleavit/bleavit"
+}

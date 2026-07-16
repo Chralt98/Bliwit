@@ -24,7 +24,7 @@ rollout that removes `sudo` at Phase 4.
 
 ## Status
 
-**Specification complete (2026-07-12) · foundations through M3 implemented (2026-07-13) · Track-A core relocation/shell scaffolds in progress (2026-07-14).**
+**Specification complete (2026-07-12) · Track M (M0–M3) finished (2026-07-15) · Track A complete — all 11 custom pallets are production FRAME pallets (2026-07-16) · B1a Cumulus runtime assembled (2026-07-16) · B3 collator node, chain-spec pipeline and genesis allocation/vesting (2026-07-16).**
 
 - The authoritative spec is [`docs/architecture/`](docs/architecture/README.md) —
   16 component documents + decision record, produced by resolving all 101 findings
@@ -48,9 +48,12 @@ rollout that removes `sudo` at Phase 4.
 | `crates/futarchy-primitives/` | M1 shared primitive crate: `no_std` contract/view types, version constant, and kernel/chain/currency bounds |
 | `crates/futarchy-fixed/` | M2 deterministic 64.64 fixed-point LMSR/transcendental crate with generated regression fixtures |
 | [`reference-model/`](reference-model/pyproject.toml), [`tools/reference-model/generate-vectors.py`](tools/reference-model/generate-vectors.py) | M3 independent Python executable spec and CI-regenerated JSON vector corpus |
-| `pallets/`, `crates/*-core/` | Track A (re-scoped to production FRAME): each `crates/<name>-core/` contains the frame-free functional core and each `pallets/<name>/` currently contains a compiling shell scaffold (lib.rs · mock · tests · benchmarking · weights). The remaining Track-A work is replacing those scaffolds with real `#[frame_support::pallet]` wrappers |
-| `runtime/bleavit-runtime/` | B1 runtime assembly crate: pallet composition model, SafetyFilter BaseCallFilter adapter, USDC/fee/origin/genesis filtering wiring — a frame-free model, not yet `construct_runtime!`/`impl_runtime_apis!` (that is B1a) |
-| `node/`, `frontend/` | Implementation roots created for future milestones; currently placeholders until their tracks begin |
+| `pallets/`, `crates/*-core/` | Track A (complete): each `crates/<name>-core/` is the frame-free functional core (differential oracle) and each `pallets/<name>/` its production `#[frame_support::pallet]` shell (origin-checked calls, bounded 02-frozen storage, try-state, benchmarks, doc-15 suites) |
+| `runtime/bleavit-runtime/` | B1a: the real Cumulus parachain runtime — `construct_runtime!` over the Track-A + standard/system pallets, `BaseCallFilter = SafetyFilter`, genesis presets carrying the 08 §2.1 VIT allocation/vesting, Wasm-buildable (`--features substrate-wasm-builder`) |
+| `node/bleavit-node/` | B3: the collator node — a thin branding of the pinned `polkadot-omni-node` stack; the runtime ships in the chain spec, not in the node |
+| `deploy/`, `tools/deploy/` | B3: chain-spec pipeline (pinned `staging-chain-spec-builder`), WSS bootnode operator manifests + the 02 §10 threshold validator, production genesis-allocation template, prepared ss58-7777 registry submission |
+| `vendor/` | Vendored `core2 0.4.0` (every published version is yanked; the node's networking closure requires it) — see `vendor/README.md` |
+| `frontend/` | Implementation root for Track F; currently a placeholder until the track begins |
 
 ## How this gets built
 

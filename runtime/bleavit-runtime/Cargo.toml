@@ -39,6 +39,7 @@ frame-try-runtime = { workspace = true, optional = true }
 # --- Standard pallets (01 §5.1).
 pallet-timestamp = { workspace = true }
 pallet-balances = { workspace = true }
+pallet-vesting = { workspace = true }
 pallet-assets = { workspace = true }
 pallet-transaction-payment = { workspace = true }
 pallet-asset-tx-payment = { workspace = true }
@@ -124,6 +125,7 @@ std = [
   "pallet-aura/std",
   "pallet-authorship/std",
   "pallet-balances/std",
+  "pallet-vesting/std",
   "pallet-collator-selection/std",
   "pallet-conditional-ledger/std",
   "pallet-constitution/std",
@@ -184,6 +186,7 @@ runtime-benchmarks = [
   "pallet-assets/runtime-benchmarks",
   "pallet-attestor/runtime-benchmarks",
   "pallet-balances/runtime-benchmarks",
+  "pallet-vesting/runtime-benchmarks",
   "pallet-collator-selection/runtime-benchmarks",
   "pallet-conditional-ledger/runtime-benchmarks",
   "pallet-constitution/runtime-benchmarks",
@@ -228,6 +231,7 @@ try-runtime = [
   "pallet-aura/try-runtime",
   "pallet-authorship/try-runtime",
   "pallet-balances/try-runtime",
+  "pallet-vesting/try-runtime",
   "pallet-collator-selection/try-runtime",
   "pallet-conditional-ledger/try-runtime",
   "pallet-constitution/try-runtime",

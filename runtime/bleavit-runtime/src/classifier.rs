@@ -194,6 +194,17 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_balances::Call::force_adjust_total_issuance { .. }
             | pallet_balances::Call::__Ignore(_, _) => denied(),
         },
+        RuntimeCall::Vesting(call) => match call {
+            pallet_vesting::Call::vest { .. }
+            | pallet_vesting::Call::vest_other { .. }
+            | pallet_vesting::Call::vested_transfer { .. }
+            | pallet_vesting::Call::merge_schedules { .. } => leaf(CallDomain::Public),
+            // D-13 nobody row: these rewrite third-party VIT lock state, the
+            // vesting analog of balances.force_*, so even sudo may not reach them.
+            pallet_vesting::Call::force_vested_transfer { .. }
+            | pallet_vesting::Call::force_remove_vesting_schedule { .. }
+            | pallet_vesting::Call::__Ignore(_, _) => denied(),
+        },
         RuntimeCall::ForeignAssets(call) => match call {
             pallet_assets::Call::create { .. } => leaf(CallDomain::ConstitutionalValues),
             pallet_assets::Call::transfer { .. }

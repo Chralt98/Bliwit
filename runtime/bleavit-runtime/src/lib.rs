@@ -133,6 +133,7 @@ construct_runtime!(
         ForeignAssets: pallet_assets::<Instance1> = 11,
         TransactionPayment: pallet_transaction_payment = 12,
         AssetTxPayment: pallet_asset_tx_payment = 13,
+        Vesting: pallet_vesting = 14,
 
         Referenda: pallet_referenda = 20,
         ConvictionVoting: pallet_conviction_voting = 21,

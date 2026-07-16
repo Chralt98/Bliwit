@@ -1,0 +1,53 @@
+{
+  "_comment": "Production 08 §2.1 allocation patch template. Replace every TODO with the onboarding-approved real account and convert this manifest into the runtime genesis patch consumed by chain-spec-builder.",
+  "_runtime_default_accounts": {
+    "_comment": "Protocol-derived ss58-7777 accounts for MAIN and the two pots; these are mandatory in every profile.",
+    "main": "fvGJck7fS1t2fpsb9pvvJ2EYTyx6sgq1NkVTTZqzwipoLqtzp",
+    "community": "fvGJck7fS1t2fpsb9pwPHKH5M7STmm5wAPAdpwcrr6uEeGXz5",
+    "incentives": "fvGJck7fS1t2fpsb9pwQuhjP1DQpWe6PyTT4rDGaDE3Lo1J9Z"
+  },
+  "groups": [
+    {
+      "name": "treasury_reserve",
+      "share_percent": 30,
+      "amount_plancks": "300000000000000000000",
+      "account": "fvGJck7fS1t2fpsb9pvvJ2EYTyx6sgq1NkVTTZqzwipoLqtzp"
+    },
+    {
+      "name": "community_distribution",
+      "share_percent": 25,
+      "amount_plancks": "250000000000000000000",
+      "account": "fvGJck7fS1t2fpsb9pwPHKH5M7STmm5wAPAdpwcrr6uEeGXz5",
+      "_control": "Held until Phase-4 arming; the 24-month distribution schedule is not a genesis vesting schedule."
+    },
+    {
+      "name": "founding_team",
+      "share_percent": 20,
+      "amount_plancks": "200000000000000000000",
+      "accounts": [
+        {
+          "account": "TODO",
+          "amount_plancks": "100000000000000000000",
+          "vesting": { "begin": 5256000, "length": 15768000, "liquid": "0" }
+        },
+        {
+          "account": "TODO",
+          "amount_plancks": "100000000000000000000",
+          "vesting": { "begin": 5256000, "length": 15768000, "liquid": "0" }
+        }
+      ]
+    },
+    {
+      "name": "ecosystem_ops_fund",
+      "share_percent": 15,
+      "amount_plancks": "150000000000000000000",
+      "account": "TODO"
+    },
+    {
+      "name": "phase_3_4_incentive_programs",
+      "share_percent": 10,
+      "amount_plancks": "100000000000000000000",
+      "account": "fvGJck7fS1t2fpsb9pwQuhjP1DQpWe6PyTT4rDGaDE3Lo1J9Z"
+    }
+  ]
+}

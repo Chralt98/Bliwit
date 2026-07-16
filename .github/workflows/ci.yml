@@ -14,6 +14,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install libclang
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
       - name: Rust workspace gates
         run: tools/ci/rust-workspace-gates.sh
 
@@ -27,6 +31,8 @@ jobs:
           python-version: '3.12'
       - name: Run reference model tests
         run: PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
+      - name: Run deploy validator tests
+        run: python3 -m unittest discover -s tools/deploy/tests
       - name: Check generated vector corpus
         run: python3 tools/reference-model/generate-vectors.py --check
       - name: Check normative LMSR documentation table

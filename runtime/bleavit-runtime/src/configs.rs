@@ -8,7 +8,7 @@ use frame_support::{
     parameter_types,
     traits::{
         ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly,
-        InstanceFilter, Nothing, TransformOrigin, VariantCountOf,
+        InstanceFilter, Nothing, TransformOrigin, VariantCountOf, WithdrawReasons,
     },
     weights::{
         constants::{
@@ -114,6 +114,28 @@ impl pallet_balances::Config for Runtime {
     type FreezeIdentifier = RuntimeFreezeReason;
     type MaxFreezes = VariantCountOf<RuntimeFreezeReason>;
     type DoneSlashHandler = ();
+}
+
+parameter_types! {
+    pub const MinVestedTransfer: Balance = currency::VIT;
+    pub UnvestedFundsAllowedWithdrawReasons: WithdrawReasons =
+        WithdrawReasons::TRANSACTION_PAYMENT;
+}
+
+impl pallet_vesting::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type BlockNumberToBalance = sp_runtime::traits::ConvertInto;
+    type MinVestedTransfer = MinVestedTransfer;
+    type WeightInfo = pallet_vesting::weights::SubstrateWeight<Runtime>;
+    // The pallet applies the complement when installing its legacy balance lock.
+    // The fungible fee adapter ignores these lock reasons, so in practice unvested
+    // VIT cannot pay fees despite TRANSACTION_PAYMENT being the allowed reason.
+    type UnvestedFundsAllowedWithdrawReasons = UnvestedFundsAllowedWithdrawReasons;
+    // Schedules use para-blocks at the nominal 6 s cadence. Slower production can
+    // therefore unlock later, never earlier, which is conservative under R-7.
+    type BlockNumberProvider = frame_system::Pallet<Runtime>;
+    const MAX_VESTING_SCHEDULES: u32 = 8;
 }
 
 parameter_types! {
@@ -875,6 +897,7 @@ impl frame_support::traits::Get<u32> for LedgerArchiveDelay {
 parameter_types! {
     pub const LedgerPalletId: PalletId = PalletId(*b"bl/ledgr");
     pub const MarketPalletId: PalletId = PalletId(*b"bl/mrket");
+    pub const TreasuryPalletId: PalletId = PalletId(*b"bl/trsry");
     pub const IncidentPalletId: PalletId = PalletId(*b"bl/reg/i");
     pub const MilestonePalletId: PalletId = PalletId(*b"bl/reg/m");
 }

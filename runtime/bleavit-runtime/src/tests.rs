@@ -9,6 +9,7 @@ use frame_support::{
     traits::{
         fungible::Inspect as FungibleInspect, fungibles::Inspect as FungiblesInspect,
         tokens::ConversionToAssetBalance, Contains, EnsureOrigin, PalletInfo, PalletsInfoAccess,
+        VestingSchedule,
     },
     weights::Weight,
 };
@@ -23,6 +24,7 @@ use sp_keyring::Sr25519Keyring;
 use sp_runtime::{
     generic::{Era, SignedPayload},
     traits::{Block as BlockT, Dispatchable, Header as HeaderT},
+    transaction_validity::{InvalidTransaction, TransactionValidityError},
     BuildStorage, DispatchError, MultiAddress, MultiSignature,
 };
 
@@ -34,7 +36,7 @@ use crate::{
     MilestoneRegistry, Multisig, Oracle, Origins, PalletInfo as RuntimePalletInfo, ParachainInfo,
     ParachainSystem, PolkadotXcm, Preimage, Proxy, Referenda, Runtime, RuntimeCall,
     RuntimeGenesisConfig, RuntimeOrigin, Scheduler, Session, Sudo, System, Timestamp,
-    TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Welfare, XcmpQueue,
+    TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Vesting, Welfare, XcmpQueue,
     FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX, USDC_ASSET_ID, USDC_DECIMALS,
     USDC_LOCATION, VERSION, VIT_DECIMALS,
 };
@@ -289,6 +291,7 @@ fn composition_contains_all_b1a_pallets_and_only_future_slots_are_absent() {
     assert_pallet!(ForeignAssets, 11, "ForeignAssets");
     assert_pallet!(TransactionPayment, 12, "TransactionPayment");
     assert_pallet!(AssetTxPayment, 13, "AssetTxPayment");
+    assert_pallet!(Vesting, 14, "Vesting");
     assert_pallet!(Referenda, 20, "Referenda");
     assert_pallet!(ConvictionVoting, 21, "ConvictionVoting");
     assert_pallet!(Preimage, 22, "Preimage");
@@ -320,7 +323,7 @@ fn composition_contains_all_b1a_pallets_and_only_future_slots_are_absent() {
     assert_pallet!(Attestor, 60, "Attestor");
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        37
+        38
     );
 }
 
@@ -437,6 +440,205 @@ fn development_preset_builds_and_pins_usdc_and_para_identity() {
         );
         assert_eq!(Balances::total_issuance(), currency::VIT_TOTAL_SUPPLY);
     });
+}
+
+#[test]
+fn development_allocations_match_the_genesis_economics_exactly() {
+    use crate::genesis::{
+        community_account, incentives_account, treasury_account, ALICE_PUBLIC, BOB_PUBLIC,
+        CHARLIE_PUBLIC, COMMUNITY_DISTRIBUTION, DAVE_PUBLIC, ECOSYSTEM_OPS, ECOSYSTEM_OPS_ACCOUNT,
+        FOUNDING_TEAM, FOUNDING_TEAM_ACCOUNT, INCENTIVE_PROGRAMS, TREASURY_RESERVE,
+    };
+
+    assert_eq!(
+        TREASURY_RESERVE
+            + COMMUNITY_DISTRIBUTION
+            + FOUNDING_TEAM
+            + ECOSYSTEM_OPS
+            + INCENTIVE_PROGRAMS,
+        currency::VIT_TOTAL_SUPPLY
+    );
+
+    development_ext().execute_with(|| {
+        assert_eq!(Balances::free_balance(treasury_account()), TREASURY_RESERVE);
+        assert_eq!(
+            Balances::free_balance(community_account()),
+            COMMUNITY_DISTRIBUTION
+        );
+        assert_eq!(
+            Balances::free_balance(incentives_account()),
+            INCENTIVE_PROGRAMS
+        );
+        for public in [CHARLIE_PUBLIC, DAVE_PUBLIC] {
+            assert_eq!(
+                Balances::free_balance(AccountId::new(public)),
+                FOUNDING_TEAM_ACCOUNT
+            );
+        }
+        for public in [ALICE_PUBLIC, BOB_PUBLIC] {
+            assert_eq!(
+                Balances::free_balance(AccountId::new(public)),
+                ECOSYSTEM_OPS_ACCOUNT
+            );
+        }
+        assert_eq!(Balances::total_issuance(), currency::VIT_TOTAL_SUPPLY);
+    });
+}
+
+#[test]
+fn development_key_constants_match_the_well_known_sr25519_keys() {
+    assert_eq!(
+        crate::genesis::ALICE_PUBLIC,
+        Sr25519Keyring::Alice.to_raw_public()
+    );
+    assert_eq!(
+        crate::genesis::BOB_PUBLIC,
+        Sr25519Keyring::Bob.to_raw_public()
+    );
+    assert_eq!(
+        crate::genesis::CHARLIE_PUBLIC,
+        Sr25519Keyring::Charlie.to_raw_public()
+    );
+    assert_eq!(
+        crate::genesis::DAVE_PUBLIC,
+        Sr25519Keyring::Dave.to_raw_public()
+    );
+}
+
+#[test]
+fn team_allocations_are_transfer_locked() {
+    development_ext().execute_with(|| {
+        let alice = Sr25519Keyring::Alice.to_account_id();
+        for team_member in [
+            Sr25519Keyring::Charlie.to_account_id(),
+            Sr25519Keyring::Dave.to_account_id(),
+        ] {
+            assert_eq!(Balances::usable_balance(&team_member), 0);
+            let transfer = RuntimeCall::Balances(pallet_balances::Call::transfer_allow_death {
+                dest: MultiAddress::Id(alice.clone()),
+                value: 1,
+            });
+            assert!(transfer
+                .dispatch(RuntimeOrigin::signed(team_member.clone()))
+                .is_err());
+            assert_eq!(
+                Balances::free_balance(&team_member),
+                crate::genesis::FOUNDING_TEAM_ACCOUNT
+            );
+        }
+    });
+}
+
+#[test]
+fn fully_vesting_locked_account_cannot_pay_native_transaction_fees() {
+    type NativeFeeCharger = <Runtime as pallet_transaction_payment::Config>::OnChargeTransaction;
+
+    development_ext().execute_with(|| {
+        let charlie = Sr25519Keyring::Charlie.to_account_id();
+        let fee_call = remark();
+        let dispatch_info = fee_call.get_dispatch_info();
+        let result = <NativeFeeCharger as pallet_transaction_payment::OnChargeTransaction<
+            Runtime,
+        >>::withdraw_fee(&charlie, &fee_call, &dispatch_info, 1, 0);
+        assert!(matches!(
+            result,
+            Err(TransactionValidityError::Invalid(
+                InvalidTransaction::Payment
+            ))
+        ));
+        assert_eq!(
+            Balances::free_balance(&charlie),
+            crate::genesis::FOUNDING_TEAM_ACCOUNT
+        );
+        assert!(Balances::locks(&charlie)
+            .iter()
+            .any(|lock| lock.id == *b"vesting "));
+    });
+}
+
+#[test]
+fn team_vesting_curve_is_cliffed_and_never_faster_than_the_ideal_curve() {
+    let charlie = Sr25519Keyring::Charlie.to_account_id();
+    let year = crate::genesis::BLOCKS_PER_YEAR;
+    let total = crate::genesis::FOUNDING_TEAM_ACCOUNT;
+    let horizon = 4 * year;
+
+    development_ext().execute_with(|| {
+        let locked_at = |block| {
+            System::set_block_number(block);
+            match Vesting::vesting_balance(&charlie) {
+                Some(locked) => locked,
+                None => {
+                    assert!(false, "Charlie must have a genesis vesting schedule");
+                    0
+                }
+            }
+        };
+
+        assert_eq!(locked_at(0), total);
+        assert_eq!(locked_at(year - 1), total);
+        assert_eq!(locked_at(year), total);
+
+        let mut unlocked_samples = Vec::new();
+        for block in [year, 2 * year, 3 * year, horizon] {
+            let unlocked = total - locked_at(block);
+            assert!(
+                unlocked * crate::Balance::from(horizon) <= total * crate::Balance::from(block),
+                "genesis vesting must never dominate the ideal t/4 unlock curve"
+            );
+            unlocked_samples.push(unlocked);
+        }
+        assert!(unlocked_samples.windows(2).all(|pair| pair[0] < pair[1]));
+
+        // pallet-vesting floors `per_block` during genesis construction. The
+        // exact 100M allocation is not divisible by the exact three-year block
+        // length, so a sub-VIT remainder conservatively clears one block after
+        // the nominal four-year horizon rather than one block before it.
+        let duration = 3 * year;
+        let per_block = total / crate::Balance::from(duration);
+        let rounding_tail = total - per_block * crate::Balance::from(duration);
+        assert_eq!(locked_at(horizon), rounding_tail);
+        assert!(rounding_tail > 0);
+        assert_eq!(locked_at(horizon + 1), 0);
+    });
+}
+
+#[test]
+fn vesting_force_calls_are_nobody_and_public_calls_remain_public() {
+    let schedule = pallet_vesting::VestingInfo::new(currency::VIT, 1, 0);
+    let force_calls = [
+        RuntimeCall::Vesting(pallet_vesting::Call::force_vested_transfer {
+            source: MultiAddress::Id(account(1)),
+            target: MultiAddress::Id(account(2)),
+            schedule,
+        }),
+        RuntimeCall::Vesting(pallet_vesting::Call::force_remove_vesting_schedule {
+            target: MultiAddress::Id(account(1)),
+            schedule_index: 0,
+        }),
+    ];
+    for call in force_calls {
+        assert!(!RuntimeBaseCallFilter::contains(&call));
+        for origin in pallet_origins::Origin::ALL {
+            assert!(!RuntimeBaseCallFilter::contains_for(
+                origin.to_model(),
+                &call
+            ));
+        }
+        for wrapped in closed_wrappers(call) {
+            assert!(!RuntimeBaseCallFilter::contains(&wrapped));
+        }
+    }
+
+    assert!(RuntimeBaseCallFilter::contains(&RuntimeCall::Vesting(
+        pallet_vesting::Call::vest {}
+    )));
+    assert!(RuntimeBaseCallFilter::contains(&RuntimeCall::Vesting(
+        pallet_vesting::Call::vested_transfer {
+            target: MultiAddress::Id(account(2)),
+            schedule,
+        }
+    )));
 }
 
 #[test]
@@ -642,6 +844,7 @@ fn classifier_sweeps_every_callable_pallet_and_every_closed_wrapper_shape() {
             dest: MultiAddress::Id(who.clone()),
             value: 1,
         }),
+        RuntimeCall::Vesting(pallet_vesting::Call::vest {}),
         RuntimeCall::ForeignAssets(pallet_assets::Call::transfer {
             id: USDC_ASSET_ID,
             target: MultiAddress::Id(who.clone()),

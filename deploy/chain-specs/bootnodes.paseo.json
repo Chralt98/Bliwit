@@ -1,0 +1,5 @@
+{
+  "_phase_gate": "REQUIRED before the Phase-2 Paseo release by 02 §10; the validator fails until this manifest lists at least 8 browser-WSS endpoints across at least 4 operators with at least 2 on port 443.",
+  "network": "paseo",
+  "operators": []
+}

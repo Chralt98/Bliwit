@@ -184,6 +184,7 @@ On-chain results MUST match within the §2 error bound plus one base unit of rou
 | paraId | assigned at onboarding; test fixtures 4242 |
 | USDC | `ForeignAssets`, Location `{parents: 1, X3(Parachain(1000), PalletInstance(50), GeneralIndex(1337))}` **[VERIFY asset index 1337]**; 6 decimals; `min_balance` 10⁴ |
 | VIT | native; **total supply 10⁹, 12 decimals**; existential deposit 0.01 VIT |
+| VIT vesting | SDK `pallet-vesting`; min vested transfer **1 VIT**; genesis-allocation schedules per [08](08-treasury-and-economics.md) §2.1 |
 | USDC treasury target | ≥ 25M USDC before Phase-5 arming; per-class min-viable NAV floors per [08](08-treasury-and-economics.md) §4 |
 | Phase flag | `pallet-constitution::PhaseFlags` (bitset) — the FE trading-enablement key |
 | `ReleaseChannel` | fixed-layout raw storage key in `pallet-constitution`, SCALE layout frozen forever (D-14) |
@@ -216,6 +217,7 @@ On-chain results MUST match within the §2 error bound plus one base unit of rou
 | `Params` registry | **128** keys (genesis-fixed set; ≥ the ~87 currently-concrete §1 rows plus headroom for `[VERIFY]`-gated rows as they resolve; the `params()` runtime API keeps its own 64-keys-per-call bound, [02](02-integration-contract.md) §3) | `pallet-constitution` |
 | `Capabilities` table | 64 rows | `pallet-constitution` |
 | `Meters` | 16 (generic bounded-meter primitive; empty at genesis — envelope meters live with their owning pallets, [15](15-invariants-and-testing.md) I-17) | `pallet-constitution` |
+| Vesting schedules per account | **8** (`MAX_VESTING_SCHEDULES`; the genesis allocation uses exactly one per founding-team beneficiary) | `pallet-vesting` | [08](08-treasury-and-economics.md) §2.1 |
 | Treasury `Streams` | **128** open vesting streams (recipient-claimable grants > `trs.stream_threshold`, §1.3); ≥ `epoch.slots` new grants/epoch over multi-epoch vesting horizons, with headroom | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.3) |
 | Treasury budget lines | **32** — ≥ the enumerated `POL`/`POL_BASELINE`/`KEEPER`/`ORACLE`/`REWARDS`/`ops.*` lines (§1.1) with headroom; upsert-keyed, so occupancy ≤ the line enumeration | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.1) |
 | Treasury pending outflows | **64** — queued in-cap proposal outflows awaiting meter grace (§1.3); matched to the `IntakeQueue` pre-qualification ceiling | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.3) |

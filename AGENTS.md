@@ -136,12 +136,14 @@ per milestone):
 | `.codex/` | living | Codex session playbooks mirroring the skills |
 | `Cargo.toml`, `rust-toolchain.toml`, `.github/workflows/ci.yml`, `tools/ci/` | scaffold | M0 workspace/toolchain/CI and local gate scripts |
 | `crates/` | scaffold | `futarchy-primitives` (M1) and `futarchy-fixed` (M2) live here; Track A's per-pallet **frame-free functional cores** land here too as `crates/<name>-core/` (`no_std`, no `frame` deps — the differential oracle + WASM/auditor port) |
-| `pallets/` | partial (Track A, re-scoped) | Custom pallet crates. **Track A ships production FRAME pallets** (2026-07-14 re-scope): each `pallets/<name>/` is a `#[frame_support::pallet]` **shell** (`lib.rs` + `mock.rs` + `tests.rs` + `benchmarking.rs`/`weights.rs`) over its frame-free `crates/<name>-core/`. The existing code is that core; the FRAME shells are the reopened A1–A11 work (see PLAN.md Track A DoD) |
-| `runtime/`, `node/` | scaffold (Track B) | Placeholder roots for runtime assembly and collator node; `runtime-api/` is created in B2. `runtime/bleavit-runtime` is currently a frame-free composition **model** (no `construct_runtime!`/`impl_runtime_apis!`); the real runtime-level FRAME assembly is milestone B1a |
+| `pallets/` | done (Track A complete) | Custom pallet crates: each `pallets/<name>/` is a production `#[frame_support::pallet]` shell (`lib.rs` + `mock.rs` + `tests.rs` + `benchmarking.rs`/`weights.rs`) over its frame-free `crates/<name>-core/` |
+| `runtime/` | B1a done | `runtime/bleavit-runtime` is the real Cumulus parachain runtime (`construct_runtime!`, `impl_runtime_apis!`, `BaseCallFilter = SafetyFilter`, genesis presets with the 08 §2.1 VIT allocation/vesting); `FutarchyApi` (`runtime-api/`) is B2 |
+| `node/` | B3 done | `node/bleavit-node` — collator binary as a thin branding of the pinned `polkadot-omni-node` stack (runtime ships in the chain spec, not the node) |
+| `deploy/`, `tools/deploy/` | B3 done (grows with B7/B8/Track O) | Chain-spec pipeline + validator (02 §8/§10), bootnode operator manifests, production genesis-allocation template, ss58-registry submission artifact; runbooks (`deploy/runbooks/`) remain Track O |
+| `vendor/` | support | Vendored `core2 0.4.0` (all published versions yanked; required by the node's networking closure) — `vendor/README.md` has provenance |
 | `reference-model/` | scaffold (M3) | Placeholder root for independent Python executable spec + vector corpus |
 | `frontend/` | scaffold (Track F) | Placeholder root for monorepo per 10 §10 (`apps/web`, `packages/*`, `tools/*`) |
 | `zombienet/`, `chopsticks/` | planned (B7) | Test-environment definitions (release artifacts, 15 §4.7) |
-| `deploy/runbooks/` | planned (Track O) | Runbooks-as-code (12 §6) |
 
 ## Changing the specification
 
