@@ -1230,6 +1230,7 @@ dependencies = [
 name = "bleavit-runtime"
 version = "0.1.0"
 dependencies = [
+ "bleavit-xcm",
  "conditional-ledger-core",
  "cumulus-pallet-aura-ext",
  "cumulus-pallet-parachain-system",

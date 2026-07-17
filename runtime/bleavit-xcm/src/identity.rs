@@ -8,16 +8,23 @@ use staging_xcm::latest::{Junction, Location};
 /// XCM v5 is the stable2603 wire-version pin; negotiation remains enabled (09 §6.1).
 pub const XCM_VERSION_PINNED: u32 = 5;
 
-/// The canonical USDC identifier as seen from Bleavit (02 §8; 09 §6.1).
-pub fn usdc_location() -> Location {
+/// An Asset Hub `pallet-assets` asset as seen from Bleavit: the one canonical
+/// `{parents: 1, X3(Parachain, PalletInstance, GeneralIndex)}` shape (02 §8).
+/// Non-USDC indices exist only for benchmark/test key material.
+pub fn asset_hub_asset_location(asset_index: u128) -> Location {
     Location::new(
         1,
         [
             Junction::Parachain(ASSET_HUB_PARA_ID),
             Junction::PalletInstance(USDC_PALLET_INSTANCE),
-            Junction::GeneralIndex(USDC_ASSET_INDEX),
+            Junction::GeneralIndex(asset_index),
         ],
     )
+}
+
+/// The canonical USDC identifier as seen from Bleavit (02 §8; 09 §6.1).
+pub fn usdc_location() -> Location {
+    asset_hub_asset_location(USDC_ASSET_INDEX)
 }
 
 /// The canonical DOT identifier as seen from Bleavit (09 §6.1).

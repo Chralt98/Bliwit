@@ -87,17 +87,14 @@ pub type Balance = futarchy_primitives::Balance;
 pub type Nonce = u32;
 pub type Hash = sp_core::H256;
 pub type BlockNumber = futarchy_primitives::BlockNumber;
-pub type AssetId = u32;
+pub type AssetId = staging_xcm::latest::Location;
 pub type Address = MultiAddress<AccountId, ()>;
 pub type Header = generic::Header<BlockNumber, BlakeTwo256>;
 
-/// USDC is the local `ForeignAssets` id corresponding to GeneralIndex(1337).
-pub const USDC_ASSET_ID: AssetId = 1337;
-/// Compact identity commitment retained from the B1 model and pinned by 02 §8.
-pub const USDC_LOCATION: [u8; 32] = [
-    1, 0, 0, 0, 232, 3, 0, 0, 50, 0, 0, 0, 57, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0,
-];
+pub use bleavit_xcm::identity::usdc_location;
+/// The 02 §8 SCALE encoding pinned by the release surface manifest.
+pub const USDC_LOCATION_ENCODED: [u8; 10] =
+    [0x01, 0x03, 0x00, 0xa1, 0x0f, 0x04, 0x32, 0x05, 0xe5, 0x14];
 pub const FEE_VIT_USDC_RATE_KEY: futarchy_primitives::ParamKey = *b"fee.vit_usdc\0\0\0\0";
 
 pub const MILLISECS_PER_BLOCK: u64 = kernel::MILLISECS_PER_BLOCK;

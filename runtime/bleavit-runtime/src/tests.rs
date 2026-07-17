@@ -32,15 +32,15 @@ use sp_runtime::{
 
 use crate::{
     classifier::{RuntimeBaseCallFilter, RuntimeDispatcher},
-    AccountId, AllPalletsWithSystem, AssetTxPayment, Attestor, Aura, AuraExt, Authorship, Balances,
-    BlockNumber, CollatorSelection, ConditionalLedger, Constitution, ConvictionVoting, CumulusXcm,
-    Epoch, ExecutionGuard, ForeignAssets, FutarchyTreasury, Guardian, IncidentRegistry, Market,
-    MessageQueue, Migrations, MilestoneRegistry, Multisig, Oracle, Origins,
-    PalletInfo as RuntimePalletInfo, ParachainInfo, ParachainSystem, PolkadotXcm, Preimage, Proxy,
-    Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin, Scheduler, Session, Sudo,
-    System, Timestamp, TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Vesting,
-    Welfare, XcmpQueue, FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX, USDC_ASSET_ID,
-    USDC_DECIMALS, USDC_LOCATION, VERSION, VIT_DECIMALS,
+    usdc_location, AccountId, AllPalletsWithSystem, AssetTxPayment, Attestor, Aura, AuraExt,
+    Authorship, Balances, BlockNumber, CollatorSelection, ConditionalLedger, Constitution,
+    ConvictionVoting, CumulusXcm, Epoch, ExecutionGuard, ForeignAssets, FutarchyTreasury, Guardian,
+    IncidentRegistry, Market, MessageQueue, Migrations, MilestoneRegistry, Multisig, Oracle,
+    Origins, PalletInfo as RuntimePalletInfo, ParachainInfo, ParachainSystem, PolkadotXcm,
+    Preimage, Proxy, Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin,
+    Scheduler, Session, Sudo, System, Timestamp, TransactionPayment, TxExtension,
+    UncheckedExtrinsic, Utility, Vesting, Welfare, XcmpQueue, FEE_VIT_USDC_RATE_KEY,
+    MILLISECS_PER_BLOCK, SS58_PREFIX, USDC_DECIMALS, USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
 };
 
 trait SameType<Rhs> {}
@@ -1009,7 +1009,6 @@ fn identity_and_version_pins_match_the_integration_contract() {
     assert_eq!(currency::VIT_EXISTENTIAL_DEPOSIT, 10_000_000_000);
     assert_eq!(VIT_DECIMALS, 12);
     assert_eq!(USDC_DECIMALS, 6);
-    assert_eq!(USDC_ASSET_ID, 1_337);
     assert_eq!(FEE_VIT_USDC_RATE_KEY, *b"fee.vit_usdc\0\0\0\0");
     assert_eq!(VERSION.spec_name.as_ref(), "bleavit");
     assert_eq!(VERSION.impl_name.as_ref(), "bleavit-runtime");
@@ -1019,24 +1018,18 @@ fn identity_and_version_pins_match_the_integration_contract() {
         futarchy_primitives::INTEGRATION_CONTRACT_VERSION
     );
     assert_eq!(VERSION.transaction_version, 3);
-    assert_eq!(
-        USDC_LOCATION,
-        [
-            1, 0, 0, 0, 232, 3, 0, 0, 50, 0, 0, 0, 57, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0,
-        ]
-    );
+    assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
 #[test]
 fn usdc_admin_and_fee_posture_is_fail_closed() {
     let create = RuntimeCall::ForeignAssets(pallet_assets::Call::create {
-        id: USDC_ASSET_ID,
+        id: usdc_location(),
         admin: MultiAddress::Id(account(1)),
         min_balance: currency::USDC_CENT,
     });
     let mint = RuntimeCall::ForeignAssets(pallet_assets::Call::mint {
-        id: USDC_ASSET_ID,
+        id: usdc_location(),
         beneficiary: MultiAddress::Id(account(2)),
         amount: currency::USDC_CENT,
     });
@@ -1052,8 +1045,11 @@ fn usdc_admin_and_fee_posture_is_fail_closed() {
     ));
 
     development_ext().execute_with(|| {
-        assert!(crate::configs::LiveFeeConversion::to_asset_balance(1, USDC_ASSET_ID).is_err());
-        assert!(crate::configs::LiveFeeConversion::to_asset_balance(1, USDC_ASSET_ID + 1).is_err());
+        assert!(crate::configs::LiveFeeConversion::to_asset_balance(1, usdc_location()).is_err());
+        let other_asset = bleavit_xcm::identity::asset_hub_asset_location(
+            chain_identity::USDC_ASSET_INDEX.saturating_add(1),
+        );
+        assert!(crate::configs::LiveFeeConversion::to_asset_balance(1, other_asset).is_err());
     });
 }
 
@@ -1079,15 +1075,15 @@ fn usdc_fee_conversion_scales_decimals_and_rounds_against_the_payer() {
             },
         );
         assert_eq!(
-            crate::configs::LiveFeeConversion::to_asset_balance(currency::VIT, USDC_ASSET_ID),
+            crate::configs::LiveFeeConversion::to_asset_balance(currency::VIT, usdc_location()),
             Ok(2 * currency::USDC)
         );
         assert_eq!(
-            crate::configs::LiveFeeConversion::to_asset_balance(1, USDC_ASSET_ID),
+            crate::configs::LiveFeeConversion::to_asset_balance(1, usdc_location()),
             Ok(1)
         );
         assert_eq!(
-            crate::configs::LiveFeeConversion::to_asset_balance(0, USDC_ASSET_ID),
+            crate::configs::LiveFeeConversion::to_asset_balance(0, usdc_location()),
             Ok(0)
         );
     });
@@ -1100,18 +1096,63 @@ fn development_preset_builds_and_pins_usdc_and_para_identity() {
             u32::from(ParachainInfo::parachain_id()),
             chain_identity::FIXTURE_PARA_ID
         );
-        assert!(ForeignAssets::asset_exists(USDC_ASSET_ID));
+        assert!(ForeignAssets::asset_exists(usdc_location()));
         assert_eq!(
-            ForeignAssets::minimum_balance(USDC_ASSET_ID),
+            ForeignAssets::minimum_balance(usdc_location()),
             currency::USDC_CENT
         );
-        let details = pallet_assets::Asset::<Runtime, pallet_assets::Instance1>::get(USDC_ASSET_ID);
+        let details =
+            pallet_assets::Asset::<Runtime, pallet_assets::Instance1>::get(usdc_location());
         assert!(details.is_some_and(|asset| asset.is_sufficient));
+        let metadata =
+            pallet_assets::Metadata::<Runtime, pallet_assets::Instance1>::get(usdc_location());
+        assert_eq!(metadata.decimals, currency::USDC_DECIMALS);
         assert_eq!(
             Balances::minimum_balance(),
             currency::VIT_EXISTENTIAL_DEPOSIT
         );
         assert_eq!(Balances::total_issuance(), currency::VIT_TOTAL_SUPPLY);
+    });
+}
+
+#[test]
+fn usdc_storage_keys_match_the_frozen_surface_manifest() {
+    fn storage_key(item: &[u8], encoded_location: &[u8]) -> Vec<u8> {
+        let mut key = Vec::with_capacity(64 + 16 + encoded_location.len());
+        key.extend_from_slice(&sp_core::hashing::twox_128(b"ForeignAssets"));
+        key.extend_from_slice(&sp_core::hashing::twox_128(item));
+        key.extend_from_slice(&sp_core::hashing::blake2_128(encoded_location));
+        key.extend_from_slice(encoded_location);
+        key
+    }
+
+    let encoded_location = usdc_location().encode();
+    let asset_key = storage_key(b"Asset", &encoded_location);
+    let metadata_key = storage_key(b"Metadata", &encoded_location);
+
+    assert_eq!(
+        format!("0x{}", sp_core::hexdisplay::HexDisplay::from(&asset_key)),
+        "0x30e64a56026f4b5e3c2d196283a9a17dd34371a193a751eea5883e9553457b2e484550ecc01d89e5e7bb33be1915aaef010300a10f043205e514"
+    );
+    assert_eq!(
+        format!("0x{}", sp_core::hexdisplay::HexDisplay::from(&metadata_key)),
+        "0x30e64a56026f4b5e3c2d196283a9a17db5f3822e35ca2f31ce3526eab1363fd2484550ecc01d89e5e7bb33be1915aaef010300a10f043205e514"
+    );
+
+    development_ext().execute_with(|| {
+        assert_eq!(
+            pallet_assets::Asset::<Runtime, pallet_assets::Instance1>::hashed_key_for(
+                usdc_location()
+            ),
+            asset_key
+        );
+        assert_eq!(
+            pallet_assets::Metadata::<Runtime, pallet_assets::Instance1>::hashed_key_for(
+                usdc_location()
+            ),
+            metadata_key
+        );
+        assert!(ForeignAssets::asset_exists(usdc_location()));
     });
 }
 
@@ -1177,13 +1218,13 @@ fn treasury_rebate_payout_moves_real_usdc_from_the_selected_pot() {
         let amount = 10 * currency::USDC;
         let retained = currency::USDC_CENT;
         assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
-            USDC_ASSET_ID,
+            usdc_location(),
             &keeper_pot,
             amount + retained,
         )
         .is_ok());
         assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
-            USDC_ASSET_ID,
+            usdc_location(),
             &oracle_pot,
             amount + retained,
         )
@@ -1203,8 +1244,11 @@ fn treasury_rebate_payout_moves_real_usdc_from_the_selected_pot() {
             PayoutLine::Keeper,
         )
         .is_ok());
-        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &keeper), amount);
-        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &keeper_pot), retained);
+        assert_eq!(ForeignAssets::balance(usdc_location(), &keeper), amount);
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &keeper_pot),
+            retained
+        );
 
         assert!(<TreasuryRebatePayout as RebatePayout<AccountId>>::pay(
             &keeper,
@@ -1212,8 +1256,11 @@ fn treasury_rebate_payout_moves_real_usdc_from_the_selected_pot() {
             PayoutLine::Oracle,
         )
         .is_ok());
-        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &keeper), 2 * amount);
-        assert_eq!(ForeignAssets::balance(USDC_ASSET_ID, &oracle_pot), retained);
+        assert_eq!(ForeignAssets::balance(usdc_location(), &keeper), 2 * amount);
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &oracle_pot),
+            retained
+        );
     });
 }
 
@@ -2748,7 +2795,7 @@ fn classifier_sweeps_every_callable_pallet_and_every_closed_wrapper_shape() {
         }),
         RuntimeCall::Vesting(pallet_vesting::Call::vest {}),
         RuntimeCall::ForeignAssets(pallet_assets::Call::transfer {
-            id: USDC_ASSET_ID,
+            id: usdc_location(),
             target: MultiAddress::Id(who.clone()),
             amount: 1,
         }),
