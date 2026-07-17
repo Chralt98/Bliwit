@@ -28,17 +28,49 @@ fn sync_at(block: BlockNumber) {
     ));
 }
 
+fn seed_idle_clock(epoch: EpochId) {
+    let mut state = EpochState::new();
+    let start = phase_block(epoch, phase_offsets::INTAKE_NUM);
+    state.epoch.index = epoch;
+    state.epoch.phase = EpochPhase::Intake;
+    state.epoch.epoch_start_block = start;
+    state.epoch.phase_start_block = start;
+    assert_ok!(Epoch::seed(state));
+    set_block(start);
+}
+
 #[test]
-fn epoch_roll_reaps_xcm_traffic_without_a_settlement_cohort() {
+fn tick_drains_xcm_traffic_backlog_without_a_clock_crossing_or_settlement_cohort() {
     new_test_ext().execute_with(|| {
+        seed_idle_clock(21);
+        WelfareTrafficBacklog::set(vec![0]);
         assert!(Epoch::epoch_state().cohorts.is_empty());
         assert!(WelfareTrafficPrunes::get().is_empty());
 
-        sync_at(phase_block(1, phase_offsets::INTAKE_NUM));
+        sync_at(phase_block(21, phase_offsets::INTAKE_NUM));
 
-        assert_eq!(EpochOf::<Test>::get().index, 1);
-        assert_eq!(WelfareTrafficPrunes::get(), vec![1]);
+        assert_eq!(EpochOf::<Test>::get().index, 21);
+        assert_eq!(WelfareTrafficPrunes::get(), vec![21]);
+        assert!(WelfareTrafficBacklog::get().is_empty());
         assert!(SeamCalls::get().is_empty());
+    });
+}
+
+#[test]
+fn tick_fully_drains_a_twenty_one_epoch_backlog_in_eleven_calls() {
+    new_test_ext().execute_with(|| {
+        seed_idle_clock(41);
+        WelfareTrafficBacklog::set((0..21).collect());
+
+        for _ in 0..10 {
+            sync_at(phase_block(41, phase_offsets::INTAKE_NUM));
+        }
+        assert_eq!(WelfareTrafficBacklog::get(), vec![20]);
+
+        sync_at(phase_block(41, phase_offsets::INTAKE_NUM));
+        assert!(WelfareTrafficBacklog::get().is_empty());
+        assert_eq!(WelfareTrafficPrunes::get().len(), 11);
+        assert!(WelfareTrafficPrunes::get().iter().all(|epoch| *epoch == 41));
     });
 }
 

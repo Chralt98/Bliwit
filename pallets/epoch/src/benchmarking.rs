@@ -5,9 +5,178 @@ use super::*;
 use crate::pallet::{NextProposalId, Pallet, TickBatch};
 use alloc::vec::Vec;
 use frame_benchmarking::v2::*;
+use frame_support::{
+    pallet_prelude::{Blake2_128Concat, OptionQuery, ValueQuery},
+    storage::types::{StorageDoubleMap, StorageMap, StorageValue},
+    traits::StorageInstance,
+    Twox64Concat,
+};
 use frame_system::RawOrigin;
-use futarchy_primitives::{phase_offsets, DecisionOutcome, ProposalState};
+use futarchy_primitives::{phase_offsets, DecisionOutcome, EpochPhase, ProposalState};
 use sp_runtime::SaturatedConversion;
+
+// `pallet-epoch` deliberately depends on welfare only through `WelfareSettlement`.
+// These benchmark-only aliases address the public welfare storage prefixes without
+// adding a production dependency between the two settlement pallets. The runtime's
+// `prime_settlement` helper seeds the typed snapshots/gate flags; this file adds the
+// two B4-residual auxiliary histories that the terminal prune must also retire.
+macro_rules! welfare_storage_instance {
+    ($name:ident, $storage:literal) => {
+        struct $name;
+        impl StorageInstance for $name {
+            fn pallet_prefix() -> &'static str {
+                "Welfare"
+            }
+
+            const STORAGE_PREFIX: &'static str = $storage;
+        }
+    };
+}
+
+welfare_storage_instance!(WelfareSnapshots, "Snapshots");
+welfare_storage_instance!(WelfareGateBreachFlags, "GateBreachFlags");
+welfare_storage_instance!(WelfareSampledGateDays, "SampledGateDays");
+welfare_storage_instance!(WelfareXcmTraffic, "XcmTraffic");
+welfare_storage_instance!(WelfareXcmTrafficEpochs, "XcmTrafficEpochs");
+
+type BenchmarkSnapshots =
+    StorageMap<WelfareSnapshots, Blake2_128Concat, (EpochId, MetricSpecVersion), (), OptionQuery>;
+type BenchmarkGateBreachFlags =
+    StorageMap<WelfareGateBreachFlags, Blake2_128Concat, EpochId, (), OptionQuery>;
+type BenchmarkSampledGateDays =
+    StorageMap<WelfareSampledGateDays, Blake2_128Concat, EpochId, [u32; 2], OptionQuery>;
+type BenchmarkXcmTraffic = StorageDoubleMap<
+    WelfareXcmTraffic,
+    Twox64Concat,
+    EpochId,
+    Twox64Concat,
+    u8,
+    [u64; 3],
+    ValueQuery,
+>;
+// `Vec<EpochId>` has the same SCALE representation as welfare's bounded vector.
+// Setup derives the exact capacity from the already-seeded snapshot window.
+type BenchmarkXcmTrafficEpochs = StorageValue<WelfareXcmTrafficEpochs, Vec<EpochId>, ValueQuery>;
+
+const TERMINAL_SETTLEMENT_EPOCH: EpochId = 1_000;
+// Benchmark-only mirror of welfare's frozen 21-epoch index capacity. Epoch
+// deliberately has no production dependency on pallet-welfare, so the aliases
+// above cannot name its Rust constant directly.
+const XCM_TRAFFIC_FULL_BACKLOG_EPOCHS: EpochId = 21;
+const XCM_TRAFFIC_DRAINED_PER_CALL: usize = 2;
+const XCM_TRAFFIC_DAYS_PER_EPOCH: usize = 1usize << u8::BITS;
+
+struct XcmTrafficFixture {
+    epochs: Vec<EpochId>,
+    entries: usize,
+}
+
+struct WelfareRetirementFixture {
+    snapshots: usize,
+    gate_flags: usize,
+    traffic: XcmTrafficFixture,
+}
+
+fn seed_xcm_traffic_history(mut traffic_epochs: Vec<EpochId>) -> XcmTrafficFixture {
+    traffic_epochs.sort_unstable();
+    traffic_epochs.dedup();
+    BenchmarkXcmTrafficEpochs::put(traffic_epochs.clone());
+    for epoch in &traffic_epochs {
+        for day in u8::MIN..=u8::MAX {
+            BenchmarkXcmTraffic::insert(epoch, day, [u64::MAX; 3]);
+        }
+    }
+
+    let traffic_entries = traffic_epochs
+        .len()
+        .saturating_mul(XCM_TRAFFIC_DAYS_PER_EPOCH);
+    assert_eq!(BenchmarkXcmTraffic::iter_keys().count(), traffic_entries);
+
+    XcmTrafficFixture {
+        epochs: traffic_epochs,
+        entries: traffic_entries,
+    }
+}
+
+/// Mirror the configured welfare seam for the pallet-only benchmark test
+/// runtime, which has no pallet-welfare instance behind these raw aliases.
+#[cfg(test)]
+pub(crate) fn prune_benchmark_xcm_traffic(cutoff_epoch: EpochId) {
+    BenchmarkXcmTrafficEpochs::mutate(|epochs| {
+        for _ in 0..XCM_TRAFFIC_DRAINED_PER_CALL {
+            let oldest = epochs
+                .iter()
+                .filter(|epoch| **epoch < cutoff_epoch)
+                .min()
+                .copied();
+            let Some(epoch) = oldest else {
+                break;
+            };
+            let _ = BenchmarkXcmTraffic::clear_prefix(epoch, u8::MAX as u32 + 1, None);
+            if let Some(position) = epochs.iter().position(|stored| *stored == epoch) {
+                epochs.remove(position);
+            }
+        }
+    });
+}
+
+fn assert_bounded_xcm_traffic_drain(fixture: &XcmTrafficFixture) {
+    let remaining = fixture
+        .epochs
+        .iter()
+        .skip(XCM_TRAFFIC_DRAINED_PER_CALL)
+        .copied()
+        .collect::<Vec<_>>();
+    assert_eq!(BenchmarkXcmTrafficEpochs::get(), remaining);
+    for epoch in fixture.epochs.iter().take(XCM_TRAFFIC_DRAINED_PER_CALL) {
+        assert_eq!(BenchmarkXcmTraffic::iter_prefix(epoch).count(), 0);
+    }
+    for epoch in fixture.epochs.iter().skip(XCM_TRAFFIC_DRAINED_PER_CALL) {
+        assert_eq!(
+            BenchmarkXcmTraffic::iter_prefix(epoch).count(),
+            XCM_TRAFFIC_DAYS_PER_EPOCH
+        );
+    }
+    assert_eq!(
+        BenchmarkXcmTraffic::iter_keys().count(),
+        fixture.entries.saturating_sub(
+            XCM_TRAFFIC_DRAINED_PER_CALL.saturating_mul(XCM_TRAFFIC_DAYS_PER_EPOCH)
+        )
+    );
+}
+
+fn seed_welfare_retirement_history() -> Option<WelfareRetirementFixture> {
+    let snapshots = BenchmarkSnapshots::iter_keys().count();
+    // The pallet-only mock has a seam double rather than pallet-welfare storage.
+    // The assembled runtime helper populates this map at its retained capacity.
+    if snapshots == 0 {
+        return None;
+    }
+
+    let gate_epochs = BenchmarkGateBreachFlags::iter_keys().collect::<Vec<_>>();
+    let mut traffic_epochs = BenchmarkSnapshots::iter_keys()
+        .map(|(epoch, _)| epoch)
+        .collect::<Vec<_>>();
+    traffic_epochs.sort_unstable();
+    traffic_epochs.dedup();
+    if let Some(last) = traffic_epochs.last().copied() {
+        traffic_epochs.push(last.saturating_add(1));
+    }
+
+    for epoch in &gate_epochs {
+        BenchmarkSampledGateDays::insert(epoch, [u32::MAX; 2]);
+    }
+    let traffic = seed_xcm_traffic_history(traffic_epochs);
+
+    assert_eq!(snapshots, gate_epochs.len());
+    assert_eq!(BenchmarkSampledGateDays::iter_keys().count(), snapshots);
+
+    Some(WelfareRetirementFixture {
+        snapshots,
+        gate_flags: gate_epochs.len(),
+        traffic,
+    })
+}
 
 fn block_for(epoch: EpochId, numerator: BlockNumber, length: BlockNumber) -> BlockNumber {
     epoch
@@ -284,8 +453,14 @@ mod benches {
 
     // The runtime fetches PreimageFor by (hash, recorded_len), and admission caps
     // recorded_len at the 64 KiB kernel maximum, so measured PoV is the true bound.
+    // The recorder still measures the full proof for 512 maximal fixed counters.
+    // Ignore only the generator's synthetic per-key estimate for this unbounded
+    // double map: it assumes 512 independent maximum-depth trie paths instead of
+    // their shared prefix. The generated total proof envelope remains above the
+    // benchmark's recorded proof at every sampled component.
     #[benchmark(pov_mode = MaxEncodedLen {
-        Preimage::PreimageFor: Measured
+        Preimage::PreimageFor: Measured,
+        Welfare::XcmTraffic: Ignored
     })]
     fn tick(n: Linear<1, TICK_BATCH_BOUND>) -> Result<(), BenchmarkError> {
         let params = T::Params::get();
@@ -293,7 +468,8 @@ mod benches {
         let mut ids = Vec::new();
         let mut payload_hashes = Vec::new();
         for pid in 1..=u64::from(n) {
-            let mut proposal = benchmark_proposal::<T>(pid, ProposalState::Qualified, 0);
+            let mut proposal =
+                benchmark_proposal::<T>(pid, ProposalState::Qualified, TERMINAL_SETTLEMENT_EPOCH);
             if proposal.payload_len != futarchy_primitives::kernel::MAX_BYTES
                 || payload_hashes.contains(&proposal.payload_hash)
             {
@@ -306,7 +482,11 @@ mod benches {
                 .map_err(|_| BenchmarkError::Stop("tick qualification preimage pin failed"))?;
             crate::QualificationPins::<T>::insert(pid, proposal.payload_hash);
             proposal.class = ProposalClass::Code;
-            proposal.decide_at = block_for(0, phase_offsets::DECIDE_NUM, params.epoch_length);
+            proposal.decide_at = block_for(
+                TERMINAL_SETTLEMENT_EPOCH,
+                phase_offsets::DECIDE_NUM,
+                params.epoch_length,
+            );
             state.proposals.push(proposal);
             ids.push(pid);
         }
@@ -316,8 +496,29 @@ mod benches {
             MAX_LIVE_PROPOSALS,
             MAX_NON_TERMINAL_COHORTS,
         );
+        state.epoch.index = TERMINAL_SETTLEMENT_EPOCH;
+        state.epoch.phase = EpochPhase::Seed;
+        state.epoch.length = params.epoch_length;
+        state.epoch.next_length = params.epoch_length;
+        state.epoch.epoch_start_block =
+            TERMINAL_SETTLEMENT_EPOCH.saturating_mul(params.epoch_length);
+        state.epoch.phase_start_block = block_for(
+            TERMINAL_SETTLEMENT_EPOCH,
+            phase_offsets::SEED_NUM,
+            params.epoch_length,
+        );
         Pallet::<T>::seed(state)?;
-        set_block::<T>(block_for(0, phase_offsets::SEED_NUM, params.epoch_length));
+        let traffic =
+            seed_xcm_traffic_history((0..XCM_TRAFFIC_FULL_BACKLOG_EPOCHS).collect::<Vec<_>>());
+        assert_eq!(
+            traffic.epochs.len(),
+            XCM_TRAFFIC_FULL_BACKLOG_EPOCHS as usize
+        );
+        set_block::<T>(block_for(
+            TERMINAL_SETTLEMENT_EPOCH,
+            phase_offsets::SEED_NUM,
+            params.epoch_length,
+        ));
         let pids = TickBatch::try_from(ids)
             .map_err(|_| BenchmarkError::Stop("benchmark tick batch exceeded"))?;
         let caller = T::BenchmarkHelper::account(250);
@@ -330,6 +531,7 @@ mod benches {
             futarchy_primitives::keeper::CrankClass::DecisionCritical,
         );
         assert_eq!(crate::Proposals::<T>::count(), MAX_LIVE_PROPOSALS_BOUND);
+        assert_bounded_xcm_traffic_drain(&traffic);
         Ok(())
     }
 
@@ -379,12 +581,26 @@ mod benches {
         Ok(())
     }
 
-    #[benchmark]
+    // The terminal fixture fills every touched collection to capacity and all
+    // 512 drainable traffic keys hold the maximum fixed counter payload. The
+    // recorder measures their full proof, but the generator's unbounded-map
+    // estimate assumes 512 independent maximum-depth trie paths instead of the
+    // shared double-map prefix. Ignore only that synthetic per-key estimate; the
+    // generated total proof envelope remains above the recorded proof at every
+    // sampled component. Every other storage remains MaxEncodedLen.
+    #[benchmark(pov_mode = MaxEncodedLen {
+        Welfare::XcmTraffic: Ignored
+    })]
     fn settle_cohort(n: Linear<1, MAX_COHORT_PROPOSALS_BOUND>) -> Result<(), BenchmarkError> {
         let params = T::Params::get();
         let mut state = EpochState::new();
         let mut ids = Vec::new();
-        for pid in 1..=u64::from(n) {
+        // Keep the cohort at its five-proposal bound for every sample. `n` is
+        // still the exact dispatch batch: the cursor places the measured range
+        // on the final `n` items (ending with Baseline), so every point executes
+        // terminal reap + welfare retirement while preserving the runtime
+        // WeightInfo argument's meaning.
+        for pid in 1..=u64::from(MAX_COHORT_PROPOSALS_BOUND) {
             let mut proposal = benchmark_proposal::<T>(pid, ProposalState::Measuring, 0);
             proposal.markets = Some(T::BenchmarkHelper::prime_decision(pid, 0, true));
             proposal.decision = Some(DecisionOutcome::Adopt);
@@ -401,8 +617,23 @@ mod benches {
         state.cohorts.push(CoreCohortInfo {
             epoch: 0,
             proposals: ids,
-            status: CohortStatus::Measuring { until_epoch: 2 },
+            status: CohortStatus::Settling {
+                cursor: MAX_COHORT_PROPOSALS_BOUND
+                    .saturating_add(1)
+                    .saturating_sub(n),
+            },
         });
+        state.epoch.index = TERMINAL_SETTLEMENT_EPOCH;
+        state.epoch.phase = futarchy_primitives::EpochPhase::Housekeeping;
+        state.epoch.length = params.epoch_length;
+        state.epoch.next_length = params.epoch_length;
+        state.epoch.epoch_start_block =
+            TERMINAL_SETTLEMENT_EPOCH.saturating_mul(params.epoch_length);
+        state.epoch.phase_start_block = block_for(
+            TERMINAL_SETTLEMENT_EPOCH,
+            phase_offsets::HOUSEKEEPING_NUM,
+            params.epoch_length,
+        );
         fill_epoch_state::<T>(
             &mut state,
             MAX_INTAKE_QUEUE,
@@ -411,8 +642,9 @@ mod benches {
         );
         Pallet::<T>::seed(state)?;
         T::BenchmarkHelper::prime_settlement(0);
+        let welfare = seed_welfare_retirement_history();
         set_block::<T>(block_for(
-            3,
+            TERMINAL_SETTLEMENT_EPOCH,
             phase_offsets::HOUSEKEEPING_NUM,
             params.epoch_length,
         ));
@@ -425,14 +657,26 @@ mod benches {
         T::BenchmarkHelper::assert_keeper_rebate_paid(
             futarchy_primitives::keeper::CrankClass::DecisionCritical,
         );
-        // A valid cohort has at most five proposals. Benchmark each charged
-        // proposal item (including its four gate settlements); the sixth,
-        // baseline-only item is cheaper, while values above six cannot touch
-        // additional state and merely overpay the linear dispatch weight.
-        assert_eq!(
-            crate::Cohorts::<T>::get(0).map(|cohort| cohort.status),
-            Some(CohortStatus::Settling { cursor: n })
-        );
+        assert!(!crate::Cohorts::<T>::contains_key(0));
+        if let Some(welfare) = welfare {
+            assert_eq!(welfare.snapshots, welfare.gate_flags);
+            assert_eq!(
+                welfare.traffic.epochs.len(),
+                welfare.snapshots.saturating_add(1)
+            );
+            assert_eq!(
+                welfare.traffic.entries,
+                welfare
+                    .traffic
+                    .epochs
+                    .len()
+                    .saturating_mul(XCM_TRAFFIC_DAYS_PER_EPOCH)
+            );
+            assert_eq!(BenchmarkSnapshots::iter_keys().count(), 0);
+            assert_eq!(BenchmarkGateBreachFlags::iter_keys().count(), 0);
+            assert_eq!(BenchmarkSampledGateDays::iter_keys().count(), 0);
+            assert_bounded_xcm_traffic_drain(&welfare.traffic);
+        }
         Ok(())
     }
 

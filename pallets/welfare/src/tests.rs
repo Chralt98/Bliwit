@@ -600,6 +600,28 @@ fn prune_rolls_the_snapshot_and_gate_windows() {
 }
 
 #[test]
+fn xcm_traffic_prune_is_bounded_and_oldest_first() {
+    new_test_ext().execute_with(|| {
+        for epoch in [7, 3, 5, 9, 1, 8] {
+            Welfare::note_xcm_traffic(epoch, 0, XcmTrafficKind::Accepted);
+            Welfare::note_xcm_traffic(epoch, u8::MAX, XcmTrafficKind::ProbeTimeout);
+        }
+
+        assert_ok!(Welfare::prune_xcm_traffic(8));
+
+        assert_eq!(XcmTraffic::<Test>::iter_prefix(1).count(), 0);
+        assert_eq!(XcmTraffic::<Test>::iter_prefix(3).count(), 0);
+        for epoch in [5, 7, 8, 9] {
+            assert_eq!(XcmTraffic::<Test>::iter_prefix(epoch).count(), 2);
+        }
+        assert_eq!(
+            XcmTrafficEpochs::<Test>::get().into_inner(),
+            vec![7, 5, 9, 8]
+        );
+    });
+}
+
+#[test]
 fn xcm_traffic_recorder_saturates_each_counter() {
     new_test_ext().execute_with(|| {
         XcmTraffic::<Test>::insert(
@@ -726,9 +748,39 @@ fn xcm_traffic_recorder_is_infallible_across_epoch_and_day_boundaries() {
 }
 
 #[test]
-fn try_state_rejects_xcm_traffic_outside_retention_and_zero_counters() {
+fn xcm_traffic_recorder_drops_only_a_new_epoch_when_the_index_is_full() {
+    new_test_ext().execute_with(|| {
+        for epoch in 0..MAX_XCM_TRAFFIC_EPOCHS_BOUND {
+            Welfare::note_xcm_traffic(epoch, 0, XcmTrafficKind::Accepted);
+        }
+        Welfare::note_xcm_traffic(MAX_XCM_TRAFFIC_EPOCHS_BOUND, 0, XcmTrafficKind::SendFailed);
+        Welfare::note_xcm_traffic(0, 0, XcmTrafficKind::ProbeTimeout);
+
+        assert_eq!(
+            XcmTrafficEpochs::<Test>::get().len(),
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND as usize
+        );
+        assert!(!XcmTraffic::<Test>::contains_key(
+            MAX_XCM_TRAFFIC_EPOCHS_BOUND,
+            0
+        ));
+        assert_eq!(
+            Welfare::xcm_traffic(0, 0),
+            XcmTrafficCounters {
+                accepted: 1,
+                failed: 0,
+                probe_timeouts: 1,
+            }
+        );
+    });
+}
+
+#[test]
+fn try_state_accepts_a_bounded_backlog_and_rejects_structural_corruption() {
     new_test_ext().execute_with(|| {
         CurrentEpochValue::set(30);
+        // Bounded pruning may legitimately leave an old indexed prefix queued
+        // for a later tick; age alone is no longer a try-state violation.
         XcmTraffic::<Test>::insert(
             9,
             0,
@@ -737,7 +789,8 @@ fn try_state_rejects_xcm_traffic_outside_retention_and_zero_counters() {
                 ..Default::default()
             },
         );
-        assert!(Welfare::do_try_state().is_err());
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![9]));
+        assert_ok!(Welfare::do_try_state());
 
         XcmTraffic::<Test>::remove(9, 0);
         XcmTrafficEpochs::<Test>::kill();
@@ -749,11 +802,13 @@ fn try_state_rejects_xcm_traffic_outside_retention_and_zero_counters() {
                 ..Default::default()
             },
         );
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![31]));
         assert!(Welfare::do_try_state().is_err());
 
         XcmTraffic::<Test>::remove(31, 0);
         XcmTrafficEpochs::<Test>::kill();
         XcmTraffic::<Test>::insert(10, 0, XcmTrafficCounters::default());
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![10]));
         assert!(Welfare::do_try_state().is_err());
 
         XcmTraffic::<Test>::remove(10, 0);
@@ -766,6 +821,10 @@ fn try_state_rejects_xcm_traffic_outside_retention_and_zero_counters() {
 
         XcmTraffic::<Test>::remove(30, u8::MAX);
         XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![30]));
+        assert!(Welfare::do_try_state().is_err());
+
+        XcmTrafficEpochs::<Test>::put(BoundedVec::truncate_from(vec![30, 30]));
+        Welfare::note_xcm_traffic(30, 0, XcmTrafficKind::Accepted);
         assert!(Welfare::do_try_state().is_err());
     });
 }

@@ -527,14 +527,26 @@ impl WelfareSettlement for TestWelfare {
     }
 
     fn prune(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
-        SeamCalls::push(SeamCall::WelfarePrune(current_epoch))
+        SeamCalls::push(SeamCall::WelfarePrune(current_epoch))?;
+        let cutoff = current_epoch.saturating_sub(TEST_WELFARE_SNAPSHOT_WINDOW.saturating_sub(1));
+        WelfareTrafficBacklog::prune_before(cutoff);
+        #[cfg(feature = "runtime-benchmarks")]
+        crate::benchmarking::prune_benchmark_xcm_traffic(cutoff);
+        Ok(())
     }
 
     fn prune_xcm_traffic(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
         WelfareTrafficPrunes::push(current_epoch);
+        let cutoff = current_epoch.saturating_sub(TEST_WELFARE_SNAPSHOT_WINDOW);
+        WelfareTrafficBacklog::prune_before(cutoff);
+        #[cfg(feature = "runtime-benchmarks")]
+        crate::benchmarking::prune_benchmark_xcm_traffic(cutoff);
         Ok(())
     }
 }
+
+const TEST_WELFARE_SNAPSHOT_WINDOW: EpochId = 20;
+const TEST_XCM_TRAFFIC_PRUNE_MAX_EPOCHS: usize = 2;
 
 pub struct WelfareTrafficPrunes;
 
@@ -554,6 +566,42 @@ impl WelfareTrafficPrunes {
         let mut epochs = Self::get();
         epochs.push(epoch);
         sp_io::storage::set(Self::KEY, &epochs.encode());
+    }
+}
+
+/// Transaction-aware model of welfare's bounded XCM-traffic epoch index.
+pub struct WelfareTrafficBacklog;
+
+impl WelfareTrafficBacklog {
+    const KEY: &'static [u8] = b":test:epoch:welfare-traffic-backlog";
+
+    pub fn get() -> Vec<EpochId> {
+        if let Some(encoded) = sp_io::storage::get(Self::KEY) {
+            let mut input: &[u8] = encoded.as_ref();
+            if let Ok(epochs) = Vec::<EpochId>::decode(&mut input) {
+                return epochs;
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn set(epochs: Vec<EpochId>) {
+        sp_io::storage::set(Self::KEY, &epochs.encode());
+    }
+
+    fn prune_before(cutoff_epoch: EpochId) {
+        let mut epochs = Self::get();
+        epochs.sort_unstable();
+        let mut drained = 0usize;
+        epochs.retain(|epoch| {
+            if *epoch < cutoff_epoch && drained < TEST_XCM_TRAFFIC_PRUNE_MAX_EPOCHS {
+                drained = drained.saturating_add(1);
+                false
+            } else {
+                true
+            }
+        });
+        Self::set(epochs);
     }
 }
 

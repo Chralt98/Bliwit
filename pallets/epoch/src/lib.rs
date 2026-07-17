@@ -150,9 +150,9 @@ pub trait WelfareSettlement {
     /// The implementation derives its bounded rolling-window cutoff from the
     /// supplied live epoch, keeping the retention constant single-homed.
     fn prune(current_epoch: EpochId) -> DispatchResult;
-    /// Reap XCM traffic history whenever the live clock crosses an epoch
-    /// boundary, even if no settlement cohort exists to trigger full welfare
-    /// retirement.
+    /// Drain one bounded XCM-traffic retirement batch for the live epoch.
+    /// Tick invokes this unconditionally so a pathological historical backlog
+    /// is retried until empty even if another crank crossed the epoch boundary.
     fn prune_xcm_traffic(current_epoch: EpochId) -> DispatchResult;
 }
 
@@ -605,109 +605,111 @@ pub mod pallet {
             let params = Self::live_params()?;
             let now = Self::now();
             let mut advanced = false;
-            let result = Self::mutate(|state, ledger| {
-                state.horizon_k = params.horizon_k;
-                state.epoch.next_length = params.epoch_length;
-                let clock_before = (
-                    state.epoch.index,
-                    state.epoch.phase,
-                    state.epoch.phase_start_block,
-                    state.epoch.epoch_start_block,
-                    state.epoch.length,
-                );
-                Self::sync_clock(state, now)?;
-                for pid in pids {
-                    let proposal = state.proposal_view(pid)?.clone();
-                    let rerun = proposal.state == ProposalState::Rerun;
-                    let requires_gate_markets = if rerun {
-                        proposal
-                            .markets
-                            .is_some_and(|markets| markets.gates.is_some())
-                    } else {
-                        Self::requires_gate_markets_at_seed(&proposal)
-                    };
-                    // Suppress new market/vault deployment while any safety hold
-                    // is active: a genuine stale-epoch (the core's T20 force-reject),
-                    // the dead-man pause (05 §4.8) or a ledger freeze (06 §6.3). The
-                    // core decides freeze-vs-force-reject from its own authoritative
-                    // state, so these are deliberately not fed into `tick` inputs.
-                    let safety_hold = T::Guardian::dead_man_engaged()
-                        || T::Constitution::ledger_frozen()
-                        || state.stale_process_hold(pid);
-                    let markets = if !safety_hold
-                        && state.recovery_epoch.is_none()
-                        && state.epoch.phase == EpochPhase::Seed
-                        && matches!(
+            let result = frame_support::storage::with_storage_layer(|| {
+                Self::mutate(|state, ledger| {
+                    state.horizon_k = params.horizon_k;
+                    state.epoch.next_length = params.epoch_length;
+                    let clock_before = (
+                        state.epoch.index,
+                        state.epoch.phase,
+                        state.epoch.phase_start_block,
+                        state.epoch.epoch_start_block,
+                        state.epoch.length,
+                    );
+                    Self::sync_clock(state, now)?;
+                    for pid in pids {
+                        let proposal = state.proposal_view(pid)?.clone();
+                        let rerun = proposal.state == ProposalState::Rerun;
+                        let requires_gate_markets = if rerun {
+                            proposal
+                                .markets
+                                .is_some_and(|markets| markets.gates.is_some())
+                        } else {
+                            Self::requires_gate_markets_at_seed(&proposal)
+                        };
+                        // Suppress new market/vault deployment while any safety hold
+                        // is active: a genuine stale-epoch (the core's T20 force-reject),
+                        // the dead-man pause (05 §4.8) or a ledger freeze (06 §6.3). The
+                        // core decides freeze-vs-force-reject from its own authoritative
+                        // state, so these are deliberately not fed into `tick` inputs.
+                        let safety_hold = T::Guardian::dead_man_engaged()
+                            || T::Constitution::ledger_frozen()
+                            || state.stale_process_hold(pid);
+                        let markets = if !safety_hold
+                            && state.recovery_epoch.is_none()
+                            && state.epoch.phase == EpochPhase::Seed
+                            && matches!(
+                                proposal.state,
+                                ProposalState::Qualified | ProposalState::Rerun
+                            ) {
+                            let markets =
+                                T::Market::open_markets(&proposal, rerun, requires_gate_markets)
+                                    .map_err(|_| CoreError::Ledger)?;
+                            ensure!(
+                                markets.gates.is_some() == requires_gate_markets,
+                                CoreError::BadDecisionInput
+                            );
+                            Some(markets)
+                        } else {
+                            None
+                        };
+                        let preimage_ok = proposal.payload_len
+                            <= futarchy_primitives::kernel::MAX_BYTES
+                            && T::Preimage::len(proposal.payload_hash)
+                                == Some(proposal.payload_len);
+                        let guard_owned_before = matches!(
                             proposal.state,
-                            ProposalState::Qualified | ProposalState::Rerun
-                        ) {
-                        let markets =
-                            T::Market::open_markets(&proposal, rerun, requires_gate_markets)
-                                .map_err(|_| CoreError::Ledger)?;
-                        ensure!(
-                            markets.gates.is_some() == requires_gate_markets,
-                            CoreError::BadDecisionInput
+                            ProposalState::Queued | ProposalState::FailedExecuted
                         );
-                        Some(markets)
-                    } else {
-                        None
-                    };
-                    let preimage_ok = proposal.payload_len
-                        <= futarchy_primitives::kernel::MAX_BYTES
-                        && T::Preimage::len(proposal.payload_hash) == Some(proposal.payload_len);
-                    let guard_owned_before = matches!(
-                        proposal.state,
-                        ProposalState::Queued | ProposalState::FailedExecuted
-                    );
-                    let events_before = state.events.len();
-                    state.tick(
-                        CoreOrigin::Keeper,
-                        ledger,
-                        pid,
-                        now,
-                        TickInputs {
-                            static_checks_pass: preimage_ok
-                                && T::Constitution::static_checks_pass(&proposal),
-                            active_metric_spec_version: T::Constitution::active_metric_spec_version(
-                            ),
-                            markets,
-                            review_window_closed: T::Guardian::review_window_closed(pid),
-                            queue_reject_reason: T::ExecutionGuard::queue_reject_reason(pid),
-                            retry_exhausted: T::ExecutionGuard::retry_exhausted(pid),
-                        },
-                        &params,
-                    )?;
-                    let state_after = state.proposal_view(pid)?.state;
-                    if matches!(
-                        proposal.state,
-                        ProposalState::Submitted | ProposalState::Screening
-                    ) && state_after == ProposalState::Qualified
-                    {
-                        // T5: request before the qualified state is persisted.
-                        // Both writes share this storage layer, so a failed
-                        // request rolls the transition back for a keeper retry.
-                        Self::pin_at_qualification(pid, proposal.payload_hash)?;
-                    }
-                    if !Self::epoch_owns_prequeue_pin(state_after) {
-                        // Covers pre-queue T20/stale force-rejects. Queued and
-                        // failed-executed proposals handed ownership to A11 at
-                        // T9 and therefore have no QualificationPins entry.
-                        Self::release_qualification_pin(pid);
-                    }
-                    advanced |= state
-                        .events
-                        .iter()
-                        .skip(events_before)
-                        .any(|event| !matches!(event, CoreEvent::NoOp));
-                    let guard_owned_after = matches!(
-                        state_after,
-                        ProposalState::Queued | ProposalState::FailedExecuted
-                    );
-                    if guard_owned_before && !guard_owned_after {
-                        T::ExecutionGuard::dequeue_terminal(pid)
-                            .map_err(|_| CoreError::ExecutionGuard)?;
-                    }
-                    if state.events.iter().any(
+                        let events_before = state.events.len();
+                        state.tick(
+                            CoreOrigin::Keeper,
+                            ledger,
+                            pid,
+                            now,
+                            TickInputs {
+                                static_checks_pass: preimage_ok
+                                    && T::Constitution::static_checks_pass(&proposal),
+                                active_metric_spec_version:
+                                    T::Constitution::active_metric_spec_version(),
+                                markets,
+                                review_window_closed: T::Guardian::review_window_closed(pid),
+                                queue_reject_reason: T::ExecutionGuard::queue_reject_reason(pid),
+                                retry_exhausted: T::ExecutionGuard::retry_exhausted(pid),
+                            },
+                            &params,
+                        )?;
+                        let state_after = state.proposal_view(pid)?.state;
+                        if matches!(
+                            proposal.state,
+                            ProposalState::Submitted | ProposalState::Screening
+                        ) && state_after == ProposalState::Qualified
+                        {
+                            // T5: request before the qualified state is persisted.
+                            // Both writes share this storage layer, so a failed
+                            // request rolls the transition back for a keeper retry.
+                            Self::pin_at_qualification(pid, proposal.payload_hash)?;
+                        }
+                        if !Self::epoch_owns_prequeue_pin(state_after) {
+                            // Covers pre-queue T20/stale force-rejects. Queued and
+                            // failed-executed proposals handed ownership to A11 at
+                            // T9 and therefore have no QualificationPins entry.
+                            Self::release_qualification_pin(pid);
+                        }
+                        advanced |= state
+                            .events
+                            .iter()
+                            .skip(events_before)
+                            .any(|event| !matches!(event, CoreEvent::NoOp));
+                        let guard_owned_after = matches!(
+                            state_after,
+                            ProposalState::Queued | ProposalState::FailedExecuted
+                        );
+                        if guard_owned_before && !guard_owned_after {
+                            T::ExecutionGuard::dequeue_terminal(pid)
+                                .map_err(|_| CoreError::ExecutionGuard)?;
+                        }
+                        if state.events.iter().any(
                         |event| matches!(event, CoreEvent::RerunOpened(opened) if *opened == pid),
                     ) {
                         let reopened = state.proposal_view(pid)?.decide_at;
@@ -717,15 +719,23 @@ pub mod pallet {
                             Ok::<(), CoreError>(())
                         })?;
                     }
-                }
-                advanced |= clock_before
-                    != (
-                        state.epoch.index,
-                        state.epoch.phase,
-                        state.epoch.phase_start_block,
-                        state.epoch.epoch_start_block,
-                        state.epoch.length,
-                    );
+                    }
+                    advanced |= clock_before
+                        != (
+                            state.epoch.index,
+                            state.epoch.phase,
+                            state.epoch.phase_start_block,
+                            state.epoch.epoch_start_block,
+                            state.epoch.length,
+                        );
+                    Ok(())
+                })?;
+                // Stateless retry hook: a clock-crossing trigger can be missed
+                // when decide/settle_cohort advances the clock first. Every
+                // successful tick therefore drains one bounded welfare batch;
+                // the steady-state empty path is only an index read.
+                T::Welfare::prune_xcm_traffic(EpochOf::<T>::get().index)
+                    .map_err(|_| Error::<T>::Welfare)?;
                 Ok(())
             });
             if result.is_ok() && advanced {
@@ -1272,12 +1282,8 @@ pub mod pallet {
             state: &mut EpochState<T::AccountId>,
             now: BlockNumber,
         ) -> Result<(), CoreError> {
-            let epoch_before = state.epoch.index;
             let paused_at = state.dead_man_paused_at;
             state.sync_phase(now);
-            if state.epoch.index != epoch_before {
-                T::Welfare::prune_xcm_traffic(state.epoch.index).map_err(|_| CoreError::Welfare)?;
-            }
             if let Some(paused_at) = paused_at {
                 if !state.dead_man_armed && state.dead_man_paused_at.is_none() {
                     let paused_for = now.saturating_sub(paused_at);

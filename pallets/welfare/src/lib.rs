@@ -58,6 +58,12 @@ pub const MAX_GATE_FLAGS_BOUND: u32 = MAX_GATE_FLAGS as u32;
 pub const MAX_COMPONENTS_PER_SPEC_BOUND: u32 = MAX_COMPONENTS_PER_SPEC as u32;
 /// Current epoch plus the retained snapshot-history window.
 pub const MAX_XCM_TRAFFIC_EPOCHS_BOUND: u32 = MAX_SNAPSHOTS_BOUND + 1;
+/// Maximum retired XCM-traffic epoch prefixes removed by one maintenance call.
+///
+/// Steady state retires at most one epoch per clock roll, so this cap binds only
+/// while a pathological historical backlog is spread across successive keeper
+/// ticks. Keeping the catch-up cursor-bounded is required by I-20.
+pub const XCM_TRAFFIC_PRUNE_MAX_EPOCHS: usize = 2;
 
 /// Live 13 §1 welfare tunables. B1a implements this provider over
 /// `pallet-constitution::Params`; tests use overridable parameter statics.
@@ -321,9 +327,9 @@ pub mod pallet {
 
     /// Bounded epoch prefixes which currently own XCM traffic entries.
     ///
-    /// This lets clock-roll maintenance reap traffic-only epochs without a
-    /// historical full-map scan. The inclusive retained range is the current
-    /// epoch plus the preceding snapshot window.
+    /// This lets tick-path maintenance reap traffic-only epochs without a
+    /// historical full-map scan. Bounded pruning can temporarily leave older
+    /// prefixes queued behind the retained window; the index remains capped.
     #[pallet::storage]
     pub type XcmTrafficEpochs<T: Config> =
         StorageValue<_, BoundedVec<EpochId, ConstU32<MAX_XCM_TRAFFIC_EPOCHS_BOUND>>, ValueQuery>;
@@ -624,20 +630,29 @@ pub mod pallet {
 
         /// Reap only retired XCM traffic prefixes.
         ///
-        /// Epoch calls this whenever its persisted clock crosses an epoch
-        /// boundary, including when no settlement cohort exists. Both loops
-        /// are bounded: the epoch index has at most the retained-window size,
-        /// and the `u8` day key admits at most 256 entries per prefix.
+        /// Epoch calls this after every successful tick, including when no
+        /// settlement cohort exists. At steady state an epoch roll retires at
+        /// most one prefix, so the cap never binds. A pathological multi-epoch
+        /// backlog is deliberately spread across successive ticks (I-20).
+        /// Each selected prefix is itself bounded by the `u8` day key's 256
+        /// entries. Selection is oldest-first and only epochs strictly below
+        /// `cutoff_epoch` are eligible.
         pub fn prune_xcm_traffic(cutoff_epoch: EpochId) -> DispatchResult {
             XcmTrafficEpochs::<T>::mutate(|epochs| {
-                epochs.retain(|epoch| {
-                    if *epoch < cutoff_epoch {
-                        let _ = XcmTraffic::<T>::clear_prefix(*epoch, u8::MAX as u32 + 1, None);
-                        false
-                    } else {
-                        true
+                for _ in 0..XCM_TRAFFIC_PRUNE_MAX_EPOCHS {
+                    let oldest = epochs
+                        .iter()
+                        .filter(|epoch| **epoch < cutoff_epoch)
+                        .min()
+                        .copied();
+                    let Some(epoch) = oldest else {
+                        break;
+                    };
+                    let _ = XcmTraffic::<T>::clear_prefix(epoch, u8::MAX as u32 + 1, None);
+                    if let Some(position) = epochs.iter().position(|stored| *stored == epoch) {
+                        epochs.remove(position);
                     }
-                });
+                }
             });
             Ok(())
         }
@@ -654,8 +669,11 @@ pub mod pallet {
                     epochs.try_push(epoch).is_ok()
                 }
             });
-            // A full index indicates corrupt or stale maintenance state. Keep
-            // the observation path fail-soft without creating unindexed state.
+            // A full index can occur while bounded maintenance catches up. The
+            // conservative bounded-state choice is to drop the whole new-epoch
+            // observation rather than create an unindexed counter; the caller's
+            // transport/probe path remains fail-soft and existing indexed epochs
+            // continue recording normally.
             if !tracked {
                 return;
             }
@@ -902,12 +920,16 @@ pub mod pallet {
                 }
             }
             let current_epoch = T::CurrentEpoch::get();
-            let oldest_retained = current_epoch.saturating_sub(MAX_SNAPSHOTS_BOUND);
             let traffic_epochs = XcmTrafficEpochs::<T>::get();
+            if traffic_epochs.len() > MAX_XCM_TRAFFIC_EPOCHS_BOUND as usize {
+                return Err(TryRuntimeError::Other(
+                    "welfare XCM traffic index exceeds its epoch bound",
+                ));
+            }
             for (position, epoch) in traffic_epochs.iter().enumerate() {
-                if *epoch < oldest_retained || *epoch > current_epoch {
+                if *epoch > current_epoch {
                     return Err(TryRuntimeError::Other(
-                        "welfare XCM traffic index lies outside the retained epoch window",
+                        "welfare XCM traffic index lies in the future",
                     ));
                 }
                 if traffic_epochs[..position].contains(epoch) {
@@ -922,9 +944,9 @@ pub mod pallet {
                 }
             }
             for (epoch, _, counters) in XcmTraffic::<T>::iter() {
-                if epoch < oldest_retained || epoch > current_epoch {
+                if epoch > current_epoch {
                     return Err(TryRuntimeError::Other(
-                        "welfare XCM traffic lies outside the retained epoch window",
+                        "welfare XCM traffic lies in the future",
                     ));
                 }
                 if !traffic_epochs.contains(&epoch) {
