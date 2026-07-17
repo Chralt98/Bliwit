@@ -9,10 +9,10 @@ use sp_runtime::traits::AccountIdConversion;
 
 use crate::{
     configs::{LedgerPalletId, TreasuryPalletId},
-    AccountId, Balance, BalancesConfig, CollatorSelectionConfig, ConstitutionConfig, EpochConfig,
-    ExecutionGuardConfig, ForeignAssetsConfig, ParachainInfoConfig, PolkadotXcmConfig,
+    usdc_location, AccountId, Balance, BalancesConfig, CollatorSelectionConfig, ConstitutionConfig,
+    EpochConfig, ExecutionGuardConfig, ForeignAssetsConfig, ParachainInfoConfig, PolkadotXcmConfig,
     RuntimeGenesisConfig, SessionConfig, SessionKeys, SudoConfig, VestingConfig,
-    MILLISECS_PER_BLOCK, USDC_ASSET_ID,
+    MILLISECS_PER_BLOCK,
 };
 
 const SAFE_XCM_VERSION: u32 = staging_xcm::prelude::XCM_VERSION;
@@ -113,13 +113,13 @@ fn testnet_genesis(
         },
         foreign_assets: ForeignAssetsConfig {
             assets: vec![(
-                USDC_ASSET_ID,
+                usdc_location(),
                 owner,
                 true,
                 futarchy_primitives::currency::USDC_CENT,
             )],
             metadata: vec![(
-                USDC_ASSET_ID,
+                usdc_location(),
                 b"USD Coin".to_vec(),
                 b"USDC".to_vec(),
                 futarchy_primitives::currency::USDC_DECIMALS

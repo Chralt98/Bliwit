@@ -49,12 +49,75 @@ class WorkflowContractTests(unittest.TestCase):
 
     def test_tag_gates_run_all_tooling_suites(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        gates = workflow[workflow.index("  gates:"):workflow.index("  artifacts:")]
+        self.assertIn("actions/setup-node@v4", gates)
+        self.assertIn("node-version: '22'", gates)
         for suite in (
             "tools/deploy/tests",
             "tools/reference-model/tests",
             "tools/release/tests",
+            "tools/env/tests",
         ):
             self.assertIn(suite, workflow)
+        install_step = workflow.index(
+            "python3 -m pip install pyyaml==6.0.2 websockets==15.0.1"
+        )
+        compile_step = workflow.index(
+            "python3 -m py_compile tools/env/*.py tools/env/tests/*.py"
+        )
+        tooling_step = workflow.index("python3 -m unittest discover -s \"$suite\"")
+        validate_step = workflow.index("python3 tools/env/validate-environments.py")
+        self.assertLess(install_step, compile_step)
+        self.assertLess(compile_step, tooling_step)
+        self.assertLess(tooling_step, validate_step)
+
+    def test_release_runs_environment_evidence_before_strict_assembly(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        build_node = workflow.index("Build the release node")
+        fetch = workflow.index("tools/env/fetch-binaries.sh")
+        generate = workflow.index("tools/env/generate-relay-specs.sh")
+        prewarm = workflow.index(
+            'npx --yes "@acala-network/chopsticks@${CHOPSTICKS_VERSION}" --help >/dev/null'
+        )
+        produce = workflow.index("python3 tools/env/run-evidence.py")
+        assemble = workflow.index("python3 tools/release/assemble-release.py")
+        self.assertLess(build_node, fetch)
+        self.assertLess(fetch, generate)
+        self.assertLess(generate, prewarm)
+        self.assertLess(prewarm, produce)
+        self.assertLess(produce, assemble)
+        self.assertIn("actions/setup-node@v4", workflow)
+        self.assertIn("node-version: '22'", workflow)
+        self.assertIn("pyyaml==6.0.2 websockets==15.0.1", workflow)
+        producer = workflow[produce:assemble]
+        for argument in (
+            '--wasm "$RELEASE_WORK/runtime/runtime.wasm"',
+            '--commit "$GITHUB_SHA"',
+            "--tier release",
+            '--log-dir "$RELEASE_WORK/env-evidence"',
+            '--report-out "$RELEASE_WORK/env-evidence/run-report.json"',
+        ):
+            self.assertIn(argument, producer)
+        self.assertIn(
+            "environment run evidence not produced; strict assembly attributes the B7 gap",
+            producer,
+        )
+        self.assertIn("if: always()", workflow)
+        self.assertIn("if-no-files-found: ignore", workflow)
+        self.assertIn("path: release-work/env-evidence/**", workflow)
+
+    def test_environment_ci_compiles_and_tests_the_evidence_driver(self) -> None:
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        self.assertIn("pyyaml==6.0.2 websockets==15.0.1", workflow)
+        self.assertIn(
+            "python3 -m py_compile tools/env/*.py tools/env/tests/*.py",
+            workflow,
+        )
+        compile_step = workflow.index("python3 -m py_compile tools/env/*.py")
+        test_step = workflow.index("python3 -m unittest discover -s tools/env/tests")
+        validate_step = workflow.index("python3 tools/env/validate-environments.py")
+        self.assertLess(compile_step, test_step)
+        self.assertLess(test_step, validate_step)
 
     def test_kernel_sweep_workflow_has_normative_change_paths(self) -> None:
         workflow = (ROOT / ".github/workflows/sweep.yml").read_text(encoding="utf-8")

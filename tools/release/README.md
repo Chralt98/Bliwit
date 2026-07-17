@@ -54,6 +54,26 @@ from the self-referential `artifact_hashes` map):
 }
 ```
 
+[`tools/env/run-evidence.py`](../env/run-evidence.py) is the producer for this
+contract. The tag pipeline runs its release tier against the built artifacts,
+records G1-tier exclusions explicitly, and inventories only the clean committed
+environment definitions after generated state is removed. Evidence for a kind
+is produced only when every release-tier suite of that kind was attempted and
+passed: G1-tier exclusions are recorded, but a gated release-tier skip blocks
+evidence. The producer self-checks with the assembler's validator, while
+assembly remains the single release-blocking enforcement point.
+Evidence emission is currently blocked fail-closed until the SQ-152 try-state
+leg and the SQ-151 Chopsticks card-depth execution land; the producer still runs
+the suites and writes run reports.
+
+Pending SQ-139 ratification, the producer adds consumer-tolerated fields to the
+minimal contract above: top-level `tier`, `suites_skipped`, `produced_by`,
+`suites_manifest_sha256`, and `pins_env_sha256`, plus `duration_seconds` and
+`checks` on each `suites_run` row. These extras identify the selected policy
+tier and producer inputs, record exclusions, and describe the execution depth;
+the authoritative consumer continues to validate the frozen fields shown in
+the contract block.
+
 The suite must match its directory. Every regular file other than the evidence
 file must be listed, every hash must match, every suite result must be `pass`,
 and both the runtime hash and commit must bind to this release. Invalid evidence
@@ -136,9 +156,10 @@ Layout expectations are frozen only for surface the current runtime actually
 wires (they were validated against a live node). Blocked entries (A8/A11/B2)
 carry no `layout` — a guessed rendering would false-alarm once the owning
 milestone lands; the expectation is frozen from the real runtime at that
-point. The deliberate exception is the SQ-101 `ForeignAssets` trio, whose
-Location-keyed expectation must fail strict mode against today's u32-keyed
-runtime. Two renderer caveats are inherent to portable metadata: const-generic
+point. The `ForeignAssets` trio's Location-keyed expectation is live wired
+surface: the runtime keys the instance by the frozen XCM `Location` (02 §8;
+SQ-101 resolved 2026-07-17). Two renderer caveats are inherent to portable
+metadata: const-generic
 bounds (`BoundedVec<T, ConstU32<N>>`) do not appear in the registry — bounds
 are certified through the paired metadata constants instead — and the 02 §12
 `ReleaseChannel` key is deliberately metadata-independent, so its fixture is a
@@ -161,13 +182,16 @@ coverage missing. Strict mode fails; it never fabricates chainHead responses.
 
 Strict mode is expected to fail today:
 
-- B7 owns the missing `zombienet/` and `chopsticks/` environment definitions;
+- B7 owns the per-release `run-evidence.json` for the `zombienet/` and
+  `chopsticks/` environment definitions;
 - B2 owns implementation of all 11 `FutarchyApi` methods and remaining metadata
   constants;
 - A8 owns wiring `pallet-epoch` into the runtime;
 - A11 owns wiring `pallet-execution-guard` into the runtime.
-- SQ-101 (B4 follow-up) owns replacing the current `ForeignAssets` `u32` asset
-  key with the frozen XCM `Location` key; the manifest detects this mismatch.
+
+The `ForeignAssets` `u32`→`Location` re-key (SQ-101) cleared its three rows on
+2026-07-17; the manifest's frozen Location-keyed expectations now record
+against the live runtime.
 
 These entries remain `required: true` in `surface-manifest.json`. Their
 `blocked_by` fields are diagnostics, not waivers. A tagged workflow uses strict

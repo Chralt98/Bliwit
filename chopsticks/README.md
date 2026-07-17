@@ -35,27 +35,62 @@ manufactured drill state under 02 §11's “manufactured precondition failures�
 artifact row. Section 02 §7.3 only assigns the bits; 06 §3.3 forbids exposing
 their writers as dispatchable calls.
 
+## Run evidence
+
+[`tools/env/run-evidence.py`](../tools/env/run-evidence.py) starts each committed
+YAML through the Chopsticks version sourced from
+[`tools/env/pins.env`](../tools/env/pins.env). A runner pass currently attests
+that the scenario booted as a fork from the release-Wasm-bound raw spec, every
+injected storage cell was verified byte-exactly over localhost JSON-RPC, two
+blocks were produced with an advancing header, and the live `:code` bytes
+remained bound to the release Wasm before and after those blocks. After
+generating the chain specs and building the release Wasm, run:
+
+```bash
+python3 tools/env/run-evidence.py \
+  --kind chopsticks \
+  --tier release \
+  --wasm release-work/runtime/runtime.wasm \
+  --commit "$(git rev-parse HEAD)"
+```
+
+The `base` row remains ungated because it attests only boot, injected-state,
+blocks, and live `:code` binding. All 10 scenario rows are evidence-gated on
+SQ-151 card-depth execution: the runner skips them by default and blocks
+evidence while they remain gated. Evidence emission is additionally blocked
+until the mandatory closing try-state leg lands (15 §1; SQ-152). These are the
+connector-review P1 fail-closed enforcements for obligations previously deferred
+by documentation. Before each scenario, the runner removes its exact database
+and SQLite sidecars so an interrupted prior run cannot contaminate the
+generated-genesis fork. It removes generated state again before evidence is
+emitted, deletes any prior evidence, requires clean committed evidence inputs,
+and hashes every committed regular file while rejecting symlinks. Cherry-picked
+`--suites` runs are report-only. The `run-evidence.json` schema and byte-exact
+inventory contract are documented in
+[`tools/release/README.md`](../tools/release/README.md); release assembly remains
+the final gate.
+
 ## Scenario map and runnability
 
 | Scenario | Spec | Runnable now | Gated assertions |
 |---|---|---|---|
-| `upgrade-transition` | 15 §4.7; 02 §11; 09 §2.1 | Paired pending/checkpoint/history image is try-state coherent | authorize→apply, migration, descriptor transition: B6 + A11 runtime slot 62 |
-| `stale-queue` | 15 §4.7; 02 §11; 09 §1.2(3) | Genuine bleavit/2-vs-bleavit/1 mismatch, future grace, false expedited marker | `reject_stale`: A11 slot 62 plus A8/B6 queued proposal |
+| `upgrade-transition` | 15 §4.7; 02 §11; 09 §2.1 | Paired pending/checkpoint/history image is try-state coherent; B6 wires the authorize/apply and descriptor-transition surface | A8 enqueue/epoch-handoff wiring for a fully attested queued CODE proposal; frontend transition assertions wait Track F |
+| `stale-queue` | 15 §4.7; 02 §11; 09 §1.2(3) | Genuine bleavit/2-vs-bleavit/1 mismatch, future grace, false expedited marker; B6 wires `reject_stale` | A8 wiring to manufacture proposal 1 in `Queued` |
 | `void-epoch` | 15 I-26/I-27/§4.7 | Voided vault and real redeem inputs on the current ledger | frontend rendering waits Track F |
-| `precondition-failures` | 15 §4.7; 02 §11; 09 §1.2 | Constitution flag injection | complete guard refusal matrix: A11 wiring + B6 driver |
+| `precondition-failures` | 15 §4.7; 02 §11; 09 §1.2 | Constitution flag injection; B6 wires the live guard refusal surface | A8 wiring to enqueue the otherwise-valid payloads used by the matrix |
 | `pb-depeg` | 06 §6.2 | Accountable Guardian post-entry image; block expiry maintenance runs | downstream `market.freeze_creation`/effect-revert surface |
-| `pb-migration` | 06 §6.2; 09 §3.2 | Accountable Guardian image + coherent paired guard checkpoint | B6 migration controls and A11 slot 62; checkpoint question remains logged |
+| `pb-migration` | 06 §6.2; 09 §3.2 | Accountable Guardian image + coherent paired guard checkpoint; B6 wires migration controls and the halt bridge | SQ-104 migration-control origin bridge; SQ-127 checkpoint lifetime and SQ-132 try-state/halt coupling remain open |
 | `pb-oracle-void` | 06 §6.2 | Accountable Guardian post-entry image; block expiry maintenance runs | A8 cohort/ResolveAuthority wiring and downstream effect |
 | `pb-halt-intake` | 06 §6.2 | Accountable Guardian image + manufactured machinery bit | A8 wiring and missing intake-pause/effect-revert surface |
 | `pb-reserve` | 06 §6.2 | Accountable Guardian image + manufactured reserve bit | missing split-pause/effect-revert call and trigger adapter |
 | `pb-ledger-freeze` | 06 §6.2/§6.3; 09 §3.1/§4 | Accountable Guardian/phase image; block expiry maintenance runs | I-4 trigger adapter, missing freeze/effect-revert calls, renewal XCM dispatcher |
 
 The adjacent Markdown card is the normative execution/assertion sequence for
-each YAML. NOTE(B7): `Epoch`/`ExecutionGuard` exist as production pallets but
-are not instantiated in the current runtime; several 06 §6.2 call names also
-have no implemented extrinsic/storage surface. Gated cards remain complete
-release definitions and intentionally fail rather than silently weakening an
-assertion.
+each YAML. NOTE(B7): `Epoch` exists as a production pallet but is not
+instantiated in the current runtime; B6 now instantiates `ExecutionGuard` at
+slot 62. Several 06 §6.2 call names still have no implemented
+extrinsic/storage surface. Gated cards remain complete release definitions and
+intentionally fail rather than silently weakening an assertion.
 
 The Guardian pallet is instantiated, and every `pb-*` image injects its real
 seven-member council, arithmetic bond ledger, activation review, active expiry,
@@ -67,8 +102,9 @@ block-number expiry now runs because `Guardian::load()` can succeed.
 
 ## Mandatory closing try-state
 
-For every scenario, after repairing any deliberately manufactured invalid
-precondition, run the release-blocking 15 §1 check against the local endpoint:
+The evidence runner does not execute this check. For every scenario, after
+repairing any deliberately manufactured invalid precondition, manually run the
+release-blocking 15 §1 check against the local endpoint:
 
 ```bash
 try-runtime \

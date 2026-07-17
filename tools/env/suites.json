@@ -1,0 +1,218 @@
+{
+  "schema": "bleavit.env-suites.v1",
+  "suites": [
+    {
+      "id": "01-smoke",
+      "kind": "zombienet",
+      "path": "zombienet/drills/01-smoke.zndsl",
+      "tier": "release",
+      "gated_on": [],
+      "timeout_seconds": 1800,
+      "spec": "15 §4.7; 02 §11"
+    },
+    {
+      "id": "02-collator-loss",
+      "kind": "zombienet",
+      "path": "zombienet/drills/02-collator-loss.zndsl",
+      "tier": "release",
+      "gated_on": [],
+      "timeout_seconds": 1800,
+      "spec": "15 §4.7; 09 §7.1"
+    },
+    {
+      "id": "03-keeper-loss",
+      "kind": "zombienet",
+      "path": "zombienet/drills/03-keeper-loss.zndsl",
+      "tier": "release",
+      "gated_on": [
+        "B9 topology wiring"
+      ],
+      "timeout_seconds": 1800,
+      "spec": "15 §4.7; 09 §7.1"
+    },
+    {
+      "id": "04-dead-man",
+      "kind": "zombienet",
+      "path": "zombienet/drills/04-dead-man.zndsl",
+      "tier": "g1",
+      "gated_on": [
+        "A8"
+      ],
+      "timeout_seconds": 100000,
+      "spec": "15 §4.7; 09 §7.1; 13 §2"
+    },
+    {
+      "id": "05-coretime-renewal-under-dead-man",
+      "kind": "zombienet",
+      "path": "zombienet/drills/05-coretime-renewal-under-dead-man.zndsl",
+      "tier": "g1",
+      "gated_on": [
+        "A8"
+      ],
+      "timeout_seconds": 100000,
+      "spec": "09 §4/§7.1"
+    },
+    {
+      "id": "06-pb-migration",
+      "kind": "zombienet",
+      "path": "zombienet/drills/06-pb-migration.zndsl",
+      "tier": "release",
+      "gated_on": [],
+      "timeout_seconds": 1800,
+      "spec": "09 §3.2/§7.1"
+    },
+    {
+      "id": "07-xcm-reserve-transfer",
+      "kind": "zombienet",
+      "path": "zombienet/drills/07-xcm-reserve-transfer.zndsl",
+      "tier": "release",
+      "gated_on": [
+        "SQ-101",
+        "B4 runtime wiring"
+      ],
+      "timeout_seconds": 1800,
+      "spec": "15 §4.7; 09 §6.1"
+    },
+    {
+      "id": "08-expedited-code-under-freeze",
+      "kind": "zombienet",
+      "path": "zombienet/drills/08-expedited-code-under-freeze.zndsl",
+      "tier": "g1",
+      "gated_on": [
+        "G1 freeze/proposal staging (attested queued proposal + active PB-LEDGER-FREEZE)"
+      ],
+      "timeout_seconds": 301000,
+      "spec": "09 §2.1/§3.2/§7.1"
+    },
+    {
+      "id": "09-three-unattended-epochs",
+      "kind": "zombienet",
+      "path": "zombienet/drills/09-three-unattended-epochs.zndsl",
+      "tier": "g1",
+      "gated_on": [
+        "A8"
+      ],
+      "timeout_seconds": 6001000,
+      "spec": "15 §4.7; 09 §7.1; 13 §1"
+    },
+    {
+      "id": "base",
+      "kind": "chopsticks",
+      "path": "chopsticks/bleavit.yml",
+      "tier": "release",
+      "gated_on": [],
+      "timeout_seconds": 300,
+      "spec": "15 §4.7; 02 §11"
+    },
+    {
+      "id": "upgrade-transition",
+      "kind": "chopsticks",
+      "path": "chopsticks/scenarios/upgrade-transition.yml",
+      "tier": "release",
+      "gated_on": [
+        "SQ-151 card-depth execution"
+      ],
+      "timeout_seconds": 300,
+      "spec": "15 §4.7; 02 §11"
+    },
+    {
+      "id": "stale-queue",
+      "kind": "chopsticks",
+      "path": "chopsticks/scenarios/stale-queue.yml",
+      "tier": "release",
+      "gated_on": [
+        "SQ-151 card-depth execution"
+      ],
+      "timeout_seconds": 300,
+      "spec": "15 §4.7; 02 §11"
+    },
+    {
+      "id": "void-epoch",
+      "kind": "chopsticks",
+      "path": "chopsticks/scenarios/void-epoch.yml",
+      "tier": "release",
+      "gated_on": [
+        "SQ-151 card-depth execution"
+      ],
+      "timeout_seconds": 300,
+      "spec": "15 §4.7; 02 §11"
+    },
+    {
+      "id": "precondition-failures",
+      "kind": "chopsticks",
+      "path": "chopsticks/scenarios/precondition-failures.yml",
+      "tier": "release",
+      "gated_on": [
+        "SQ-151 card-depth execution"
+      ],
+      "timeout_seconds": 300,
+      "spec": "15 §4.7; 02 §11"
+    },
+    {
+      "id": "pb-depeg",
+      "kind": "chopsticks",
+      "path": "chopsticks/scenarios/pb-depeg.yml",
+      "tier": "release",
+      "gated_on": [
+        "SQ-151 card-depth execution"
+      ],
+      "timeout_seconds": 300,
+      "spec": "06 §6.2"
+    },
+    {
+      "id": "pb-migration",
+      "kind": "chopsticks",
+      "path": "chopsticks/scenarios/pb-migration.yml",
+      "tier": "release",
+      "gated_on": [
+        "SQ-151 card-depth execution"
+      ],
+      "timeout_seconds": 300,
+      "spec": "06 §6.2; 09 §3.2"
+    },
+    {
+      "id": "pb-oracle-void",
+      "kind": "chopsticks",
+      "path": "chopsticks/scenarios/pb-oracle-void.yml",
+      "tier": "release",
+      "gated_on": [
+        "SQ-151 card-depth execution"
+      ],
+      "timeout_seconds": 300,
+      "spec": "06 §6.2"
+    },
+    {
+      "id": "pb-halt-intake",
+      "kind": "chopsticks",
+      "path": "chopsticks/scenarios/pb-halt-intake.yml",
+      "tier": "release",
+      "gated_on": [
+        "SQ-151 card-depth execution"
+      ],
+      "timeout_seconds": 300,
+      "spec": "06 §6.2"
+    },
+    {
+      "id": "pb-reserve",
+      "kind": "chopsticks",
+      "path": "chopsticks/scenarios/pb-reserve.yml",
+      "tier": "release",
+      "gated_on": [
+        "SQ-151 card-depth execution"
+      ],
+      "timeout_seconds": 300,
+      "spec": "06 §6.2"
+    },
+    {
+      "id": "pb-ledger-freeze",
+      "kind": "chopsticks",
+      "path": "chopsticks/scenarios/pb-ledger-freeze.yml",
+      "tier": "release",
+      "gated_on": [
+        "SQ-151 card-depth execution"
+      ],
+      "timeout_seconds": 300,
+      "spec": "06 §6.2/§6.3; 09 §4"
+    }
+  ]
+}

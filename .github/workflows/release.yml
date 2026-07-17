@@ -59,19 +59,31 @@ jobs:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown, wasm32v1-none
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
+      - name: Install pinned environment tooling dependencies
+        run: python3 -m pip install pyyaml==6.0.2 websockets==15.0.1
       - name: Run full workspace gates
         run: tools/ci/rust-workspace-gates.sh
+      - name: Compile environment tooling
+        run: python3 -m py_compile tools/env/*.py tools/env/tests/*.py
       - name: Run release, deploy, and reference tooling suites
         shell: bash
         run: |
           set -euo pipefail
-          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests; do
+          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests tools/env/tests; do
             if [[ -d "$suite" ]]; then
               python3 -m unittest discover -s "$suite"
             fi
           done
+      - name: Validate committed environment definitions
+        run: python3 tools/env/validate-environments.py
 
   artifacts:
     name: Build and verify release artifacts
@@ -101,20 +113,39 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - uses: actions/download-artifact@v4
         with:
           name: bleavit-supply-chain-${{ github.run_id }}
           path: release-work
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
-      - name: Install pinned chainHead recorder dependency
-        run: python3 -m pip install websockets==15.0.1
+      - name: Install pinned release tooling dependencies
+        run: python3 -m pip install pyyaml==6.0.2 websockets==15.0.1
       - name: Build reproducible runtime input
         run: tools/release/build-runtime.sh "$RELEASE_WORK/runtime"
       - name: Generate and validate chain specs
         run: tools/deploy/generate-chain-specs.sh
       - name: Build the release node
         run: cargo build -p bleavit-node --release --locked
+      - name: Fetch pinned environment binaries
+        run: tools/env/fetch-binaries.sh
+      - name: Generate local relay and parachain specs
+        run: tools/env/generate-relay-specs.sh
+      - name: Pre-warm pinned Chopsticks package
+        shell: bash
+        run: source tools/env/pins.env && npx --yes "@acala-network/chopsticks@${CHOPSTICKS_VERSION}" --help >/dev/null
+      - name: Run release-tier environment suites and produce evidence
+        run: |
+          python3 tools/env/run-evidence.py \
+            --wasm "$RELEASE_WORK/runtime/runtime.wasm" \
+            --commit "$GITHUB_SHA" \
+            --tier release \
+            --log-dir "$RELEASE_WORK/env-evidence" \
+            --report-out "$RELEASE_WORK/env-evidence/run-report.json" \
+            || echo "::warning::environment run evidence not produced; strict assembly attributes the B7 gap"
       - name: Extract SCALE metadata and runtime identity
         run: |
           python3 tools/release/extract-metadata.py \
@@ -166,6 +197,14 @@ jobs:
             release-work/dist/**
             release-work/release-manifest.json
             release-work/readiness-report.md
+      - name: Preserve environment run logs and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bleavit-env-evidence-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 30
+          path: release-work/env-evidence/**
 
   publish:
     name: Attach bundle to GitHub Release
