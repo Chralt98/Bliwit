@@ -1024,6 +1024,34 @@ pub mod pallet {
         fn tick_batch() -> u32 {
             TICK_BATCH_BOUND
         }
+        #[pallet::constant_name(PhaseOffsets)]
+        fn phase_offsets() -> [(u32, u32); 7] {
+            futarchy_primitives::phase_offsets::ORDERED
+        }
+        #[pallet::constant_name(MaxBooksPerProposal)]
+        fn max_books_per_proposal() -> u32 {
+            futarchy_primitives::bounds::BOOKS_PER_PROPOSAL
+        }
+        #[pallet::constant_name(MinEpochLength)]
+        fn min_epoch_length() -> u32 {
+            futarchy_primitives::kernel::MIN_EPOCH_LENGTH_BLOCKS
+        }
+        #[pallet::constant_name(DecisionWindowFloor)]
+        fn decision_window_floor() -> u32 {
+            futarchy_primitives::kernel::DECISION_WINDOW_FLOOR_BLOCKS
+        }
+        #[pallet::constant_name(DecisionExtension)]
+        fn decision_extension() -> u32 {
+            futarchy_primitives::kernel::DEC_EXTENSION_BLOCKS
+        }
+        #[pallet::constant_name(DecisionDeltaFloors)]
+        fn decision_delta_floors() -> [FixedU64; 4] {
+            futarchy_primitives::kernel::DECISION_DELTA_FLOORS
+        }
+        #[pallet::constant_name(DecisionSigmaFloors)]
+        fn decision_sigma_floors() -> [FixedU64; 4] {
+            futarchy_primitives::kernel::DECISION_SIGMA_FLOORS
+        }
     }
 
     #[pallet::genesis_config]

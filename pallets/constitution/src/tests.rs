@@ -1006,7 +1006,10 @@ fn genesis_registry_matches_13_1_row_encodings() {
 
         let window = Params::<Test>::get(key16(b"dec.window")).unwrap();
         assert_eq!(window.value, ParamValue::U32(43_200));
-        assert_eq!(window.min, ParamValue::U32(14_400));
+        assert_eq!(
+            window.min,
+            ParamValue::U32(crate::kernel::DECISION_WINDOW_FLOOR_BLOCKS)
+        );
         assert_eq!(window.max, ParamValue::U32(86_400));
         assert_eq!(window.max_delta, Some(crate::MaxDelta::Percent(20)));
 

@@ -83,7 +83,7 @@ class SurfaceManifestTests(unittest.TestCase):
 
     def test_schema_and_entry_shapes(self) -> None:
         self.assertEqual(self.manifest["schema"], "bleavit.critical-surface.v1")
-        self.assertEqual(self.manifest["integration_contract_version"], 3)
+        self.assertEqual(self.manifest["integration_contract_version"], 4)
         identifiers = [entry["id"] for entry in self.entries]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         for entry in self.entries:
@@ -122,7 +122,70 @@ class SurfaceManifestTests(unittest.TestCase):
             for entry in self.entries
             if entry["id"] == "constant.identity.contract_version"
         )
-        self.assertEqual(version["layout"], {"type": "u32", "value": "0x03000000"})
+        self.assertEqual(version["layout"], {"type": "u32", "value": "0x04000000"})
+
+    def test_newly_wired_v4_constant_layouts_are_frozen(self) -> None:
+        expected = {
+            "constant.ledger.min_transfer": (
+                "MinTransfer",
+                {"type": "u128", "value": "0x10270000000000000000000000000000"},
+            ),
+            "constant.market.min_trade": (
+                "MinTrade",
+                {"type": "u128", "value": "0x40420f00000000000000000000000000"},
+            ),
+            "constant.market.max_trade_ratio": (
+                "MaxTradeRatio",
+                {"type": "(u32,u32)", "value": "0x0100000004000000"},
+            ),
+            "constant.market.max_live_markets": (
+                "MaxLiveMarkets",
+                {"type": "u32", "value": "0xc4000000"},
+            ),
+            "constant.market.gate_p_max_ceiling": (
+                "GatePMaxCeiling",
+                {
+                    "type": "futarchy_primitives::FixedU64(u64)",
+                    "value": "0x00e1f50500000000",
+                },
+            ),
+            "constant.market.gate_eps_floor": (
+                "GateEpsFloor",
+                {
+                    "type": "futarchy_primitives::FixedU64(u64)",
+                    "value": "0x404b4c0000000000",
+                },
+            ),
+            "constant.execution_guard.timelock_floor": (
+                "ExecutionTimelockFloor",
+                {
+                    "type": "[u32;4]",
+                    "value": "0x40380000403800004038000040380000",
+                },
+            ),
+            "constant.execution_guard.grace_floor": (
+                "ExecutionGraceFloor",
+                {"type": "u32", "value": "0xc0890100"},
+            ),
+            "constant.execution_guard.descriptor_lead_time": (
+                "DescriptorLeadTime",
+                {"type": "u32", "value": "0xc0a80000"},
+            ),
+        }
+        by_id = {entry["id"]: entry for entry in self.entries}
+        for identifier, (constant, layout) in expected.items():
+            entry = by_id[identifier]
+            self.assertEqual(entry["constant"], constant)
+            self.assertEqual(entry["layout"], layout)
+            self.assertNotIn("blocked_by", entry)
+
+    def test_no_stale_execution_guard_wiring_blockers(self) -> None:
+        offenders = [
+            entry["id"]
+            for entry in self.entries
+            if "A11 pallet-execution-guard runtime wiring" in entry.get("blocked_by", "")
+        ]
+        self.assertEqual(offenders, [])
 
     def test_no_speculative_layout_on_blocked_entries(self) -> None:
         sq101 = {
@@ -196,23 +259,27 @@ class SurfaceManifestTests(unittest.TestCase):
     def test_section_nine_constant_surface_is_complete(self) -> None:
         identifiers = {entry["id"] for entry in self.entries}
         expected = {
-            "constant.epoch.intake_rate_limit",
             "constant.decision.window_floor",
-            "constant.decision.trailing_floor",
             "constant.decision.extension",
             "constant.decision.delta_floors",
             "constant.decision.sigma_floors",
-            "constant.decision.coverage_floor",
-            "constant.decision.v_min_floors",
             "constant.execution_guard.timelock_floor",
             "constant.execution_guard.grace_floor",
-            "constant.market.gate_eps",
+            "constant.market.gate_p_max_ceiling",
+            "constant.market.gate_eps_floor",
             "constant.epoch.length_floor",
-            "constant.epoch.slots_bounds",
             "storage.identity.usdc_asset",
             "storage.identity.usdc_metadata",
         }
         self.assertTrue(expected <= identifiers, sorted(expected - identifiers))
+        self.assertTrue(
+            {
+                "constant.epoch.intake_rate_limit",
+                "constant.epoch.slots_bounds",
+                "constant.market.gate_p_max",
+                "constant.market.gate_eps",
+            }.isdisjoint(identifiers)
+        )
 
     def test_all_eleven_runtime_api_methods_are_present(self) -> None:
         methods = {

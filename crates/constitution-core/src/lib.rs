@@ -791,7 +791,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"epoch.length",
             ParamValue::U32(302_400),
-            ParamValue::U32(201_600),
+            ParamValue::U32(kernel::MIN_EPOCH_LENGTH_BLOCKS),
             ParamValue::U32(604_800),
             Some(MaxDelta::Percent(10)),
             2,
@@ -851,7 +851,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.window",
             ParamValue::U32(43_200),
-            ParamValue::U32(14_400),
+            ParamValue::U32(kernel::DECISION_WINDOW_FLOOR_BLOCKS),
             ParamValue::U32(86_400),
             Some(MaxDelta::Percent(20)),
             2,
@@ -901,7 +901,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"gate.eps",
             ParamValue::Fixed(FixedU64(20_000_000)),
-            ParamValue::Fixed(FixedU64(5_000_000)),
+            ParamValue::Fixed(kernel::GATE_EPS_FLOOR),
             ParamValue::Fixed(FixedU64(50_000_000)),
             None,
             2,
@@ -931,7 +931,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"exec.grace",
             ParamValue::U32(201_600),
-            ParamValue::U32(100_800),
+            ParamValue::U32(kernel::EXECUTION_GRACE_FLOOR_BLOCKS),
             ParamValue::U32(432_000),
             None,
             2,
@@ -951,7 +951,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.delta.param",
             ParamValue::Fixed(FixedU64(15_000_000)),
-            ParamValue::Fixed(FixedU64(5_000_000)),
+            ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),
             2,
@@ -961,7 +961,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.delta.trs",
             ParamValue::Fixed(FixedU64(25_000_000)),
-            ParamValue::Fixed(FixedU64(5_000_000)),
+            ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),
             2,
@@ -971,7 +971,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.delta.code",
             ParamValue::Fixed(FixedU64(40_000_000)),
-            ParamValue::Fixed(FixedU64(5_000_000)),
+            ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),
             2,
@@ -981,7 +981,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.delta.meta",
             ParamValue::Fixed(FixedU64(60_000_000)),
-            ParamValue::Fixed(FixedU64(5_000_000)),
+            ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),
             2,
@@ -991,7 +991,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.sigma.param",
             ParamValue::Fixed(FixedU64(3_000_000)),
-            ParamValue::Fixed(FixedU64(0)),
+            ParamValue::Fixed(kernel::DECISION_SIGMA_FLOOR),
             ParamValue::Fixed(FixedU64(50_000_000)),
             None,
             2,
@@ -1001,7 +1001,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.sigma.trs",
             ParamValue::Fixed(FixedU64(5_000_000)),
-            ParamValue::Fixed(FixedU64(0)),
+            ParamValue::Fixed(kernel::DECISION_SIGMA_FLOOR),
             ParamValue::Fixed(FixedU64(50_000_000)),
             None,
             2,
@@ -1011,7 +1011,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.sigma.code",
             ParamValue::Fixed(FixedU64(8_000_000)),
-            ParamValue::Fixed(FixedU64(0)),
+            ParamValue::Fixed(kernel::DECISION_SIGMA_FLOOR),
             ParamValue::Fixed(FixedU64(50_000_000)),
             None,
             2,
@@ -1021,7 +1021,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.sigma.meta",
             ParamValue::Fixed(FixedU64(10_000_000)),
-            ParamValue::Fixed(FixedU64(0)),
+            ParamValue::Fixed(kernel::DECISION_SIGMA_FLOOR),
             ParamValue::Fixed(FixedU64(50_000_000)),
             None,
             2,
@@ -1111,7 +1111,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"exec.lock.param",
             ParamValue::U32(28_800),
-            ParamValue::U32(14_400),
+            ParamValue::U32(kernel::EXECUTION_TIMELOCK_FLOOR_BLOCKS),
             ParamValue::U32(432_000),
             Some(MaxDelta::Factor(2)),
             2,
@@ -1121,7 +1121,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"exec.lock.trs",
             ParamValue::U32(43_200),
-            ParamValue::U32(14_400),
+            ParamValue::U32(kernel::EXECUTION_TIMELOCK_FLOOR_BLOCKS),
             ParamValue::U32(432_000),
             Some(MaxDelta::Factor(2)),
             2,
@@ -1131,7 +1131,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"exec.lock.code",
             ParamValue::U32(100_800),
-            ParamValue::U32(14_400),
+            ParamValue::U32(kernel::EXECUTION_TIMELOCK_FLOOR_BLOCKS),
             ParamValue::U32(432_000),
             Some(MaxDelta::Factor(2)),
             2,
@@ -1141,7 +1141,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"exec.lock.meta",
             ParamValue::U32(201_600),
-            ParamValue::U32(14_400),
+            ParamValue::U32(kernel::EXECUTION_TIMELOCK_FLOOR_BLOCKS),
             ParamValue::U32(432_000),
             Some(MaxDelta::Factor(2)),
             2,

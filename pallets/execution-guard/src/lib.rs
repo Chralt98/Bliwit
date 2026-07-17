@@ -46,7 +46,7 @@ use frame_support::{
     BoundedVec,
 };
 use futarchy_primitives::{
-    BlockNumber, ProposalClass, ProposalId, ResourceId, RuntimeVersionConstraint, H256,
+    kernel, BlockNumber, ProposalClass, ProposalId, ResourceId, RuntimeVersionConstraint, H256,
 };
 
 pub use execution_guard_core::{
@@ -631,6 +631,14 @@ pub mod pallet {
         #[pallet::constant_name(MaxRuntimeCodeBytes)]
         fn max_runtime_code_bytes() -> u32 {
             T::MaxRuntimeCodeBytes::get()
+        }
+        #[pallet::constant_name(ExecutionTimelockFloor)]
+        fn execution_timelock_floor() -> [u32; 4] {
+            kernel::EXECUTION_TIMELOCK_FLOORS_BLOCKS
+        }
+        #[pallet::constant_name(ExecutionGraceFloor)]
+        fn execution_grace_floor() -> u32 {
+            kernel::EXECUTION_GRACE_FLOOR_BLOCKS
         }
     }
 

@@ -11,8 +11,8 @@ use futarchy_fixed::{
     FixedError, FixedU64x64, LmsrSide, LN_2,
 };
 use futarchy_primitives::{
-    Balance, Branch, EpochId, FixedU64, GateType, MarketId, PositionId, PositionKind, ProposalId,
-    ScalarSide, TradeSide,
+    kernel, Balance, Branch, EpochId, FixedU64, GateType, MarketId, PositionId, PositionKind,
+    ProposalId, ScalarSide, TradeSide,
 };
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
@@ -1180,9 +1180,21 @@ fn ensure_trading(p: MarketPhase) -> Result<(), Error> {
     );
     Ok(())
 }
+/// Maximum amount admitted by one trade for a book with liquidity parameter
+/// `b` (04 §6.2 / 13 §2). An invalid future kernel ratio fails closed to zero.
+pub fn max_trade_amount(b: Balance) -> Balance {
+    let (numerator, denominator) = kernel::MAX_TRADE_RATIO;
+    let Some(scaled) = b.checked_mul(Balance::from(numerator)) else {
+        return 0;
+    };
+    let Some(value) = scaled.checked_div(Balance::from(denominator)) else {
+        return 0;
+    };
+    value
+}
 fn ensure_trade_bounds(b: Balance, a: Balance) -> Result<(), Error> {
     ensure!(a >= MIN_TRADE, Error::AmountTooSmall);
-    ensure!(a <= b / 4, Error::AmountTooLarge);
+    ensure!(a <= max_trade_amount(b), Error::AmountTooLarge);
     Ok(())
 }
 fn lside(s: ScalarSide) -> LmsrSide {
@@ -1765,7 +1777,7 @@ mod tests {
                 7,
                 &a(2),
                 ScalarSide::Long,
-                B / 4 + 1,
+                max_trade_amount(B).saturating_add(1),
                 Balance::MAX,
                 10
             ),

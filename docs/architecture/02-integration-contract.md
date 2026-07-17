@@ -440,7 +440,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 Two representations exist, and the frontend MUST bind to them and never hardcode:
 
 1. **Kernel constants (class K)** have *no storage representation*; they are exposed as **pallet constants in the runtime metadata** (the constants API) and are readable without any storage query. They change only via Wasm upgrade, which the frontend already tracks through descriptors.
-2. **Tunables** live in `pallet-constitution::Params` and are read via `params()` (or the raw `Params` map); their kernel floors/ceilings are ALSO metadata constants.
+2. **Tunables** live in `pallet-constitution::Params` and are read via `params()` (or the raw `Params` map). Only hard envelopes of keys in [13](13-parameters.md) reading rule 7's exhaustive kernel-bounded set are also metadata constants; META-amendable registry bounds remain in `Params` and bind through `ParamView.min` / `ParamView.max`.
 
 Enumeration of every value the frontend's precondition tables re-check (defaults/bounds are quoted for readability; *normative values: [13](13-parameters.md)*):
 
@@ -452,12 +452,12 @@ Enumeration of every value the frontend's precondition tables re-check (defaults
 | `MaxPositionsPerAccount = 64` (protocol accounts exempt) | metadata constant | `ledger.transfer` (recipient bound), position views |
 | Positions entry deposit (0.1 USDC) | metadata constant | `ledger.split`, `transfer` fee headroom |
 | `IntakeQueue = 64` bound | metadata constant | `epoch.submit` queue-cap check |
-| `intake.max_per_account` live rate limit (launch default 4); K bounds [2, 8] | `params()` (live) + `IntakeMaxPerAccountFloor` / `IntakeMaxPerAccountCeiling` metadata constants | `epoch.submit` account-rate check |
+| `intake.max_per_account` live rate limit (launch default 4; META-amendable bounds [2, 8]) | `params()` — bind `ParamView.value`, `.min`, and `.max`; no metadata constant | `epoch.submit` account-rate check |
 | `MaxLiveProposals = 32` | metadata constant | discovery bounds |
 | `prop.bond` per class | `params()` | `epoch.submit` |
 | `mkt.fee` (30 bps default) | `params()` | quote display, `buy/sell` cost recompute |
 | `mkt.obs_interval` (10 blocks) | `params()` | crank staleness check |
-| `dec.window`, `dec.trailing`, `dec.extension`, `dec.delta`, `dec.sigma`, `dec.coverage`, `dec.v_min` | `params()` (kernel floors as metadata constants) | decision previews, `decide` crank |
+| `dec.window`, `dec.trailing`, `dec.delta`, `dec.sigma`, `dec.coverage`, `dec.v_min`; `dec.extension` (K) | `params()` for tunable values/bounds. Metadata constants exist only for the rule-7 kernel-bounded `dec.window` / `dec.delta` / `dec.sigma` floors and kernel-only `dec.extension`. `dec.trailing` / `dec.coverage` / `dec.v_min` bind through `ParamView.min` / `.max`: respectively 3,600 / 28,800 blocks, 90 / 99 percent, and ×0.1 / ×10 of the per-class schedule; only the effective-v-min `2·InCapPrize` term is K. | decision previews, `decide` crank |
 | `gate.p_max`, `gate.eps` | `params()` (0.10 K ceiling as constant) | gate-market screens |
 | `exec.timelock` per class, `exec.grace` | `params()` (K floors as constants) | `execution_guard.execute` |
 | `orc.bond_floor`/`orc.rounds`/`orc.window`, `orc.bond_bps` value scaling, `orc.reporter_stake` | `params()` | `oracle.report/challenge` |
@@ -516,15 +516,10 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Epoch | `PhaseOffsets` | `[(u32, u32); 7]` | `futarchy_primitives::phase_offsets`: `[(0,21), (3,21), (4,21), (5,21), (15,21), (18,21), (20,21)]` for Intake/Qualify/Seed/Trade/DecideWindow/Decide/Housekeeping | Next wiring |
 | Epoch | `MaxBooksPerProposal` | `u32` | `bounds::BOOKS_PER_PROPOSAL` (= 6) | Next wiring |
 | Epoch | `MinEpochLength` | `u32` | `kernel::MIN_EPOCH_LENGTH_BLOCKS` (= 201,600) | Next wiring |
-| Epoch | `IntakeMaxPerAccountFloor` | `u8` | [13 §1](13-parameters.md) `intake.max_acct` hard minimum (= 2) | Next wiring |
-| Epoch | `IntakeMaxPerAccountCeiling` | `u8` | [13 §1](13-parameters.md) `intake.max_acct` hard maximum (= 8) | Next wiring |
 | Epoch | `DecisionWindowFloor` | `u32` | [13 §1](13-parameters.md) `dec.window` K hard minimum (= 14,400 blocks) | Next wiring |
-| Epoch | `DecisionTrailingFloor` | `u32` | [13 §1](13-parameters.md) `dec.trailing` hard minimum (= 3,600 blocks) | Next wiring |
 | Epoch | `DecisionExtension` | `u32` | `kernel::DEC_EXTENSION_BLOCKS` (= 43,200) | Next wiring |
 | Epoch | `DecisionDeltaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.delta.*` K hard minima (= `[5,000,000; 4]`) | Next wiring |
 | Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) | Next wiring |
-| Epoch | `DecisionCoverageFloor` | `u8` | [13 §1](13-parameters.md) `dec.coverage` hard minimum (= 90 percent) | Next wiring |
-| Epoch | `DecisionVMinFloors` | `[Balance; 4]` | [13 §1](13-parameters.md) `dec.v_min.*` hard minima (= `[10,000, 25,000, 60,000, 120,000]` USDC; `[10_000_000_000, 25_000_000_000, 60_000_000_000, 120_000_000_000]` base units) | Next wiring |
 
 The `PalletId` configuration constants exposed by ConditionalLedger, Market and Registry are intentionally absent: they are internal custody identifiers and no frontend workflow binds them. No placeholder names from external release tooling are normative; this table is the canonical name freeze.
 
@@ -589,7 +584,7 @@ Total **168 bytes** (v1.0 baseline — the pre-freeze 78- and 92-byte drafts in 
 
 **Version history.**
 
-- **v4 (2026-07-17) — B2 02-amendment batch.** One pre-genesis revision carries the queued SQ-2 residuals — SQ-23's intake representation erratum, SQ-24's phase-fraction representation split, and SQ-26's attestor storage freeze in §7.5 — together with SQ-37's §6 conditional-ledger event completion, SQ-43's 12-entry `CohortSummary.proposals` hard-max bound, SQ-55's three trailing `NavView` fields, SQ-125's phase-fraction metadata-exposure mandate, and SQ-138's frozen metadata-constant names. **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-17, user-delegated batch.
+- **v4 (2026-07-17) — B2 02-amendment batch.** One pre-genesis revision carries the queued SQ-2 residuals — SQ-23's intake representation erratum, SQ-24's phase-fraction representation split, and SQ-26's attestor storage freeze in §7.5 — together with SQ-37's §6 conditional-ledger event completion, SQ-43's 12-entry `CohortSummary.proposals` hard-max bound, SQ-55's three trailing `NavView` fields, SQ-125's phase-fraction metadata-exposure mandate, and SQ-138's frozen metadata-constant names, restricted to genuine kernel values per [13](13-parameters.md) reading rule 7; META-amendable registry bounds bind through `params()`. **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-17, user-delegated batch.
 - **v3 (2026-07-15) — oracle per-version reconciliation (A5).** 07 §2(4) runs one reporting game per `(component, epoch, frozen spec_version)`, so §7.2 `Rounds`/`ComponentValues` take the **triple key** `(MetricId, EpochId, MetricSpecVersion)`. Contract v2's pair key was self-contradictory — its own bound note said per-version games "append a `RoundState` per frozen version," which a one-value-per-key map cannot do; the triple resolves it. `RoundState` additionally carries the ack-keying/bond-freezing/§5.5-slashing fields the protocol requires, `ReserveHealth` its probe-timing fields, and `OracleRoundView` (§4) gains `spec_version`. **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply; the change is a straight restructure. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-15.
 - **v2** — the frozen baseline established at D-2 (all FE §30 patch items applied).
 

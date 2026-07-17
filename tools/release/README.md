@@ -133,12 +133,12 @@ the resolved layout; a manifest layout mismatch is a strict failure with both
 forms in `fixtures-report.json`.
 
 Layout expectations are frozen only for surface the current runtime actually
-wires (they were validated against a live node). Blocked entries (A8/A11/B2)
-carry no `layout` — a guessed rendering would false-alarm once the owning
-milestone lands; the expectation is frozen from the real runtime at that
-point. The deliberate exception is the SQ-101 `ForeignAssets` trio, whose
-Location-keyed expectation must fail strict mode against today's u32-keyed
-runtime. Two renderer caveats are inherent to portable metadata: const-generic
+wires (they were validated against a live node). Blocked entries (A8/B2) carry
+no `layout` — a guessed rendering would false-alarm once the owning milestone
+lands; the expectation is frozen from the real runtime at that point. The
+deliberate exception is the SQ-101 `ForeignAssets` trio, whose Location-keyed
+expectation must fail strict mode against today's u32-keyed runtime. Two
+renderer caveats are inherent to portable metadata: const-generic
 bounds (`BoundedVec<T, ConstU32<N>>`) do not appear in the registry — bounds
 are certified through the paired metadata constants instead — and the 02 §12
 `ReleaseChannel` key is deliberately metadata-independent, so its fixture is a
@@ -161,11 +161,10 @@ coverage missing. Strict mode fails; it never fabricates chainHead responses.
 
 Strict mode is expected to fail today:
 
-- B7 owns the missing `zombienet/` and `chopsticks/` environment definitions;
-- B2 owns implementation of all 11 `FutarchyApi` methods and remaining metadata
-  constants;
+- B7 owns per-release `run-evidence.json` for the committed `zombienet/` and
+  `chopsticks/` environment definitions;
+- B2 owns implementation of all 11 `FutarchyApi` methods;
 - A8 owns wiring `pallet-epoch` into the runtime;
-- A11 owns wiring `pallet-execution-guard` into the runtime.
 - SQ-101 (B4 follow-up) owns replacing the current `ForeignAssets` `u32` asset
   key with the frozen XCM `Location` key; the manifest detects this mismatch.
 

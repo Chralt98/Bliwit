@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 3,
+  "integration_contract_version": 4,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "entries": [
     {
@@ -406,8 +406,14 @@
       "item": "Queue",
       "query": "prefix",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §7.4"
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u64",
+        "value": "pallet_execution_guard::pallet::StoredQueuedExecution{pid:u64,payload_hash:[u8;32],payload_len:u32,class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],maturity:u32,grace_end:u32,version_constraint:futarchy_primitives::RuntimeVersionConstraint{spec_name:futarchy_primitives::BoundedVec(Vec<u8>),spec_version:u32},meters_declared:bounded_collections::bounded_vec::BoundedVec(Vec<[u8;8]>),ratify_ref:Optionenum[None=0|Some=1(u32)],ratification_passed:bool,attestation_id:Optionenum[None=0|Some=1(u32)],pre_upgrade_checkpoint:Optionenum[None=0|Some=1(([u8;32],[u8;32]))],cancelled:bool,declared_domains:bounded_collections::bounded_vec::BoundedVec(Vec<execution_guard_core::CallDomainenum[Public=0|Param=1|Treasury=2|Code=3|Meta=4|InternalRootAuthorizeUpgrade=5|InternalRootApplyUpgrade=6]>),failed_at:Optionenum[None=0|Some=1(u32)]}"
+      }
     },
     {
       "id": "storage.execution_guard.ratifications",
@@ -416,8 +422,14 @@
       "item": "Ratifications",
       "query": "prefix",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §7.4"
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u64",
+        "value": "pallet_execution_guard::pallet::RatificationRecord{referendum_index:u32,payload_hash:[u8;32],ratified_at:u32}"
+      }
     },
     {
       "id": "storage.execution_guard.execution_records",
@@ -426,8 +438,12 @@
       "item": "ExecutionRecords",
       "query": "value",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §7.4"
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "bounded_collections::bounded_vec::BoundedVec(Vec<futarchy_primitives::ExecutionRecord{pid:u64,payload_hash:[u8;32],class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],executed_at:u32,result:futarchy_primitives::DispatchOutcomeCodeenum[Ok=0|Failed=1{call_index:u8,error:[u8;4]}]}>)"
+      }
     },
     {
       "id": "storage.welfare.snapshots",
@@ -639,7 +655,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x03000000"
+        "value": "0x04000000"
       }
     },
     {
@@ -684,8 +700,11 @@
       "pallet": "ConditionalLedger",
       "constant": "MinTransfer",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u128",
+        "value": "0x10270000000000000000000000000000"
+      }
     },
     {
       "id": "constant.market.min_trade",
@@ -693,8 +712,11 @@
       "pallet": "Market",
       "constant": "MinTrade",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u128",
+        "value": "0x40420f00000000000000000000000000"
+      }
     },
     {
       "id": "constant.market.max_trade_ratio",
@@ -702,8 +724,11 @@
       "pallet": "Market",
       "constant": "MaxTradeRatio",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "(u32,u32)",
+        "value": "0x0100000004000000"
+      }
     },
     {
       "id": "constant.market.max_live_markets",
@@ -711,8 +736,11 @@
       "pallet": "Market",
       "constant": "MaxLiveMarkets",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0xc4000000"
+      }
     },
     {
       "id": "constant.epoch.max_intake_queue",
@@ -747,7 +775,7 @@
       "pallet": "Epoch",
       "constant": "MaxBooksPerProposal",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "blocked_by": "A8 pallet-epoch runtime wiring",
       "citation": "02 §9"
     },
     {
@@ -756,7 +784,7 @@
       "pallet": "Epoch",
       "constant": "PhaseOffsets",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "blocked_by": "A8 pallet-epoch runtime wiring",
       "citation": "02 §9"
     },
     {
@@ -765,35 +793,35 @@
       "pallet": "ExecutionGuard",
       "constant": "DescriptorLeadTime",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0xc0a80000"
+      }
     },
     {
-      "id": "constant.market.gate_p_max",
+      "id": "constant.market.gate_p_max_ceiling",
       "kind": "constant",
       "pallet": "Market",
-      "constant": "GatePMax",
+      "constant": "GatePMaxCeiling",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "futarchy_primitives::FixedU64(u64)",
+        "value": "0x00e1f50500000000"
+      }
     },
     {
-      "id": "constant.market.gate_eps",
+      "id": "constant.market.gate_eps_floor",
       "kind": "constant",
       "pallet": "Market",
-      "constant": "GateEps",
+      "constant": "GateEpsFloor",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
-    },
-    {
-      "id": "constant.epoch.intake_rate_limit",
-      "kind": "constant",
-      "pallet": "Epoch",
-      "constant": "MaxIntakePerAccountPerEpoch",
-      "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "futarchy_primitives::FixedU64(u64)",
+        "value": "0x404b4c0000000000"
+      }
     },
     {
       "id": "constant.decision.window_floor",
@@ -801,16 +829,7 @@
       "pallet": "Epoch",
       "constant": "DecisionWindowFloor",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
-    },
-    {
-      "id": "constant.decision.trailing_floor",
-      "kind": "constant",
-      "pallet": "Epoch",
-      "constant": "DecisionTrailingFloor",
-      "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "blocked_by": "A8 pallet-epoch runtime wiring",
       "citation": "02 §9"
     },
     {
@@ -819,7 +838,7 @@
       "pallet": "Epoch",
       "constant": "DecisionExtension",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "blocked_by": "A8 pallet-epoch runtime wiring",
       "citation": "02 §9"
     },
     {
@@ -828,7 +847,7 @@
       "pallet": "Epoch",
       "constant": "DecisionDeltaFloors",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "blocked_by": "A8 pallet-epoch runtime wiring",
       "citation": "02 §9"
     },
     {
@@ -837,25 +856,7 @@
       "pallet": "Epoch",
       "constant": "DecisionSigmaFloors",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
-    },
-    {
-      "id": "constant.decision.coverage_floor",
-      "kind": "constant",
-      "pallet": "Epoch",
-      "constant": "DecisionCoverageFloor",
-      "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
-    },
-    {
-      "id": "constant.decision.v_min_floors",
-      "kind": "constant",
-      "pallet": "Epoch",
-      "constant": "DecisionVMinFloors",
-      "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "blocked_by": "A8 pallet-epoch runtime wiring",
       "citation": "02 §9"
     },
     {
@@ -864,8 +865,11 @@
       "pallet": "ExecutionGuard",
       "constant": "ExecutionTimelockFloor",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "[u32;4]",
+        "value": "0x40380000403800004038000040380000"
+      }
     },
     {
       "id": "constant.execution_guard.grace_floor",
@@ -873,8 +877,11 @@
       "pallet": "ExecutionGuard",
       "constant": "ExecutionGraceFloor",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0xc0890100"
+      }
     },
     {
       "id": "constant.epoch.length_floor",
@@ -882,16 +889,7 @@
       "pallet": "Epoch",
       "constant": "MinEpochLength",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
-    },
-    {
-      "id": "constant.epoch.slots_bounds",
-      "kind": "constant",
-      "pallet": "Epoch",
-      "constant": "EpochSlotsBounds",
-      "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "blocked_by": "A8 pallet-epoch runtime wiring",
       "citation": "02 §9"
     },
     {
@@ -1490,8 +1488,19 @@
       "pallet": "ExecutionGuard",
       "event": "Executed",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "record",
+            "type": "futarchy_primitives::ExecutionRecord{pid:u64,payload_hash:[u8;32],class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],executed_at:u32,result:futarchy_primitives::DispatchOutcomeCodeenum[Ok=0|Failed=1{call_index:u8,error:[u8;4]}]}"
+          }
+        ]
+      }
     },
     {
       "id": "event.execution_guard.execution_failed",
@@ -1499,8 +1508,19 @@
       "pallet": "ExecutionGuard",
       "event": "ExecutionFailed",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "outcome",
+            "type": "futarchy_primitives::DispatchOutcomeCodeenum[Ok=0|Failed=1{call_index:u8,error:[u8;4]}]"
+          }
+        ]
+      }
     },
     {
       "id": "event.execution_guard.ratified",
@@ -1508,8 +1528,19 @@
       "pallet": "ExecutionGuard",
       "event": "Ratified",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "referendum_index",
+            "type": "u32"
+          }
+        ]
+      }
     },
     {
       "id": "event.execution_guard.upgrade_authorized",
@@ -1517,8 +1548,19 @@
       "pallet": "ExecutionGuard",
       "event": "UpgradeAuthorized",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "code_hash",
+            "type": "[u8;32]"
+          },
+          {
+            "name": "authorized_at",
+            "type": "u32"
+          }
+        ]
+      }
     },
     {
       "id": "event.oracle.reporter_registered",

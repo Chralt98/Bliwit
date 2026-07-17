@@ -34,8 +34,8 @@ pub mod pallet {
     use futarchy_primitives::{
         bounds,
         keeper::{CrankClass, KeeperRebateSink},
-        Balance, Branch, EpochId, FixedU64, GateType, MarketId, MarketKind, PositionId, ProposalId,
-        ScalarSide, TradeSide,
+        kernel, Balance, Branch, EpochId, FixedU64, GateType, MarketId, MarketKind, PositionId,
+        ProposalId, ScalarSide, TradeSide,
     };
     use market_core::{BookKind, MarketBook, MarketParams, MarketPhase};
     use sp_runtime::{
@@ -347,6 +347,34 @@ pub mod pallet {
 
         fn position_balance(&self, id: PositionId, who: &T::AccountId) -> Balance {
             pallet_conditional_ledger::Positions::<T>::get(id, who)
+        }
+    }
+
+    #[pallet::extra_constants]
+    impl<T: Config> Pallet<T> {
+        #[pallet::constant_name(MinTrade)]
+        fn min_trade() -> Balance {
+            kernel::MIN_TRADE_USDC
+        }
+
+        #[pallet::constant_name(MaxTradeRatio)]
+        fn max_trade_ratio() -> (u32, u32) {
+            kernel::MAX_TRADE_RATIO
+        }
+
+        #[pallet::constant_name(MaxLiveMarkets)]
+        fn max_live_markets() -> u32 {
+            bounds::MAX_LIVE_MARKETS
+        }
+
+        #[pallet::constant_name(GatePMaxCeiling)]
+        fn gate_p_max_ceiling() -> FixedU64 {
+            FixedU64(kernel::GATE_P_MAX_CEILING_1E9)
+        }
+
+        #[pallet::constant_name(GateEpsFloor)]
+        fn gate_eps_floor() -> FixedU64 {
+            kernel::GATE_EPS_FLOOR
         }
     }
 

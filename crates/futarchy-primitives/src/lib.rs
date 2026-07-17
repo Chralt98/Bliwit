@@ -839,12 +839,25 @@ pub mod kernel {
     pub const MIN_SPLIT_USDC: u128 = super::currency::USDC_CENT;
     pub const MIN_TRANSFER_USDC: u128 = super::currency::USDC_CENT;
     pub const MIN_TRADE_USDC: u128 = 1_000_000;
+    /// Maximum trade size as a fraction of the book liquidity parameter `b`
+    /// (04 §6.2 / 13 §2). The tuple shape is frozen by 02 §9.
+    pub const MAX_TRADE_RATIO: (u32, u32) = (1, 4);
     /// Max observation gap before a decision-window staleness event (04 §7; 13 §3.2).
     pub const MKT_STALE_GAP_BLOCKS: u64 = 50;
     pub const POSITION_DEPOSIT_USDC: u128 = 100_000;
     /// Minimum META-amendable epoch length (14 days; 05 §3.1 / 13 §1).
     pub const MIN_EPOCH_LENGTH_BLOCKS: u32 = 201_600;
+    /// Kernel floor for the decision window (`dec.window`, 13 §1).
+    pub const DECISION_WINDOW_FLOOR_BLOCKS: u32 = BLOCKS_PER_DAY;
     pub const DEC_EXTENSION_BLOCKS: u32 = 43_200;
+    /// Per-class `dec.delta` kernel floor on the contract's 1e9 grid.
+    pub const DECISION_DELTA_FLOOR: super::FixedU64 = super::FixedU64(5_000_000);
+    /// PARAM/TREASURY/CODE/META order frozen by 02 §9.
+    pub const DECISION_DELTA_FLOORS: [super::FixedU64; 4] = [DECISION_DELTA_FLOOR; 4];
+    /// Per-class `dec.sigma` kernel floor on the contract's 1e9 grid.
+    pub const DECISION_SIGMA_FLOOR: super::FixedU64 = super::FixedU64(0);
+    /// PARAM/TREASURY/CODE/META order frozen by 02 §9.
+    pub const DECISION_SIGMA_FLOORS: [super::FixedU64; 4] = [DECISION_SIGMA_FLOOR; 4];
     /// Rerun hurdle increment (one percentage point; T13 / 05 §5.4).
     pub const RERUN_HURDLE_BUMP_1E9: u64 = 10_000_000;
     /// Capture-resistance multiplier `AttackCost >= 3 * InCapPrize` (D-4).
@@ -881,6 +894,14 @@ pub mod kernel {
     pub const QUOTE_CLAMP_MIN_1E9: u64 = 1_000_000;
     pub const QUOTE_CLAMP_MAX_1E9: u64 = 999_000_000;
     pub const GATE_P_MAX_CEILING_1E9: u64 = 100_000_000;
+    /// `gate.eps` kernel floor on the contract's 1e9 grid (13 §1).
+    pub const GATE_EPS_FLOOR: super::FixedU64 = super::FixedU64(5_000_000);
+    /// `exec.timelock` kernel floor shared by every proposal class (13 §1).
+    pub const EXECUTION_TIMELOCK_FLOOR_BLOCKS: u32 = BLOCKS_PER_DAY;
+    /// PARAM/TREASURY/CODE/META order frozen by 02 §9.
+    pub const EXECUTION_TIMELOCK_FLOORS_BLOCKS: [u32; 4] = [EXECUTION_TIMELOCK_FLOOR_BLOCKS; 4];
+    /// `exec.grace` kernel floor (seven days; 13 §1).
+    pub const EXECUTION_GRACE_FLOOR_BLOCKS: u32 = 7 * BLOCKS_PER_DAY;
     pub const ORC_MAX_PROOF_BYTES: u32 = 256 * 1024;
     pub const REG_MAX_FILINGS_EPOCH: u32 = 64;
     pub const WT_MAX: u32 = 16;
@@ -913,6 +934,17 @@ pub mod phase_offsets {
     pub const DECIDE_WINDOW_NUM: u32 = 15;
     pub const DECIDE_NUM: u32 = 18;
     pub const HOUSEKEEPING_NUM: u32 = 20;
+    /// Intake/Qualify/Seed/Trade/DecideWindow/Decide/Housekeeping order frozen
+    /// by 02 §9.
+    pub const ORDERED: [(u32, u32); 7] = [
+        (INTAKE_NUM, DENOMINATOR),
+        (QUALIFY_NUM, DENOMINATOR),
+        (SEED_NUM, DENOMINATOR),
+        (TRADE_NUM, DENOMINATOR),
+        (DECIDE_WINDOW_NUM, DENOMINATOR),
+        (DECIDE_NUM, DENOMINATOR),
+        (HOUSEKEEPING_NUM, DENOMINATOR),
+    ];
 }
 
 impl Branch {
