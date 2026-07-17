@@ -104,7 +104,12 @@ fn holder_label(who: u8) -> &'static str {
         1 => "alice",
         2 => "bob",
         3 => "carol",
-        other => panic!("unexpected replay holder index: {other}"),
+        // The index is deliberately not interpolated: CodeQL's cleartext-logging
+        // name heuristic taints anything reaching here from the `owner` field
+        // (public-fixture u8 test index, alert #12 on PR #89). Valid indices are
+        // 1..=3; a violating scenario is pinpointed by the replay's own
+        // scenario/op context in the surrounding assertions.
+        _ => panic!("replay holder index outside the fixture's 1..=3 range"),
     }
 }
 
