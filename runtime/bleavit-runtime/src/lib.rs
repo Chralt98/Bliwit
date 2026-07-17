@@ -63,6 +63,10 @@ pub mod weights;
 mod pov_budgets;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_s5;
+#[cfg(test)]
+mod tests_s5_behavior;
 
 use alloc::borrow::Cow;
 // `impl_opaque_keys!` references a bare `Vec` — resolved by the std prelude in

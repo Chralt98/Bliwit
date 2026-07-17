@@ -899,6 +899,18 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
     matches!(
         call,
         RuntimeCall::Welfare(pallet_welfare::Call::register_spec { .. })
+            // SQ-151: B1a wires ForeignAssets::CreateOrigin to
+            // EnsureConstitutionalAssetCreate (EnsureConstitutionalValues).
+            // Admit the bare scheduler leaf here; the pallet CreateOrigin
+            // remains the independent second check required by 06 §3.3(b).
+            | RuntimeCall::ForeignAssets(pallet_assets::Call::create { .. })
+            // Same shape as SQ-151, surfaced by the S5 exhaustiveness suite on
+            // the A8 merge: `epoch.set_next_epoch_length` is
+            // ConstitutionalValues-domain and in-pallet gated by
+            // `ConstitutionalValuesOrigin` (the independent second check), so
+            // the bare scheduler leaf must clear the origin-blind base filter
+            // or the configured values path is unreachable.
+            | RuntimeCall::Epoch(pallet_epoch::Call::set_next_epoch_length { .. })
             | RuntimeCall::Constitution(pallet_constitution::Call::amend_registry { .. })
             | RuntimeCall::Constitution(pallet_constitution::Call::set_release_channel { .. })
             // `referenda.cancel`/`kill` are ConstitutionalValues-domain (the

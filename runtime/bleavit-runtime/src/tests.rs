@@ -52,7 +52,7 @@ where
 {
 }
 
-fn account(seed: u8) -> AccountId {
+pub(crate) fn account(seed: u8) -> AccountId {
     AccountId::new([seed; 32])
 }
 
@@ -72,7 +72,7 @@ fn merge_json(base: &mut serde_json::Value, patch: serde_json::Value) {
     }
 }
 
-fn development_ext() -> sp_io::TestExternalities {
+pub(crate) fn development_ext() -> sp_io::TestExternalities {
     let preset =
         match crate::genesis::get_preset(&PresetId::from(sp_genesis_builder::DEV_RUNTIME_PRESET)) {
             Some(bytes) => bytes,
@@ -123,7 +123,7 @@ impl sp_core::traits::ReadRuntimeVersion for CandidateRuntimeVersion {
     }
 }
 
-fn upgrade_ext() -> sp_io::TestExternalities {
+pub(crate) fn upgrade_ext() -> sp_io::TestExternalities {
     let mut version = VERSION;
     version.spec_version = version.spec_version.saturating_add(1);
     let mut ext = development_ext();
@@ -285,7 +285,7 @@ fn enqueue_treasury_call(
     Some(maturity)
 }
 
-fn seed_parachain_upgrade_boundary(candidate_len: usize) {
+pub(crate) fn seed_parachain_upgrade_boundary(candidate_len: usize) {
     let max_code_size = u32::try_from(candidate_len).map_or(u32::MAX, |len| len.saturating_add(1));
     cumulus_pallet_parachain_system::ValidationData::<Runtime>::put(
         cumulus_primitives_core::PersistedValidationData::default(),
@@ -350,11 +350,11 @@ fn submit_relay_upgrade_signal(signal: cumulus_primitives_core::relay_chain::Upg
     ));
 }
 
-fn remark() -> RuntimeCall {
+pub(crate) fn remark() -> RuntimeCall {
     RuntimeCall::System(frame_system::Call::remark { remark: vec![1] })
 }
 
-fn set_pending_upgrade(applicable_at: Option<BlockNumber>) {
+pub(crate) fn set_pending_upgrade(applicable_at: Option<BlockNumber>) {
     match applicable_at {
         Some(applicable_at) => {
             pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::put(
@@ -371,7 +371,7 @@ fn set_pending_upgrade(applicable_at: Option<BlockNumber>) {
     }
 }
 
-fn nobody_system_calls() -> Vec<RuntimeCall> {
+pub(crate) fn nobody_system_calls() -> Vec<RuntimeCall> {
     vec![
         RuntimeCall::System(frame_system::Call::set_heap_pages { pages: 64 }),
         RuntimeCall::System(frame_system::Call::set_code { code: vec![1] }),
@@ -395,7 +395,7 @@ fn nobody_system_calls() -> Vec<RuntimeCall> {
     ]
 }
 
-fn closed_wrappers(call: RuntimeCall) -> Vec<RuntimeCall> {
+pub(crate) fn closed_wrappers(call: RuntimeCall) -> Vec<RuntimeCall> {
     let who = account(7);
     let signed_origin: <RuntimeOrigin as frame_support::traits::OriginTrait>::PalletsOrigin =
         frame_system::RawOrigin::Signed(who.clone()).into();
@@ -1033,7 +1033,9 @@ fn usdc_admin_and_fee_posture_is_fail_closed() {
         beneficiary: MultiAddress::Id(account(2)),
         amount: currency::USDC_CENT,
     });
-    assert!(!RuntimeBaseCallFilter::contains(&create));
+    // SQ-151: the bare scheduler leaf must clear the origin-blind base filter;
+    // the pallet's CreateOrigin remains the independent authority check.
+    assert!(RuntimeBaseCallFilter::contains(&create));
     assert!(RuntimeBaseCallFilter::contains_for(
         ClassOrigin::ConstitutionalValues,
         &create
