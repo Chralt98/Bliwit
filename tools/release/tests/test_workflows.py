@@ -35,6 +35,18 @@ class WorkflowContractTests(unittest.TestCase):
         # The assembler binds every artifact to the release commit.
         self.assertIn('--commit "$GITHUB_SHA"', workflow)
 
+    def test_cargo_heavy_jobs_free_runner_disk_space(self) -> None:
+        # The workspace build writes ~35 GB; stock runners have ~14 GB free.
+        # Every job that runs the full workspace build must first drop the
+        # preinstalled runner bloat, or it dies with "No space left on device".
+        ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertEqual(ci.count("Free runner disk space"), 1)
+        self.assertEqual(release.count("Free runner disk space"), 2)
+        for workflow in (ci, release):
+            self.assertIn("/usr/share/dotnet", workflow)
+            self.assertIn("CARGO_INCREMENTAL: 0", workflow)
+
     def test_tag_gates_run_all_tooling_suites(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         for suite in (
