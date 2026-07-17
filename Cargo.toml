@@ -96,7 +96,7 @@ pallet-session = { version = "=46.0.0", default-features = false }
 pallet-sudo = { version = "=46.0.0", default-features = false }
 pallet-timestamp = { version = "=45.0.0", default-features = false }
 pallet-transaction-payment = { version = "=46.0.0", default-features = false }
-pallet-transaction-payment-rpc-runtime-api = { version = "=46.0.0", default-features = false }
+pallet-transaction-payment-rpc-runtime-api = { version = "=49.0.0", default-features = false }
 pallet-utility = { version = "=46.0.0", default-features = false }
 pallet-vesting = { version = "=46.0.0", default-features = false }
 pallet-xcm = { version = "=26.0.0", default-features = false }
