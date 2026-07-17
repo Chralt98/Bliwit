@@ -82,3 +82,8 @@ if [[ -f tools/reference-model/generate-vectors.py ]]; then
 fi
 
 python3 tools/reference-model/check-doc-table.py
+
+# I-22 convention gate (15 §4.6): the strict extractor fails on registry drift,
+# and every classified dispatch limit must remain attached to a Rust test.
+python3 -m unittest discover -s tools/limit-coverage/tests
+python3 tools/limit-coverage/check-limit-coverage.py

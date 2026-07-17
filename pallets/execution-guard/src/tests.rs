@@ -385,6 +385,7 @@ fn core_seed_rejects_per_entry_domain_and_lock_overflow() {
 
 #[test]
 fn ordered_check_1_rejects_cancelled_immature_and_expired_entries() {
+    // limit-coverage: exec.grace
     new_test_ext().execute_with(|| {
         setup_param(1, 1);
         Queue::<Test>::mutate(1, |queued| {
@@ -416,6 +417,41 @@ fn ordered_check_1_rejects_cancelled_immature_and_expired_entries() {
             Error::<Test>::GraceExpired
         );
     });
+}
+
+#[test]
+fn execution_before_maturity_is_rejected_for_every_proposal_class() {
+    // limit-coverage: exec.lock.param, exec.lock.trs, exec.lock.code, exec.lock.meta
+    for (index, class) in [
+        futarchy_primitives::ProposalClass::Param,
+        futarchy_primitives::ProposalClass::Treasury,
+        futarchy_primitives::ProposalClass::Code,
+        futarchy_primitives::ProposalClass::Meta,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        new_test_ext().execute_with(|| {
+            let pid = index as ProposalId + 1;
+            let (payload_hash, payload_len) = put_preimage(&[param_call(pid as u32)]);
+            commit_payload(pid, payload_hash);
+            Queue::<Test>::insert(
+                pid,
+                queued_item(
+                    pid,
+                    class,
+                    payload_hash,
+                    payload_len,
+                    vec![CallDomain::Param],
+                ),
+            );
+
+            assert_noop!(
+                GuardPallet::execute(RuntimeOrigin::signed(keeper()), pid),
+                Error::<Test>::NotMature
+            );
+        });
+    }
 }
 
 #[test]
@@ -486,6 +522,7 @@ fn ordered_checks_3_and_4_reject_stale_version_and_bad_ratification_binding() {
 
 #[test]
 fn ordered_check_5_fails_closed_for_forged_underquorum_and_challenged_attestations() {
+    // limit-coverage: att.quorum
     // A forged queue row has no queue-time-frozen attestation binding.
     new_test_ext().execute_with(|| {
         let code = b"attested-runtime";
@@ -576,6 +613,7 @@ fn ordered_checks_6_to_10_reject_capability_meter_lock_guardian_and_freezes() {
 
 #[test]
 fn ordered_check_11_enforces_payload_call_domain_and_safety_bounds() {
+    // limit-coverage: prop.max_calls, prop.max_bytes, prop.max_weight
     new_test_ext().execute_with(|| {
         let calls = (0..=MAX_CALLS)
             .map(|value| param_call(value as u32))
@@ -630,6 +668,19 @@ fn ordered_check_11_enforces_payload_call_domain_and_safety_bounds() {
         assert_noop!(
             GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
             Error::<Test>::SafetyFilter
+        );
+    });
+    new_test_ext().execute_with(|| {
+        assert_ok!(enqueue_calls(
+            1,
+            futarchy_primitives::ProposalClass::Param,
+            vec![heavy_call()],
+            vec![CallDomain::Param],
+        ));
+        run_to_maturity(1);
+        assert_noop!(
+            GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
+            Error::<Test>::CapabilityDenied
         );
     });
 }
@@ -1002,6 +1053,7 @@ fn r2_forty_sequential_terminal_dequeues_do_not_exhaust_the_queue() {
 
 #[test]
 fn upgrade_enforces_lead_time_hash_version_and_release_channel_rollback() {
+    // limit-coverage: DescriptorLeadTime
     new_test_ext().execute_with(|| {
         let code = b"runtime-v2";
         setup_upgrade(1, code, 7);
@@ -1268,6 +1320,7 @@ fn upgrade_authorization_rejects_hash_mismatch_pending_conflict_and_spacing() {
 
 #[test]
 fn code_spacing_exact_boundary_and_expedited_zero_spacing_are_recorded() {
+    // limit-coverage: code.spacing
     new_test_ext().execute_with(|| {
         Grace::set(100);
         let code = b"spacing-boundary-runtime";
@@ -1552,6 +1605,7 @@ fn r5_payload_weight_ceiling_matches_the_kernel_ratio() {
 
 #[test]
 fn execution_record_ring_evicts_fifo_at_256() {
+    // limit-coverage: ExecutionRecords
     new_test_ext().execute_with(|| {
         for pid in 1..=MAX_EXECUTION_RECORDS as ProposalId + 1 {
             setup_param(pid, pid as u32);

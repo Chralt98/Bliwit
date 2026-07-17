@@ -1,0 +1,1030 @@
+# Exhaustive generated-limit classification (15 §4.6 / I-22).
+# One [[entry]] exists for every extracted 13 §1, §2, and §4 key.
+
+[[entry]]
+key = "epoch.length"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "epoch.slots"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "epoch.horizon_k"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "mkt.obs_interval"
+class = "dispatch-limit"
+genesis = true
+behavior = "Some(before)"
+reason = "13 §1 / 04 §7: a dispatch inside the observation interval asserts the enforced successful no-op (byte-identical state and no event); the cadence gate has no Module error."
+
+[[entry]]
+key = "mkt.kappa"
+class = "dispatch-limit"
+genesis = true
+behavior = "one_interval_cap"
+reason = "13 §1 / 04 §7: crank_observe caps a one-interval jump at κ; the enforced clamp is successful and has no Module error."
+
+[[entry]]
+key = "mkt.fee"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.window"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.trailing"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.delta.param"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.delta.trs"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.delta.code"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.delta.meta"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.sigma.param"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.sigma.trs"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.sigma.code"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.sigma.meta"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.delta_max"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.coverage"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.v_min.param"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.v_min.trs"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.v_min.code"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "dec.v_min.meta"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "gate.p_max"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "gate.v_min"
+class = "value"
+genesis = false
+reason = "13 §1: derived 0.1 × dec.v_min(class) at the consuming gate engine; intentionally unseeded and has no independent dispatch limit."
+
+[[entry]]
+key = "gate.nb_coverage"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "gate.nb_conv"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "gate.eps"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "welfare.thS_lo"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "welfare.thS_hi"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "welfare.thC_lo"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "welfare.thC_hi"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "welfare.wP"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "welfare.wA"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "prop.bond.param"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "prop.bond.trs"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "prop.bond.code"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "prop.bond.meta"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "intake.max_acct"
+class = "dispatch-limit"
+genesis = true
+error = "Epoch::IntakeFull"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "intake.slash_pct"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "pol.b.param"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "pol.b.trs"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "pol.b.code"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "pol.b.meta"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "pol.b_gate"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "pol.b_baseline"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "pol.budget_epoch"
+class = "unwired"
+genesis = true
+reason = "13 §1: the POL epoch meter is seeded but no consuming dispatch path is wired."
+owner = "B10"
+
+[[entry]]
+key = "exec.lock.param"
+class = "dispatch-limit"
+genesis = true
+error = "ExecutionGuard::NotMature"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "exec.lock.trs"
+class = "dispatch-limit"
+genesis = true
+error = "ExecutionGuard::NotMature"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "exec.lock.code"
+class = "dispatch-limit"
+genesis = true
+error = "ExecutionGuard::NotMature"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "exec.lock.meta"
+class = "dispatch-limit"
+genesis = true
+error = "ExecutionGuard::NotMature"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "exec.grace"
+class = "dispatch-limit"
+genesis = true
+error = "ExecutionGuard::GraceExpired"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "trs.cap_proposal"
+class = "dispatch-limit"
+genesis = true
+error = "Treasury::ProposalCapExceeded"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "trs.cap_30d"
+class = "dispatch-limit"
+genesis = true
+error = "Treasury::MeterExhausted"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "trs.cap_180d"
+class = "dispatch-limit"
+genesis = true
+error = "Treasury::MeterExhausted"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "trs.stream_thr"
+class = "dispatch-limit"
+genesis = true
+error = "Treasury::StreamRequired"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "trs.reward.param"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "trs.reward.trs"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "trs.reward.code"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "trs.reward.meta"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "iss.inflation"
+class = "dispatch-limit"
+genesis = true
+error = "Treasury::IssuanceCapExceeded"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "fee.vit_usdc"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded economic value — [VERIFY]-gated on the TGE reference price; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "code.spacing"
+class = "dispatch-limit"
+genesis = true
+error = "ExecutionGuard::MetersBlocked"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "orc.bond_floor"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; oracle-core still consumes its kernel constant until B10."
+
+[[entry]]
+key = "orc.bond_bps"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; oracle-core still consumes its kernel constant until B10."
+
+[[entry]]
+key = "orc.rounds"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; oracle-core still consumes its kernel constant until B10."
+
+[[entry]]
+key = "orc.window"
+class = "dispatch-limit"
+genesis = true
+error = "Oracle::WindowClosed"
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / 07 §5: the marked test covers the kernel-constant consumer; the generated suite covers the amendment dispatch path only until B10 binds live Params."
+
+[[entry]]
+key = "orc.rep_stake"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; oracle-core still consumes its kernel constant until B10."
+
+[[entry]]
+key = "dis.merit_min"
+class = "value"
+genesis = false
+reason = "13 §1: derived B_1(c,m) at the dispute engine; intentionally unseeded and has no independent dispatch limit."
+
+[[entry]]
+key = "wt.quorum"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; oracle-core still consumes its kernel constant until B10."
+
+[[entry]]
+key = "wt.stake"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; oracle-core still consumes its kernel constant until B10."
+
+[[entry]]
+key = "orc.n_min"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "reg.bond_inc"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "reg.bond_mile"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "res.probe_int"
+class = "dispatch-limit"
+genesis = true
+error = "Oracle::ProbeTooEarly"
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / 07 §8: the marked test covers the kernel-constant consumer; the generated suite covers the amendment dispatch path only until B10 binds live Params."
+
+[[entry]]
+key = "res.probe_to"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; oracle-core still consumes its reserve-probe kernel constant until B10."
+
+[[entry]]
+key = "res.probe_amount"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; oracle-core still consumes its reserve-probe kernel constant until B10."
+
+[[entry]]
+key = "res.fail_thr"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; oracle-core still consumes its reserve-probe kernel constant until B10."
+
+[[entry]]
+key = "res.recover_thr"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; oracle-core still consumes its reserve-probe kernel constant until B10."
+
+[[entry]]
+key = "grd.bond"
+class = "value"
+genesis = false
+reason = "13 §1: guardian bond/allowance row is scope-K and enforced by pallet-guardian constants, not a seeded ParamKey dispatch limit."
+
+[[entry]]
+key = "keeper.rebate"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded economic value — [VERIFY]-gated on benchmarked fee basis; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "keeper.budget"
+class = "dispatch-limit"
+genesis = true
+behavior = "KeeperBudgetExhausted"
+reason = "13 §1 / 08 §6.3: the treasury seam test covers meter charging and the fail-soft exhaustion latch; full real-crank dispatch-past-budget coverage is deferred to B10."
+owner = "B10"
+
+[[entry]]
+key = "collator.comp"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "collator.n_min"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "collator.bond"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded economic value — [VERIFY]-gated on the collator program before Phase-3; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "collator.n_tgt"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "sec.prize.param"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded economic value — [VERIFY]-gated on Phase-0 capability-envelope calibration; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "sec.prize.code"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded economic value — [VERIFY]-gated on Phase-0 capability-envelope calibration; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "sec.prize.meta"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded economic value — [VERIFY]-gated on Phase-0 capability-envelope calibration; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "sec.flow_cap"
+class = "diagnostic"
+genesis = false
+reason = "13 §1 explicitly marks sec.flow_cap diagnostic-only in v1; it never gates dispatch."
+
+[[entry]]
+key = "ops.bootnodes"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded operating-budget value — [VERIFY]-gated on Phase-2/3 operations planning; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "ops.rpc_archive"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded operating-budget value — [VERIFY]-gated on Phase-2/3 operations planning; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "ops.collators"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded operating-budget value — [VERIFY]-gated on Phase-2/3 operations planning; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "ops.keepers"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded operating-budget value — [VERIFY]-gated on Phase-2/3 operations planning; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "ops.monitoring"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded operating-budget value — [VERIFY]-gated on Phase-2/3 operations planning; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "ops.arweave"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded operating-budget value — [VERIFY]-gated on Phase-2/3 operations planning; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "ops.watchtowers"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded operating-budget value — [VERIFY]-gated on Phase-2/3 operations planning; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "ops.coretime"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded operating-budget value — [VERIFY]-gated on Phase-2/3 operations planning; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "ops.oracle_ev"
+class = "value"
+genesis = false
+reason = "13 §1: unseeded operating-budget value — [VERIFY]-gated on Phase-2/3 operations planning; it has no dispatch-path limit of its own."
+
+[[entry]]
+key = "grd.review_dl"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; guardian-core still consumes REVIEW_DEADLINE_EPOCHS until B10."
+
+[[entry]]
+key = "att.bond"
+class = "param-bounds"
+genesis = true
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / rule 7: the generated suite covers the amendment dispatch path only; attestor-core still consumes ATTESTOR_BOND until B10."
+
+[[entry]]
+key = "att.window"
+class = "dispatch-limit"
+genesis = true
+error = "Attestor::ChallengeWindowClosed"
+consumer_binding = "kernel-constant (B10)"
+reason = "13 §1 / 06 §7: the marked test covers the kernel-constant consumer; the generated suite covers the amendment dispatch path only until B10 binds live Params."
+
+[[entry]]
+key = "ledger.min_split"
+class = "dispatch-limit"
+genesis = true
+error = "ConditionalLedger::BelowMinimum"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "ledger.archive"
+class = "dispatch-limit"
+genesis = true
+error = "ConditionalLedger::ReapNotDue"
+reason = "13 §1; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "ledger.pos_dep"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite."
+
+[[entry]]
+key = "phase3.tvl_cap"
+class = "unwired"
+genesis = true
+reason = "13 §1 / SQ-110: production AssetTransactor is (), so no deployed XCM inflow reaches the cap adapter. Library-level bleavit-xcm coverage exists and re-arms as dispatch-limit when B10 wires the transactor."
+owner = "B10"
+
+[[entry]]
+key = "phase3.dep_cap"
+class = "unwired"
+genesis = true
+reason = "13 §1 / SQ-111: production AssetTransactor is (), so no deployed XCM inflow reaches the per-account cap adapter. Library-level bleavit-xcm coverage exists and re-arms as dispatch-limit when B10 wires the transactor."
+owner = "B10"
+
+[[entry]]
+key = "MinTrade"
+class = "dispatch-limit"
+error = "Market::AmountTooSmall"
+reason = "13 §2; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "MaxTrade"
+class = "dispatch-limit"
+error = "Market::AmountTooLarge"
+reason = "13 §2; 15 §4.6: dispatch-path limit coverage (b/4 + 1 rejected)."
+
+[[entry]]
+key = "dec.extension"
+class = "dispatch-limit"
+behavior = "NotDecisionGrade"
+reason = "13 §2 / 05: the existing epoch pallet test asserts the latch extends once and rejects on the next insufficient decision."
+
+[[entry]]
+key = "prop.max_calls"
+class = "dispatch-limit"
+error = "ExecutionGuard::TooManyCalls"
+reason = "13 §2; 15 §4.6: dispatch-path limit coverage (17th call rejected)."
+
+[[entry]]
+key = "prop.max_bytes"
+class = "dispatch-limit"
+error = "ExecutionGuard::PayloadTooLarge"
+reason = "13 §2; 15 §4.6: dispatch-path limit coverage (64 KiB + 1 rejected)."
+
+[[entry]]
+key = "prop.max_weight"
+class = "dispatch-limit"
+error = "ExecutionGuard::CapabilityDenied"
+reason = "13 §2; 15 §4.6: the weight ceiling shares CapabilityDenied with the capability checks; the marked test drives the total-weight bound specifically."
+
+[[entry]]
+key = "MAX_NESTED"
+class = "dispatch-limit"
+error = "frame_system::CallFiltered"
+reason = "13 §2; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "lmsr-domain-bound"
+class = "dispatch-limit"
+error = "Market::PriceBoundExceeded"
+reason = "13 §2; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "lmsr-error-bounds"
+class = "value"
+reason = "13 §2: numerical accuracy bound, certified by 15 §4.4 differential vectors rather than a dispatch error."
+
+[[entry]]
+key = "rounding-discipline"
+class = "value"
+reason = "13 §2: arithmetic semantics, certified by I-5/PT-3 rather than a dispatch-past-limit error."
+
+[[entry]]
+key = "void-payout-rules"
+class = "value"
+reason = "13 §2: payout semantics, certified by I-26/I-27 and PT-2/PT-6 rather than a dispatch limit."
+
+[[entry]]
+key = "scalar-redemption-rules"
+class = "value"
+reason = "13 §2: payout semantics, certified by PT-3 rather than a dispatch limit."
+
+[[entry]]
+key = "DescriptorLeadTime"
+class = "dispatch-limit"
+error = "ExecutionGuard::DescriptorLeadTime"
+reason = "13 §2; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "MIGRATION_STALL_BLOCKS"
+class = "value"
+reason = "13 §2: automatic liveness threshold that raises PB-MIGRATION; the threshold itself is not a dispatch argument."
+
+[[entry]]
+key = "pb-ledger-freeze.duration"
+class = "dispatch-limit"
+error = "Guardian::DurationTooLong"
+reason = "13 §2; 15 §4.6: the 14-day absolute-expiry cap rejects a longer hold."
+
+[[entry]]
+key = "pb-ledger-freeze.renewal"
+class = "dispatch-limit"
+error = "Guardian::RenewalNotAllowed"
+reason = "13 §2; 15 §4.6: exactly one values-ratified renewal; the second is rejected."
+
+[[entry]]
+key = "expedited-code-lane"
+class = "value"
+reason = "13 §2: composite governance schedule/admissibility rule, not a standalone meter or bound key."
+
+[[entry]]
+key = "orc.ext_window"
+class = "dispatch-limit"
+behavior = "WindowExtended"
+reason = "13 §2 / 07 §4: the existing oracle test asserts one extension followed by neutral settlement rather than a second extension."
+
+[[entry]]
+key = "OracleSettleDeadline(m)"
+class = "dispatch-limit"
+behavior = "RoundNotFound"
+reason = "13 §2 / 07 §11: the existing deadline test drives neutral settlement and proves a late verdict cannot overwrite it."
+
+[[entry]]
+key = "orc.max_proof_bytes"
+class = "dispatch-limit"
+behavior = "BoundedVec exceeds its limit"
+reason = "13 §2 / 07 §9: raw SCALE call admission rejects a declared proof length of bound+1 before module dispatch; no Module::ProofTooLarge path is reachable."
+
+[[entry]]
+key = "reg.max_filings_epoch"
+class = "dispatch-limit"
+error = "Registry::EpochFull"
+reason = "13 §2; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "wt.max"
+class = "dispatch-limit"
+error = "Oracle::TooManyWatchtowers"
+reason = "13 §2; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "att.min_members"
+class = "dispatch-limit"
+error = "Attestor::TooFewMembers"
+reason = "13 §2; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "att.quorum"
+class = "dispatch-limit"
+error = "ExecutionGuard::AttestationMissing"
+reason = "13 §2; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "kernel-attestation"
+class = "value"
+reason = "13 §2: attestation regime description; each independent numeric registry floor has its own dispatch-limit key."
+
+[[entry]]
+key = "dead-man-switch"
+class = "dispatch-limit"
+behavior = "DEAD_MAN_ENGAGED"
+reason = "13 §2: the enforcement consequence is covered — with the flag engaged the real SafetyFilter freezes queued dispatch and the epoch clock pauses/rejects submission (marked runtime + epoch tests). The 4,800-relay-block/overdue-snapshot DETECTOR that raises the flag is still B10 (SQ-155); until it lands the flag is guardian/writer-raised only."
+
+[[entry]]
+key = "StaleEpochBound"
+class = "dispatch-limit"
+behavior = "ProposalForceRejected"
+reason = "13 §2 / 05: the existing epoch test drives the stale boundary and asserts force rejection plus vault voiding."
+
+[[entry]]
+key = "TickBatch"
+class = "dispatch-limit"
+behavior = "BoundedVec exceeds its limit"
+reason = "13 §2: an 11-pid tick batch is rejected at extrinsic admission — proven both at pallet Call decode and through the real runtime's UncheckedExtrinsic::decode (epoch live at index 61 since the B5-groundwork A8 wiring)."
+
+[[entry]]
+key = "ReapBatch"
+class = "dispatch-limit"
+behavior = "remaining_after_first_reap"
+reason = "13 §2: a successful ReapBatch dispatch leaves item 101 for the next crank."
+
+[[entry]]
+key = "settle_cohort"
+class = "dispatch-limit"
+error = "Epoch::BatchTooLarge"
+reason = "13 §2: settle_cohort rejects an item cap of 101 with BatchTooLarge."
+
+[[entry]]
+key = "entrenched-floors"
+class = "value"
+reason = "13 §2: rationale/values for §1 kernel-bounded rows; the generated amendment suite covers the actual keys."
+
+[[entry]]
+key = "keeper-budget-floor-note"
+class = "value"
+reason = "13 §2: safety rationale for keeper.budget’s §1 floor, not a separate dispatch limit."
+
+[[entry]]
+key = "IntakeQueue"
+class = "dispatch-limit"
+error = "Epoch::IntakeFull"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "MaxLiveProposals"
+class = "dispatch-limit"
+error = "Epoch::TooManyLiveProposals"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "Books per proposal"
+class = "value"
+reason = "13 §4: structural per-proposal book count derived from fixed MarketKind composition; no call accepts an over-bound collection."
+
+[[entry]]
+key = "Baseline books"
+class = "value"
+reason = "13 §4: one-per-live-epoch structural occupancy bound; no dispatch accepts an over-bound collection."
+
+[[entry]]
+key = "MaxLiveMarkets"
+class = "dispatch-limit"
+error = "Market::TooManyMarkets"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "Concurrently trading books"
+class = "value"
+reason = "13 §4: derived forecast-load value (5×6+1), not separately stored or dispatch-enforced."
+
+[[entry]]
+key = "RecentCohortSummaries ring"
+class = "dispatch-limit"
+behavior = "recent[0]"
+reason = "13 §4: the existing owning-pallet test pushes past capacity and asserts FIFO eviction."
+
+[[entry]]
+key = "TwapCheckpoints"
+class = "unwired"
+reason = "13 §4: the checkpoint ring is not implemented in pallet-market; this pre-existing A3/A5 gap was surfaced by S3."
+owner = "B10"
+
+[[entry]]
+key = "MaxPositionsPerAccount"
+class = "dispatch-limit"
+error = "ConditionalLedger::TooManyPositions"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "Positions deposit"
+class = "value"
+reason = "13 §4: economic value mirrored by ledger.pos_dep; it is not a collection bound."
+
+[[entry]]
+key = "Positions key order"
+class = "value"
+reason = "13 §4: storage-layout rule, not a numeric dispatch limit."
+
+[[entry]]
+key = "MaxSettlingCohorts"
+class = "dispatch-limit"
+error = "Epoch::TooManyCohorts"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "Resource locks"
+class = "value"
+reason = "13 §4: resources are SCALE-bounded in Proposal before dispatch; an over-bound call value is not constructible."
+
+[[entry]]
+key = "Oracle games (live rounds)"
+class = "dispatch-limit"
+error = "Oracle::RoundLimit"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "MetricSpecs"
+class = "dispatch-limit"
+error = "Welfare::TooManyMetricSpecs"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "Snapshots"
+class = "dispatch-limit"
+error = "Welfare::TooManySnapshots"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "ExecutionRecords"
+class = "dispatch-limit"
+behavior = "records[0]"
+reason = "13 §4: the existing owning-pallet test pushes past capacity and asserts FIFO eviction."
+
+[[entry]]
+key = "MIGRATION_SERVICE_WEIGHT_PERCENT"
+class = "value"
+reason = "13 §4: pallet-migrations per-block service budget, not a dispatch argument."
+
+[[entry]]
+key = "MIGRATION_CURSOR_MAX_LEN"
+class = "dispatch-limit"
+behavior = "BoundedVec exceeds its limit"
+reason = "13 §4: a bound+1 cursor on the Root-gated (SafetyFilter-denied, SQ-104) force_set_active_cursor is rejected by the real runtime's UncheckedExtrinsic admission — same behavior class as orc.max_proof_bytes (SQ-156)."
+
+[[entry]]
+key = "MIGRATION_IDENTIFIER_MAX_LEN"
+class = "dispatch-limit"
+behavior = "BoundedVec exceeds its limit"
+reason = "13 §4: a bound+1 historic-migration identifier on the Root-gated (SafetyFilter-denied, SQ-104) clear_historic is rejected by the real runtime's UncheckedExtrinsic admission — same behavior class as orc.max_proof_bytes (SQ-156)."
+
+[[entry]]
+key = "Registry filings (Incident/Milestone)"
+class = "dispatch-limit"
+error = "Registry::EpochFull"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "Params registry"
+class = "value"
+reason = "13 §4: genesis-fixed key-set capacity; amend_registry cannot insert keys, so no dispatch can exceed it."
+
+[[entry]]
+key = "Capabilities table"
+class = "dispatch-limit"
+error = "Constitution::TooManyCapabilities"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "Meters"
+class = "value"
+reason = "13 §4: genesis-fixed generic meter container is empty and has no dispatch insertion surface."
+
+[[entry]]
+key = "Vesting schedules per account"
+class = "dispatch-limit"
+error = "Vesting::AtMaxVestingSchedules"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "Treasury Streams"
+class = "dispatch-limit"
+error = "Treasury::TooManyStreams"
+reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "Treasury budget lines"
+class = "value"
+reason = "13 §4: upsert-keyed finite BudgetLine enum has fewer variants than the 32-row headroom; overflow is not constructible."
+
+[[entry]]
+key = "Treasury pending outflows"
+class = "unwired"
+reason = "13 §4 / A9: the bounded internal helper exists, but the execution-guard queue has no runtime caller syncing pending outflows."
+owner = "B10"
+
+[[entry]]
+key = "Treasury POL commitments"
+class = "unwired"
+reason = "13 §4 / A9: the bounded internal helper exists, but the market/POL lifecycle has no runtime caller syncing commitments."
+owner = "B10"
+
+[[entry]]
+key = "Treasury coretime obligations"
+class = "unwired"
+reason = "13 §4 / A9/B4: bounded quote/funded-period helpers exist, but the production runtime still has no Coretime quote-note/prune integration."
+owner = "B10"

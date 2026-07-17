@@ -482,6 +482,7 @@ fn missing_spec_is_rejected() {
 
 #[test]
 fn metric_spec_history_accepts_16_and_rejects_17th() {
+    // limit-coverage: MetricSpecs
     new_test_ext().execute_with(|| {
         CurrentEpochValue::set(0);
         for version in 2..=16 {
@@ -505,6 +506,7 @@ fn metric_spec_history_accepts_16_and_rejects_17th() {
 
 #[test]
 fn snapshot_history_accepts_20_and_rejects_21st() {
+    // limit-coverage: Snapshots
     new_test_ext().execute_with(|| {
         for epoch in 2..MAX_SNAPSHOTS as u32 + 2 {
             assert_ok!(Welfare::record_snapshot(

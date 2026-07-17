@@ -6,7 +6,7 @@ use futarchy_primitives::{
     keeper::CrankClass, phase_offsets, Branch, CohortSummary, DecisionOutcome, EpochPhase,
     ProposalState,
 };
-use parity_scale_codec::Encode;
+use parity_scale_codec::{Compact, Decode, Encode};
 use sp_runtime::DispatchError;
 
 fn phase_block(epoch: EpochId, numerator: BlockNumber) -> BlockNumber {
@@ -788,6 +788,7 @@ fn r2_1_seeded_treasury_gate_veto_survives_live_nav_reclassification() {
 
 #[test]
 fn r2_2_decide_first_latches_stale_epoch_and_force_rejects() {
+    // limit-coverage: StaleEpochBound
     new_test_ext().execute_with(|| {
         let mut state = decision_state(1, ProposalClass::Param);
         state.epoch.phase = EpochPhase::Trade;
@@ -1800,6 +1801,7 @@ fn gate_veto_precedes_a_passing_welfare_margin_i14() {
 
 #[test]
 fn decision_extension_is_once_only_and_keeps_creation_schedule_frozen() {
+    // limit-coverage: dec.extension
     new_test_ext().execute_with(|| {
         assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Param)));
         MarketGrade::set(false);
@@ -2298,7 +2300,22 @@ fn expiry_and_force_reject_never_enqueue_i15() {
 }
 
 #[test]
+fn tick_batch_bound_rejects_the_eleventh_pid_at_scale_call_admission() {
+    // limit-coverage: TickBatch
+    let mut encoded_call = vec![2u8]; // `tick` call index.
+    encoded_call.extend(Compact(futarchy_primitives::kernel::TICK_BATCH + 1).encode());
+
+    let error = crate::Call::<Test>::decode(&mut encoded_call.as_slice())
+        .expect_err("a max+1 tick batch must fail SCALE call admission");
+    assert_eq!(
+        error.to_string(),
+        "Could not decode `Call::tick::pids`:\n\tBoundedVec exceeds its limit\n"
+    );
+}
+
+#[test]
 fn settlement_is_cursor_resumable_and_welfare_is_the_only_settlement_seam() {
+    // limit-coverage: settle_cohort
     new_test_ext().execute_with(|| {
         assert_ok!(Epoch::seed(cohort_state(
             1,
@@ -2355,6 +2372,14 @@ fn settlement_is_cursor_resumable_and_welfare_is_the_only_settlement_seam() {
             ]
         );
         assert_noop!(
+            Epoch::settle_cohort(
+                RuntimeOrigin::signed(keeper()),
+                0,
+                futarchy_primitives::kernel::SETTLE_COHORT_MAX_ITEMS + 1,
+            ),
+            Error::<Test>::BatchTooLarge
+        );
+        assert_noop!(
             Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 0),
             Error::<Test>::BatchTooLarge
         );
@@ -2390,6 +2415,7 @@ fn next_epoch_length_uses_values_origin_and_live_params() {
 
 #[test]
 fn intake_and_live_proposal_caps_are_enforced() {
+    // limit-coverage: IntakeQueue, MaxLiveProposals
     new_test_ext().execute_with(|| {
         for id in 0..MAX_INTAKE_QUEUE as u64 {
             let proposer = account(10u8.saturating_add((id / 4) as u8));
@@ -2431,6 +2457,7 @@ fn intake_and_live_proposal_caps_are_enforced() {
 
 #[test]
 fn per_account_intake_cap_survives_withdrawals_and_resets_next_epoch() {
+    // limit-coverage: intake.max_acct
     new_test_ext().execute_with(|| {
         for id in 1..=ParamsValue::get().intake_max_per_account as u64 {
             assert_ok!(Epoch::submit(
@@ -2464,6 +2491,7 @@ fn per_account_intake_cap_survives_withdrawals_and_resets_next_epoch() {
 
 #[test]
 fn four_non_terminal_cohort_cap_rolls_back_the_fifth_transition() {
+    // limit-coverage: MaxSettlingCohorts
     new_test_ext().execute_with(|| {
         let mut state = EpochState::new();
         for epoch in 0..MAX_NON_TERMINAL_COHORTS as u32 {
@@ -2583,6 +2611,7 @@ fn r2_6_late_same_epoch_proposal_force_rejects_without_mutating_void_cohort() {
 
 #[test]
 fn recent_summary_ring_evicts_fifo_at_32() {
+    // limit-coverage: RecentCohortSummaries ring
     new_test_ext().execute_with(|| {
         let mut state = cohort_state(100, 100, CohortStatus::Measuring { until_epoch: 102 });
         for epoch in 0..RECENT_COHORTS as u32 {

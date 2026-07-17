@@ -53,6 +53,7 @@ fn genesis_seeds_members_and_try_state_holds() {
 
 #[test]
 fn set_members_is_values_origin_only_and_validates_membership() {
+    // limit-coverage: att.min_members
     new_test_ext_empty().execute_with(|| {
         assert_noop!(
             Attestor::set_members(RuntimeOrigin::none(), members()),
@@ -235,6 +236,7 @@ fn open_challenge_suppresses_quorum_until_attestation_is_upheld() {
 
 #[test]
 fn challenge_is_signed_only_and_checks_id_bond_window_and_single_open_case() {
+    // limit-coverage: att.window
     new_test_ext_empty().execute_with(|| {
         assert_noop!(
             Attestor::challenge_attestation(
