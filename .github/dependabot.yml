@@ -5,6 +5,20 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
+    # The polkadot-stable2603 train is `=`-exact pinned in the root Cargo.toml
+    # (see its [workspace.dependencies] header) so that `cargo update` cannot
+    # drift the SDK mix. The train moves as a unit or not at all; a per-crate
+    # bump fractures it and cannot compile. Ignore the whole family here — a
+    # train upgrade is a deliberate milestone, not a Dependabot PR.
+    ignore:
+      - dependency-name: "sp-*"
+      - dependency-name: "frame-*"
+      - dependency-name: "pallet-*"
+      - dependency-name: "cumulus-*"
+      - dependency-name: "staging-*"
+      - dependency-name: "polkadot-*"
+      - dependency-name: "parachains-common"
+      - dependency-name: "substrate-wasm-builder"
 
   - package-ecosystem: "cargo"
     directory: "/keeper"
@@ -15,3 +29,12 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # dtolnay/rust-toolchain is versioned by *Rust release*, not by action
+    # version, and its version refs are branches rather than tags — a phantom
+    # `1.100.0` branch (no such Rust release; stable is 1.97.1) sorts above every
+    # real version and Dependabot proposed it as an upgrade (PR #72, red: rustup
+    # 404s the nonexistent toolchain). The Rust version is pinned deliberately in
+    # rust-toolchain.toml, which is authoritative for cargo regardless of what
+    # the action installs; the action ref tracks that file by hand.
+    ignore:
+      - dependency-name: "dtolnay/rust-toolchain"
