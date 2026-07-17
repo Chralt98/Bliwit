@@ -15,7 +15,7 @@ use bleavit_keeper::{
     Cli,
 };
 use clap::Parser;
-use rand::Rng;
+use rand::RngExt;
 use subxt::{OnlineClient, PolkadotConfig};
 use subxt_signer::{sr25519::Keypair, SecretUri};
 use tokio::{sync::watch, time::sleep};
