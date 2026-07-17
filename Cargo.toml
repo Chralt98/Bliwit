@@ -62,7 +62,7 @@ cumulus-pallet-session-benchmarking = { version = "=27.0.0", default-features = 
 sp-api = { version = "=41.0.0", default-features = false }
 sp-runtime = { version = "=46.0.0", default-features = false }
 sp-io = { version = "=45.0.0", default-features = false }
-sp-core = { version = "=40.0.0", default-features = false }
+sp-core = { version = "=43.0.0", default-features = false }
 # Test-only SDK crates for pallet mock runtimes (fungibles collateral mocks).
 pallet-assets = { version = "=49.0.1", default-features = false }
 pallet-balances = { version = "=47.0.0", default-features = false }
