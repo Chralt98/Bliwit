@@ -341,6 +341,15 @@ fn reference_model_transcendental_sweep_matches() {
     let sweep_dir = env::var_os("BLEAVIT_SWEEP_DIR")
         .map(PathBuf::from)
         .expect("BLEAVIT_SWEEP_DIR must point to a generated sweep directory");
+    // Cargo runs test binaries from the package root, not the workspace root;
+    // the CI workflows pass workspace-relative paths, so resolve them there.
+    let sweep_dir = if sweep_dir.is_absolute() {
+        sweep_dir
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(sweep_dir)
+    };
     let manifest_path = sweep_dir.join("sweep-manifest.json");
     let manifest = std::fs::read_to_string(&manifest_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", manifest_path.display()));

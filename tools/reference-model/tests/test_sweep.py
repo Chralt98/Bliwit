@@ -187,11 +187,27 @@ class SweepGeneratorTests(unittest.TestCase):
             self.assertIn("stale shard files", completed.stderr)
 
     def test_tiny_sweep_passes_rust_checker(self):
+        self._run_rust_checker(str(self.one_worker))
+
+    def test_tiny_sweep_passes_rust_checker_with_workspace_relative_dir(self):
+        # Regression: the CI workflows pass a workspace-relative
+        # BLEAVIT_SWEEP_DIR, but cargo runs test binaries from the package
+        # root — the checker must resolve relative paths against the
+        # workspace root, or every sweep.yml/release.yml run fails.
+        relative = Path("target") / f"tiny-sweep-relative-{os.getpid()}"
+        destination = REPO_ROOT / relative
+        shutil.copytree(self.one_worker, destination)
+        try:
+            self._run_rust_checker(str(relative))
+        finally:
+            shutil.rmtree(destination, ignore_errors=True)
+
+    def _run_rust_checker(self, sweep_dir: str) -> None:
         cargo = shutil.which("cargo")
         if cargo is None:
             self.skipTest("cargo is not available")
         environment = os.environ.copy()
-        environment["BLEAVIT_SWEEP_DIR"] = str(self.one_worker)
+        environment["BLEAVIT_SWEEP_DIR"] = sweep_dir
         environment.pop("BLEAVIT_SWEEP_REQUIRE_FULL", None)
         command = [
             cargo,
