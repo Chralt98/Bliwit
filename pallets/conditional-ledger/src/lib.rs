@@ -50,6 +50,12 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod property_tests;
+
+#[cfg(test)]
+mod differential_sweep;
+
 /// Runtime fixture hooks for benchmarks whose measured path pays a keeper
 /// rebate through a sibling pallet. Mock runtimes may keep the defaults.
 #[cfg(feature = "runtime-benchmarks")]

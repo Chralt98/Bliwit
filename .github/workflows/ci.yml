@@ -100,6 +100,36 @@ jobs:
       - name: Check local Markdown links
         run: python3 tools/ci/check-doc-links.py
 
+  # S1 formal models — 15 §4.1; 03 §11.
+  model-checking:
+    name: Model checking (TLC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Check model-checking shell syntax
+        run: |
+          bash -n tools/verify/fetch-tla2tools.sh
+          bash -n tools/verify/run-model-checks.sh
+      - name: Run TLC over all committed models
+        run: tools/verify/run-model-checks.sh
+
+  # S1 property suites at the normative ≥10^6 case count — 15 §4.2–4.3; 03 §11.
+  property-suites:
+    name: Property suites (full count)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
+      - name: Run property suites at full case count
+        run: tools/ci/property-gates.sh
+
   weights:
     name: Weight regression
     runs-on: ubuntu-latest

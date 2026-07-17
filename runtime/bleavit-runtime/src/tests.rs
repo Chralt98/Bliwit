@@ -2206,7 +2206,7 @@ fn nesting_budget_accepts_the_limit_and_fails_closed_beyond_it() {
     });
 }
 
-/// Decode-bomb hardening (15 §4.5, SQ-161): the execution guard decodes
+/// Decode-bomb hardening (15 §4.5, SQ-175): the execution guard decodes
 /// preimage-sourced batches (`decode_batch`) whose element type `RuntimeCall`
 /// nests recursively. Without a depth limit an adversarial hash-committed
 /// preimage of one deeply-nested call (≤ `MAX_BYTES`) would recurse in `Decode`

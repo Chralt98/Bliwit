@@ -698,7 +698,7 @@ pub fn sell_book<A: Clone + Eq, L: LedgerOps<A>>(
             fee,
         )?,
         BookKind::Baseline { epoch } => {
-            sell_baseline(ledger, epoch, side, who, &m.account, amount, net)?
+            sell_baseline(ledger, epoch, side, who, &m.account, amount, net, fee)?
         }
     }
     match side {
@@ -830,22 +830,26 @@ fn buy_branch<A: Clone + Eq, L: LedgerOps<A>>(
             cost,
         )
         .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_transfer(
-            position(pid, branch, PositionKind::BranchUsdc),
-            who,
-            fees,
-            fee,
-        )
-        .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_transfer(
-            position(pid, mirror, PositionKind::BranchUsdc),
-            who,
-            fees,
-            fee,
-        )
-        .map_err(|_| Error::Ledger)?;
+    // Zero-sized fee legs are skipped (a governed fee of 0 bps is legal and
+    // the ledger rejects zero transfers — S1 re-pass finding).
+    if fee > 0 {
+        ledger
+            .do_transfer(
+                position(pid, branch, PositionKind::BranchUsdc),
+                who,
+                fees,
+                fee,
+            )
+            .map_err(|_| Error::Ledger)?;
+        ledger
+            .do_transfer(
+                position(pid, mirror, PositionKind::BranchUsdc),
+                who,
+                fees,
+                fee,
+            )
+            .map_err(|_| Error::Ledger)?;
+    }
     ledger
         .do_split_scalar(pid, branch, book, cost)
         .map_err(|_| Error::Ledger)?;
@@ -880,22 +884,26 @@ fn buy_gate<A: Clone + Eq, L: LedgerOps<A>>(
             cost,
         )
         .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_transfer(
-            position(pid, branch, PositionKind::BranchUsdc),
-            who,
-            fees,
-            fee,
-        )
-        .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_transfer(
-            position(pid, mirror, PositionKind::BranchUsdc),
-            who,
-            fees,
-            fee,
-        )
-        .map_err(|_| Error::Ledger)?;
+    // Zero-sized fee legs are skipped (a governed fee of 0 bps is legal and
+    // the ledger rejects zero transfers — S1 re-pass finding).
+    if fee > 0 {
+        ledger
+            .do_transfer(
+                position(pid, branch, PositionKind::BranchUsdc),
+                who,
+                fees,
+                fee,
+            )
+            .map_err(|_| Error::Ledger)?;
+        ledger
+            .do_transfer(
+                position(pid, mirror, PositionKind::BranchUsdc),
+                who,
+                fees,
+                fee,
+            )
+            .map_err(|_| Error::Ledger)?;
+    }
     ledger
         .do_split_gate(pid, branch, gate, book, cost)
         .map_err(|_| Error::Ledger)?;
@@ -950,25 +958,41 @@ fn sell_branch<A: Clone + Eq, L: LedgerOps<A>>(
     ledger
         .do_transfer(position(pid, branch, scalar_kind(side)), who, book, amount)
         .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_merge_scalar(pid, branch, book, amount)
-        .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_transfer(
-            position(pid, branch, PositionKind::BranchUsdc),
-            book,
-            fees,
-            fee,
-        )
-        .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_transfer(
-            position(pid, branch, PositionKind::BranchUsdc),
-            book,
-            who,
-            net,
-        )
-        .map_err(|_| Error::Ledger)?;
+    // 04 §6.1: the book "raises the payout" by merging complete sets — exactly
+    // the net+fee bUSDC the trade needs, not the full received `amount`. Merging
+    // `amount` required mirror-side inventory >= amount and made legal sells fail
+    // with InsufficientPosition after asymmetric buys depleted the mirror leg
+    // (S1 I-12 property suite); the payout-sized merge is the spec reading and
+    // leaves the surplus legs as book inventory (a complete set == 1 bUSDC).
+    // Zero-sized legs are skipped: a spec-legal sell whose proceeds floor to 0
+    // (04 §4 claimant-adverse rounding at extreme prices) must succeed paying 0,
+    // and the ledger rejects zero transfers (S1 re-pass finding).
+    let payout = add(net, fee)?;
+    if payout > 0 {
+        ledger
+            .do_merge_scalar(pid, branch, book, payout)
+            .map_err(|_| Error::Ledger)?;
+    }
+    if fee > 0 {
+        ledger
+            .do_transfer(
+                position(pid, branch, PositionKind::BranchUsdc),
+                book,
+                fees,
+                fee,
+            )
+            .map_err(|_| Error::Ledger)?;
+    }
+    if net > 0 {
+        ledger
+            .do_transfer(
+                position(pid, branch, PositionKind::BranchUsdc),
+                book,
+                who,
+                net,
+            )
+            .map_err(|_| Error::Ledger)?;
+    }
     merge_net_with_mirror(ledger, pid, branch, who, net)?;
     Ok(())
 }
@@ -993,25 +1017,34 @@ fn sell_gate<A: Clone + Eq, L: LedgerOps<A>>(
             amount,
         )
         .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_merge_gate(pid, branch, gate, book, amount)
-        .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_transfer(
-            position(pid, branch, PositionKind::BranchUsdc),
-            book,
-            fees,
-            fee,
-        )
-        .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_transfer(
-            position(pid, branch, PositionKind::BranchUsdc),
-            book,
-            who,
-            net,
-        )
-        .map_err(|_| Error::Ledger)?;
+    // Payout-sized merge with zero-legs skipped, same 04 §6.1 reading as
+    // `sell_branch`.
+    let payout = add(net, fee)?;
+    if payout > 0 {
+        ledger
+            .do_merge_gate(pid, branch, gate, book, payout)
+            .map_err(|_| Error::Ledger)?;
+    }
+    if fee > 0 {
+        ledger
+            .do_transfer(
+                position(pid, branch, PositionKind::BranchUsdc),
+                book,
+                fees,
+                fee,
+            )
+            .map_err(|_| Error::Ledger)?;
+    }
+    if net > 0 {
+        ledger
+            .do_transfer(
+                position(pid, branch, PositionKind::BranchUsdc),
+                book,
+                who,
+                net,
+            )
+            .map_err(|_| Error::Ledger)?;
+    }
     merge_net_with_mirror(ledger, pid, branch, who, net)?;
     Ok(())
 }
@@ -1046,6 +1079,7 @@ fn sell_baseline<A: Clone + Eq, L: LedgerOps<A>>(
     book: &A,
     amount: Balance,
     net: Balance,
+    fee: Balance,
 ) -> Result<(), Error> {
     // The 30 bps fee is withheld from the payout (04 §6.1): the seller receives
     // net-of-fee value; the withheld remainder stays with the book. The seller's
@@ -1059,18 +1093,26 @@ fn sell_baseline<A: Clone + Eq, L: LedgerOps<A>>(
     ledger
         .do_transfer(baseline(epoch, side), who, book, amount)
         .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_merge_baseline(epoch, book, amount)
-        .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_split_baseline(epoch, book, net)
-        .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_transfer(baseline(epoch, ScalarSide::Long), book, who, net)
-        .map_err(|_| Error::Ledger)?;
-    ledger
-        .do_transfer(baseline(epoch, ScalarSide::Short), book, who, net)
-        .map_err(|_| Error::Ledger)?;
+    // Payout-sized merge (04 §6.1, same reading as `sell_branch`): net+fee pairs
+    // fund the seller's net set plus the fee custody in USDC; merging the full
+    // `amount` needed mirror inventory >= amount and could fail a legal sell.
+    let payout = add(net, fee)?;
+    if payout > 0 {
+        ledger
+            .do_merge_baseline(epoch, book, payout)
+            .map_err(|_| Error::Ledger)?;
+    }
+    if net > 0 {
+        ledger
+            .do_split_baseline(epoch, book, net)
+            .map_err(|_| Error::Ledger)?;
+        ledger
+            .do_transfer(baseline(epoch, ScalarSide::Long), book, who, net)
+            .map_err(|_| Error::Ledger)?;
+        ledger
+            .do_transfer(baseline(epoch, ScalarSide::Short), book, who, net)
+            .map_err(|_| Error::Ledger)?;
+    }
     Ok(())
 }
 
@@ -1092,8 +1134,12 @@ pub fn observe_book<A: Clone + Eq>(
     let old = m.last_observation_1e9.0;
     // 04 §7: over k missed observation intervals the slew clamp widens to
     // (1±kappa)^k; flooring the interval count is the conservative reading.
+    // Rounding is directional so the computed clamp always sits INSIDE the
+    // exact real-arithmetic envelope (I-13): the lower bound rounds UP
+    // (per-step flooring drifted it below exact (1-kappa)^k, admitting extra
+    // downward drift — S1 I-13 property finding), the upper bound rounds down.
     let intervals = (elapsed / params.obs_interval).max(1);
-    let low = mul_1e9(old, pow_1e9(PRICE_ONE_1E9 - params.kappa_1e9, intervals));
+    let low = mul_1e9_up(old, pow_1e9_up(PRICE_ONE_1E9 - params.kappa_1e9, intervals));
     let high = mul_1e9(
         old,
         pow_1e9(
@@ -1138,6 +1184,32 @@ pub fn pow_1e9(base: u64, mut exp: u64) -> u64 {
         exp >>= 1;
         if exp > 0 {
             factor = mul_1e9(factor, factor).min(CAP);
+        }
+    }
+    result
+}
+
+/// 1e9-scale multiply rounding UP. Used for the lower slew clamp so the
+/// computed bound never falls below the exact real-arithmetic value (I-13).
+pub fn mul_1e9_up(a: u64, b: u64) -> u64 {
+    ((u128::from(a) * u128::from(b)).div_ceil(u128::from(PRICE_ONE_1E9))).min(u128::from(u64::MAX))
+        as u64
+}
+
+/// 1e9-scale integer power by squaring, rounding every step UP: the result is
+/// at least the exact base^exp, making it the sound companion of `mul_1e9_up`
+/// for the LOWER clamp bound (a lower bound may be tightened, never loosened).
+pub fn pow_1e9_up(base: u64, mut exp: u64) -> u64 {
+    const CAP: u64 = PRICE_ONE_1E9 * PRICE_ONE_1E9;
+    let mut result = PRICE_ONE_1E9;
+    let mut factor = base.min(CAP);
+    while exp > 0 {
+        if exp & 1 == 1 {
+            result = mul_1e9_up(result, factor).min(CAP);
+        }
+        exp >>= 1;
+        if exp > 0 {
+            factor = mul_1e9_up(factor, factor).min(CAP);
         }
     }
     result

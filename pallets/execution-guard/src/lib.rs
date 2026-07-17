@@ -1518,7 +1518,7 @@ pub mod pallet {
             // `Decode` until the wasm stack-height trap / native stack abort —
             // a G-1 violation in audit-scope-A code. `decode_all_with_depth_limit`
             // also enforces full-consumption (replacing the trailing-bytes check).
-            // Over-deep input fails closed to `BadPreimage`. (15 §4.5 / SQ-161.)
+            // Over-deep input fails closed to `BadPreimage`. (15 §4.5 / SQ-175.)
             let mut input = bytes;
             let calls = RuntimeBatch::<T>::decode_all_with_depth_limit(
                 futarchy_primitives::kernel::MAX_PAYLOAD_DECODE_DEPTH,

@@ -813,7 +813,7 @@ mod tests {
         fn normative_lmsr_vectors_match_reference_model_artifact() {
             assert_eq!(
                 json_string(REFERENCE_VECTORS, "schema"),
-                "bleavit.reference-model.v3"
+                "bleavit.reference-model.v4"
             );
             let vectors = json_container(REFERENCE_VECTORS, "lmsr_vectors", b'{', b'}');
             let b = FixedU64x64::from_integer(CORPUS_B as u64);

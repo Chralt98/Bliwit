@@ -28,5 +28,12 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# S1 model-checking — fetched pinned TLC jar (tools/verify/fetch-tla2tools.sh)
+tools/verify/bin/
+# TLC scratch state directories
+models/**/states/
+# TLC scratch from a repo-root invocation (runner now uses unique -metadir)
+/states/
+
 # B8 release-pipeline working directory (workflows and local dry-runs)
 release-work/

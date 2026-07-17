@@ -22,3 +22,6 @@ std = [
   "scale-info/std",
 ]
 runtime-benchmarks = []
+
+[dev-dependencies]
+proptest = "1.11.0"

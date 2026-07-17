@@ -856,6 +856,11 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
     fn redeem_impl(&mut self, pid: ProposalId, who: &AccountId, a: Balance) -> Result<(), Error> {
         let w = self.settled_winner(pid)?;
         self.burn(position(pid, w, PositionKind::BranchUsdc), who, a)?;
+        // 03 §6: redeem(a) burns winning branch-USDC and decrements usdc_w.
+        self.with_vault_mut(pid, |v| {
+            v.branches[bix(w)].usdc = sub(v.branches[bix(w)].usdc, a)?;
+            Ok(())
+        })?;
         self.pay_proposal(pid, a)?;
         self.events.push(Event::Redeemed(pid, a));
         Ok(())
@@ -903,6 +908,11 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.ensure_holds(position(pid, w, PositionKind::Short), who, a)?;
         self.burn(position(pid, w, PositionKind::Long), who, a)?;
         self.burn(position(pid, w, PositionKind::Short), who, a)?;
+        // 03 §6: exact pair redemption consumes one complete-set unit Q_w.
+        self.with_vault_mut(pid, |v| {
+            v.branches[bix(w)].scalar_sets = sub(v.branches[bix(w)].scalar_sets, a)?;
+            Ok(())
+        })?;
         self.pay_proposal(pid, a)?;
         self.events.push(Event::ScalarPairRedeemed(pid, a));
         Ok(())
@@ -951,6 +961,13 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
             Ok(())
         })??;
         self.burn(position(pid, b, kind), who, a)?;
+        if matches!(kind, PositionKind::BranchUsdc) {
+            // 03 §6.4: VOID branch redemption burns branch-USDC supply.
+            self.with_vault_mut(pid, |v| {
+                v.branches[bix(b)].usdc = sub(v.branches[bix(b)].usdc, a)?;
+                Ok(())
+            })?;
+        }
         let pay = match kind {
             PositionKind::BranchUsdc => a / 2,
             _ => a / 4,
@@ -1071,6 +1088,11 @@ impl<AccountId: Clone + Eq> LedgerState<AccountId> {
         self.ensure_holds(baseline(epoch, ScalarSide::Short), who, a)?;
         self.burn(baseline(epoch, ScalarSide::Long), who, a)?;
         self.burn(baseline(epoch, ScalarSide::Short), who, a)?;
+        // 03 §6 applies scalar-pair bookkeeping identically to Baseline.
+        self.with_base_mut(epoch, |v| {
+            v.sets = sub(v.sets, a)?;
+            Ok(())
+        })?;
         self.pay_baseline(epoch, a)?;
         self.events
             .push(Event::BaselineRedeemed(epoch, ScalarSide::Long, a));

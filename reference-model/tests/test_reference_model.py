@@ -1,4 +1,6 @@
 from decimal import Decimal, ROUND_HALF_UP, getcontext
+import json
+from pathlib import Path
 import unittest
 
 from bleavit_reference_model import lmsr
@@ -151,6 +153,34 @@ class ReferenceModelTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             vault.void()
 
+    def test_void_claim_bound_values_pairs_before_unmatched_floors(self):
+        # 03 §6.4/§6.5: both scalar and gate pairs can merge into
+        # branch-USDC, after which cross-branch pairs redeem at par. Valuing
+        # every live leg directly at floor(a/4), as the old oracle did,
+        # therefore understates the maximal remaining liability.
+        vault = Vault()
+        vault.split(20_006)
+        for branch in Branch:
+            vault.split_scalar(branch, 10_003)
+            vault.split_gate(
+                branch, GateType.SURVIVAL, 10_003
+            )
+        vault.void()
+
+        direct_floor_bound = 0
+        for supply in vault.branches.values():
+            direct_floor_bound += supply.usdc // 2
+            direct_floor_bound += supply.long // 4
+            direct_floor_bound += supply.short // 4
+            for gate in GateType:
+                direct_floor_bound += supply.gate_yes[gate] // 4
+                direct_floor_bound += supply.gate_no[gate] // 4
+
+        self.assertEqual(direct_floor_bound, 20_000)
+        self.assertEqual(vault._claim_bound(), 20_006)
+        self.assertGreater(vault._claim_bound(), direct_floor_bound)
+        vault.check_conservation()
+
     def test_b5_scalar_fragmentation_vector(self):
         vault = Vault()
         vault.split(20_000)
@@ -220,6 +250,178 @@ class ReferenceModelTests(unittest.TestCase):
         )
         self.assertEqual(baseline.redeem_baseline_pair(10_000), 10_000)
         baseline.check_conservation()
+
+    def test_ledger_sequence_fixture_covers_full_operation_alphabet(self):
+        # 15 §4.4 / 03 §11: one generated JSON corpus drives the Python↔Rust
+        # differential, including gate, Baseline, VOID, and pair paths. The
+        # FRAME-only sweep surface has its own generated pallet scenarios.
+        fixture = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "fixtures"
+                / "vectors.json"
+            ).read_text()
+        )
+        scenarios = fixture["ledger_sequence_scenarios"]
+        self.assertEqual(fixture["schema"], "bleavit.reference-model.v4")
+        self.assertEqual(len(scenarios), 64)
+        self.assertEqual(
+            {scenario["coverage_intent"] for scenario in scenarios},
+            {
+                "void-after-open",
+                "void-after-resolved",
+                "gate-settle-then-pair-redemption",
+                "gate-false-and-unpaired-rounding",
+                "baseline-pair-redemption",
+                "baseline-unpaired-rounding",
+                "terminal-residue-for-pallet-split",
+                "illegal-terminal-interleavings",
+            },
+        )
+        operations = {
+            row["op"] for scenario in scenarios for row in scenario["ops"]
+        }
+        self.assertEqual(
+            operations,
+            {
+                "split",
+                "merge",
+                "split_scalar",
+                "merge_scalar",
+                "split_gate",
+                "merge_gate",
+                "transfer",
+                "resolve",
+                "void",
+                "settle_scalar",
+                "settle_gate",
+                "redeem",
+                "redeem_void",
+                "redeem_scalar",
+                "redeem_scalar_pair",
+                "redeem_gate",
+                "split_baseline",
+                "merge_baseline",
+                "settle_baseline",
+                "redeem_baseline",
+                "redeem_baseline_pair",
+            },
+        )
+        for scenario in scenarios:
+            self.assertRegex(scenario["seed"], r"^0x[0-9A-F]{16}$")
+            self.assertTrue(scenario["ops"])
+            for row in scenario["ops"]:
+                self.assertEqual(
+                    len({"ok", "err"}.intersection(row["outcome"])), 1
+                )
+
+    def test_ledger_sequence_fixture_has_errors_and_flooring_vectors(self):
+        fixture = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "fixtures"
+                / "vectors.json"
+            ).read_text()
+        )
+        rows = [
+            row
+            for scenario in fixture["ledger_sequence_scenarios"]
+            for row in scenario["ops"]
+        ]
+        self.assertTrue(any("err" in row["outcome"] for row in rows))
+        error_classes = {
+            row["outcome"]["err"]
+            for row in fixture["ledger_error_scenarios"]
+        }
+        self.assertEqual(
+            error_classes,
+            {
+                "UnknownVault",
+                "UnknownBaselineVault",
+                "WrongVaultState",
+                "AmountTooSmall",
+                "ArithmeticOverflow",
+                "InsufficientPosition",
+                "PositionCapExceeded",
+                "InvalidScore",
+                "GateAlreadySettled",
+                "GateNotSettled",
+                # WrongBranch deliberately absent: dead core variant, no honest
+                # differential witness exists (SQ-170).
+            },
+        )
+        successful = [row for row in rows if "ok" in row["outcome"]]
+        self.assertTrue(
+            any(
+                row["op"] == "redeem_void"
+                and row["args"]["amount"] % 4 != 0
+                and row["outcome"]["ok"]["payout"]
+                == row["args"]["amount"] // 4
+                for row in successful
+            )
+        )
+        for pair_op in ("redeem_scalar_pair", "redeem_baseline_pair"):
+            self.assertTrue(
+                any(
+                    row["op"] == pair_op
+                    and row["outcome"]["ok"]["payout"]
+                    == row["args"]["amount"]
+                    for row in successful
+                )
+            )
+
+    def test_ledger_fixture_covers_score_endpoints_and_rounding_boundary(self):
+        fixture = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "fixtures"
+                / "vectors.json"
+            ).read_text()
+        )
+        scores = {
+            row["score"] for row in fixture["ledger_score_scenarios"]
+        }
+        self.assertTrue(
+            {
+                0,
+                1_000_000_000,
+                700_049_999,
+                700_050_000,
+                700_050_001,
+            }.issubset(scores)
+        )
+
+    def test_sweep_fixture_is_python_derived_and_batched(self):
+        fixture = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "fixtures"
+                / "vectors.json"
+            ).read_text()
+        )
+        scenarios = fixture["ledger_sweep_scenarios"]
+        self.assertEqual(
+            {scenario["family"] for scenario in scenarios},
+            {"proposal", "baseline"},
+        )
+        for scenario in scenarios:
+            self.assertGreater(scenario["expected_residue"], 0)
+            self.assertGreater(
+                scenario["expected_entries"], scenario["reap_batch"]
+            )
+            self.assertEqual(
+                scenario["expected_batches"],
+                (
+                    scenario["expected_entries"]
+                    + scenario["reap_batch"]
+                    - 1
+                )
+                // scenario["reap_batch"],
+            )
+            self.assertEqual(
+                sum(scenario["expected_refunds"].values()),
+                scenario["expected_entries"] * 100_000,
+            )
 
     def test_decide_reason_code_matrix(self):
         cases = [

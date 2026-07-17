@@ -902,7 +902,7 @@ pub mod kernel {
     /// prevent the recursion); an over-deep adversarial preimage decodes to
     /// `BadPreimage` (G-1 status quo), never a stack-overflow trap/abort. This
     /// is the decode-bomb hardening surfaced by the 15 §4.5 decode-fuzz work
-    /// (S2); see PLAN.md · Decision log (SQ-161).
+    /// (S2); see PLAN.md · Decision log (SQ-175).
     pub const MAX_PAYLOAD_DECODE_DEPTH: u32 = 256;
     /// Maximum aggregate payload dispatch weight as a fraction of the block
     /// limit (`prop.max_weight`, 13 §2). The ratio form avoids re-encoding the

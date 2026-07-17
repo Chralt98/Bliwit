@@ -26,6 +26,10 @@ PIN_KEYS = {
     "POLKADOT_SDK_TAG",
     "PASEO_CSG_TAG",
     "PASEO_CSG_COMMIT",
+    # S1 model-checking pin (15 §4.1): pins.env is the single committed pin
+    # home, so the TLC jar pin lives here too (tools/verify/fetch-tla2tools.sh).
+    "TLA2TOOLS_VERSION",
+    "TLA2TOOLS_SHA256",
 }
 
 # Normative inventories: 15 §4.7 + 09 §7.1.

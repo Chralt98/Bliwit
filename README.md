@@ -24,7 +24,7 @@ rollout that removes `sudo` at Phase 4.
 
 ## Status
 
-**Specification complete (2026-07-12) · Track M (M0–M3) finished (2026-07-15) · Track A complete — all 11 custom pallets are production FRAME pallets (2026-07-16) · B1a Cumulus runtime assembled (2026-07-16) · B3 collator node, chain-spec pipeline and genesis allocation/vesting (2026-07-16) · B4 XCM layer (2026-07-16) · B6 upgrade path e2e wired into the runtime (2026-07-17).**
+**Specification complete (2026-07-12) · Track M (M0–M3) finished (2026-07-15) · Track A complete — all 11 custom pallets are production FRAME pallets (2026-07-16) · B1a Cumulus runtime assembled (2026-07-16) · B3 collator node, chain-spec pipeline and genesis allocation/vesting (2026-07-16) · B4 XCM layer (2026-07-16) · B9 keeper reference implementation (2026-07-16) · B6 upgrade path e2e wired into the runtime (2026-07-17) · B7 Zombienet/Chopsticks environment definitions (2026-07-17) · S1 formal TLA⁺ models, ≥10⁶-case property suites and the ledger↔Python differential (2026-07-17).**
 
 - The authoritative spec is [`docs/architecture/`](docs/architecture/README.md) —
   16 component documents + decision record, produced by resolving all 101 findings
@@ -57,6 +57,8 @@ rollout that removes `sudo` at Phase 4.
 | `node/bleavit-node/` | B3: the collator node — a thin branding of the pinned `polkadot-omni-node` stack; the runtime ships in the chain spec, not in the node |
 | `deploy/`, `tools/deploy/` | B3: chain-spec pipeline (pinned `staging-chain-spec-builder`), WSS bootnode operator manifests + the 02 §10 threshold validator, production genesis-allocation template, prepared ss58-7777 registry submission |
 | [`keeper/`](keeper/README.md) | B9: the off-chain keeper reference implementation (`bleavit-keeper`) — a subxt-based service any operator can run to crank the chain's permissionless extrinsics (phase ticks, TWAP observations, decide, execute, settle, oracle/registry closes, cleanup), with Prometheus metrics per 12 §6.3. A separate cargo workspace so its dependency tree cannot disturb the runtime's exact pins; the on-chain rebate meter (08 §6.3) lives in the treasury pallet |
+| `zombienet/`, `chopsticks/`, `tools/env/` | B7: test-environment definitions as release artifacts (15 §4.7) — multi-node topologies + the 09 §7.1 drill suite, forked-state upgrade/playbook scenarios, and the pinned-tooling fetch/generate/validate scripts (`tools/env/pins.env` is the single pin home) |
+| [`models/`](models/README.md), `tools/verify/` | S1: TLA⁺ formal models of the conditional ledger and the T1–T24 proposal machine (15 §4.1) plus the pinned-TLC runner — main configs prove the invariants above anti-vacuity floors, witness configs must *violate* (reachability), mutation configs prove the invariants can fail |
 | [`fuzz/`](fuzz/README.md) | S2: `bleavit-fuzz` — cargo-fuzz (libFuzzer) targets for the three 15 §4.5 areas (SCALE payload decode, nested-wrapper filtering, LMSR trade paths), each asserting invariants (I-10/I-11/I-12) rather than mere no-panic. A separate nightly-pinned cargo workspace (like `keeper/`) so libFuzzer + nightly cannot disturb the runtime's exact pins; curated seed corpora + the `fuzz` CI job (`tools/ci/fuzz-gates.sh`) |
 | `vendor/` | Vendored `core2 0.4.0` (every published version is yanked; the node's networking closure requires it) — see `vendor/README.md` |
 | `frontend/` | Implementation root for Track F; currently a placeholder until the track begins |

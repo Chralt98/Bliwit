@@ -348,14 +348,39 @@ class Vault:
         if self.state is VaultState.RESOLVED:
             return self.branches[self.winner].identity()
         if self.state is VaultState.VOIDED:
-            total = 0
-            for supply in self.branches.values():
-                total += supply.usdc // 2
-                total += supply.long // 4 + supply.short // 4
+            # 03 §6.4/§6.5: value the maximal dispatchable recovery path,
+            # not each claim in isolation. Complete scalar/gate sets can first
+            # merge into branch-USDC, and effective Accept+Reject branch-USDC
+            # can then merge at par. Only unmatched remainders take the
+            # claimant-adverse half/quarter VOID floors.
+            effective = {}
+            leftovers = 0
+            for branch, supply in self.branches.items():
+                scalar_pairs = min(supply.long, supply.short)
+                branch_usdc = supply.usdc + scalar_pairs
+                leftovers += (supply.long - scalar_pairs) // 4
+                leftovers += (supply.short - scalar_pairs) // 4
                 for gate in GateType:
-                    total += supply.gate_yes[gate] // 4
-                    total += supply.gate_no[gate] // 4
-            return total
+                    gate_pairs = min(
+                        supply.gate_yes[gate], supply.gate_no[gate]
+                    )
+                    branch_usdc += gate_pairs
+                    leftovers += (
+                        supply.gate_yes[gate] - gate_pairs
+                    ) // 4
+                    leftovers += (
+                        supply.gate_no[gate] - gate_pairs
+                    ) // 4
+                effective[branch] = branch_usdc
+            cross_pairs = min(
+                effective[Branch.ACCEPT], effective[Branch.REJECT]
+            )
+            return (
+                cross_pairs
+                + (effective[Branch.ACCEPT] - cross_pairs) // 2
+                + (effective[Branch.REJECT] - cross_pairs) // 2
+                + leftovers
+            )
         supply = self.branches[self.winner]
         pairs = min(supply.long, supply.short)
         scalar = pairs
