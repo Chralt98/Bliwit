@@ -33,7 +33,24 @@ def fixture_root(directory: str) -> Path:
         rule_dir,
     )
     shutil.copy2(ROOT / "tools" / "monitoring" / "series-inventory.toml", tool_dir)
+    shutil.copy2(ROOT / "PLAN.md", root / "PLAN.md")
     return root
+
+
+def milestone_plan(*, b10: str = "⬜", o3: str = "⬜") -> str:
+    return f"""# PLAN fixture
+
+## Milestones
+
+### Owners
+
+| ID | Milestone | Spec | Depends | Status | Notes |
+|---|---|---|---|---|---|
+| B10 | Runtime telemetry | 12 §6.3 | — | {b10} | |
+| O3 | Bootnode probes | 12 §6.2 | — | {o3} | |
+
+## Next section
+"""
 
 
 class CoverageCheckerTests(unittest.TestCase):
@@ -41,7 +58,7 @@ class CoverageCheckerTests(unittest.TestCase):
         failures, rows, inventory = checker.validate(ROOT)
         self.assertEqual(failures, [])
         self.assertEqual(len(rows), 20)
-        self.assertEqual(len(inventory), 32)
+        self.assertEqual(len(inventory), 31)
 
     def test_strict_extractor_rejects_table_header_drift(self) -> None:
         document = (ROOT / "docs" / "architecture" / "12-release-and-operations.md").read_text(encoding="utf-8")
@@ -80,6 +97,47 @@ class CoverageCheckerTests(unittest.TestCase):
             broken["chain-exporter"].remove("bleavit_chain_tick_lag_blocks")
             failures, _, _ = checker.validate(root, exported=broken)
             self.assertTrue(any("not in the chain-exporter SERIES" in failure for failure in failures))
+
+    def test_pending_seam_owners_are_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = fixture_root(directory)
+            (root / "PLAN.md").write_text(milestone_plan(), encoding="utf-8")
+            failures, _, _ = checker.validate(root, exported=EXPORTED)
+            self.assertEqual(failures, [])
+
+    def test_seam_expires_when_owner_is_complete(self) -> None:
+        samples = (
+            ("B10", {"b10": "✅"}, "bleavit_market_book_loss_usdc"),
+            ("O3", {"o3": "✅"}, "bleavit_bootnode_browser_dial_success"),
+        )
+        for owner, statuses, series in samples:
+            with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
+                root = fixture_root(directory)
+                (root / "PLAN.md").write_text(
+                    milestone_plan(**statuses), encoding="utf-8"
+                )
+                failures, _, _ = checker.validate(root, exported=EXPORTED)
+                self.assertTrue(
+                    any(series in failure and owner in failure for failure in failures),
+                    failures,
+                )
+
+    def test_missing_seam_owner_row_fails_loudly(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = fixture_root(directory)
+            plan = milestone_plan().replace(
+                "| O3 | Bootnode probes | 12 §6.2 | — | ⬜ | |\n", ""
+            )
+            (root / "PLAN.md").write_text(plan, encoding="utf-8")
+            failures, _, _ = checker.validate(root, exported=EXPORTED)
+            self.assertTrue(
+                any(
+                    "bleavit_bootnode_browser_dial_success" in failure
+                    and "was not found" in failure
+                    for failure in failures
+                ),
+                failures,
+            )
 
 
 if __name__ == "__main__":

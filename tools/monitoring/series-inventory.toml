@@ -6,14 +6,6 @@ name = "bleavit_chain_tick_lag_blocks"
 source = "chain-exporter"
 
 [[series]]
-name = "bleavit_chain_execution_queue_bound"
-source = "chain-exporter"
-
-[[series]]
-name = "bleavit_chain_execution_queue_depth"
-source = "chain-exporter"
-
-[[series]]
 name = "bleavit_market_book_loss_usdc"
 source = "seam"
 owner = "B10"
@@ -63,6 +55,10 @@ source = "chain-exporter"
 
 [[series]]
 name = "bleavit_keeper_last_successful_crank_timestamp_seconds"
+source = "keeper"
+
+[[series]]
+name = "bleavit_keeper_planned_total"
 source = "keeper"
 
 [[series]]

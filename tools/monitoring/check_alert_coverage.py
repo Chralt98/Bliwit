@@ -20,6 +20,9 @@ except ModuleNotFoundError:  # Local gate compatibility; production is Python 3.
 
 
 HEADING = "### 6.3 Monitoring and alerting"
+MILESTONES_HEADING = "## Milestones"
+MILESTONE_HEADER = ["ID", "Milestone", "Spec", "Depends", "Status", "Notes"]
+MILESTONE_STATUSES = {"⬜", "🔨", "✅", "⛔", "🅿"}
 HEADERS = (
     ["Domain", "Key series", "Alert (example)", "Runbook"],
     ["Domain", "Key series", "Alert", "Runbook"],
@@ -220,6 +223,99 @@ def load_inventory(path: Path) -> tuple[dict[str, dict[str, Any]], list[str]]:
     return inventory, failures
 
 
+def load_milestone_statuses(path: Path) -> tuple[dict[str, str], list[str]]:
+    """Strictly parse milestone IDs and statuses from PLAN.md's milestone tables."""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError) as error:
+        return {}, [f"cannot load seam owners from {path}: {error}"]
+    headings = [index for index, line in enumerate(lines) if line == MILESTONES_HEADING]
+    if len(headings) != 1:
+        return {}, [
+            f"PLAN.md milestone heading drift: expected exactly one {MILESTONES_HEADING!r}"
+        ]
+    start = headings[0] + 1
+    end = next(
+        (index for index in range(start, len(lines)) if lines[index].startswith("## ")),
+        len(lines),
+    )
+    if any(re.match(r"^\s+\|", lines[index]) for index in range(start, end)):
+        return {}, ["PLAN.md Milestones contains an indented Markdown table row"]
+
+    statuses: dict[str, str] = {}
+    failures: list[str] = []
+    tables = 0
+    index = start
+    while index < end:
+        if not lines[index].startswith("|"):
+            index += 1
+            continue
+        try:
+            header = split_row(lines[index])
+        except CoverageError as error:
+            failures.append(f"PLAN.md Milestones: {error}")
+            index += 1
+            continue
+        if header != MILESTONE_HEADER:
+            failures.append(
+                f"PLAN.md Milestones table header drift at line {index + 1}: "
+                f"expected {MILESTONE_HEADER!r}, found {header!r}"
+            )
+            index += 1
+            continue
+        tables += 1
+        if index + 1 >= end:
+            failures.append(f"PLAN.md milestone table at line {index + 1} is truncated")
+            break
+        try:
+            sep = split_row(lines[index + 1])
+        except CoverageError as error:
+            failures.append(f"PLAN.md Milestones: {error}")
+            index += 2
+            continue
+        if len(sep) != 6 or not separator(sep):
+            failures.append(
+                f"PLAN.md milestone table at line {index + 1} has a malformed separator"
+            )
+            index += 2
+            continue
+        index += 2
+        row_count = 0
+        while index < end and lines[index].startswith("|"):
+            try:
+                cells = split_row(lines[index])
+            except CoverageError as error:
+                failures.append(f"PLAN.md Milestones: {error}")
+                index += 1
+                continue
+            if len(cells) != 6:
+                failures.append(
+                    f"PLAN.md milestone row {index + 1} must have six cells, found {len(cells)}"
+                )
+                index += 1
+                continue
+            identifier, status = cells[0], cells[4]
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", identifier) is None:
+                failures.append(
+                    f"PLAN.md milestone row {index + 1} has invalid ID {identifier!r}"
+                )
+            elif identifier in statuses:
+                failures.append(f"PLAN.md milestone ID {identifier!r} is declared more than once")
+            elif status not in MILESTONE_STATUSES:
+                failures.append(
+                    f"PLAN.md milestone {identifier!r} has invalid status {status!r}"
+                )
+            else:
+                statuses[identifier] = status
+            row_count += 1
+            index += 1
+        if row_count == 0:
+            failures.append(f"PLAN.md milestone table at line {index + 1} has no data rows")
+    if tables == 0:
+        failures.append("PLAN.md Milestones contains no milestone tables")
+    return statuses, failures
+
+
 def module_series(path: Path) -> tuple[set[str], str | None]:
     module_name = "_bleavit_monitoring_" + path.stem
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -259,6 +355,22 @@ def validate(
         root / "tools" / "monitoring" / "series-inventory.toml"
     )
     failures.extend(inventory_failures)
+    milestone_statuses, milestone_failures = load_milestone_statuses(root / "PLAN.md")
+    failures.extend(milestone_failures)
+    for series, entry in sorted(inventory.items()):
+        if entry.get("source") != "seam":
+            continue
+        owner = entry.get("owner")
+        if isinstance(owner, str) and owner not in milestone_statuses:
+            failures.append(
+                f"seam series {series!r} names owner milestone {owner!r}, "
+                "but its PLAN.md Milestones row was not found"
+            )
+        elif isinstance(owner, str) and milestone_statuses.get(owner) == "✅":
+            failures.append(
+                f"seam series {series!r} names completed owner {owner!r} — the "
+                "owning milestone shipped, so the seam must be replaced by its live series"
+            )
     by_domain = {row.domain: row for row in rows}
     known_runbooks = {row.runbook for row in rows}
     bound_domains: set[str] = set()

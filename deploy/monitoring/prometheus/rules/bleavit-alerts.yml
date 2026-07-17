@@ -10,10 +10,10 @@ groups:
           threshold: "tick lag > 600 blocks"
 
       - alert: BleavitProposalQueueAtBound
-        expr: (bleavit_chain_execution_queue_bound > 0) and (bleavit_chain_execution_queue_depth >= bleavit_chain_execution_queue_bound)
+        expr: (bleavit_chain_storage_map_bound{pallet="Epoch",item="IntakeProposals"} > 0) and (bleavit_chain_storage_map_entries{pallet="Epoch",item="IntakeProposals"} >= bleavit_chain_storage_map_bound{pallet="Epoch",item="IntakeProposals"})
         labels: {severity: warning, runbook: RB-INTAKE, domain: "Proposal state"}
         annotations:
-          summary: "Proposal state: execution queue reached its live metadata bound"
+          summary: "Proposal state: intake queue reached its live metadata bound"
           key_series: "per-state counts, queue depth"
           threshold: "queue at bound"
 
@@ -74,7 +74,7 @@ groups:
           threshold: "any trap"
 
       - alert: BleavitKeeperInactive
-        expr: (time() - bleavit_keeper_last_successful_crank_timestamp_seconds) > 3600 and on() bleavit_keeper_connected == 1
+        expr: (time() - bleavit_keeper_last_successful_crank_timestamp_seconds) > 3600 and bleavit_keeper_planned_total > 0 and on() bleavit_keeper_connected == 1
         for: 1h
         labels: {severity: warning, runbook: RB-KEEPER, domain: "Keepers"}
         annotations:
@@ -125,7 +125,7 @@ groups:
           threshold: "< 8 dialable, or < 2 on :443, or cert < 14 d"
 
       - alert: BleavitServedStateWindowShort
-        expr: min(bleavit_bootnode_served_state_retention_days) < 30
+        expr: max(bleavit_bootnode_served_state_retention_days) < 30
         labels: {severity: warning, runbook: RB-BOOTNODE, domain: "Served-state window"}
         annotations:
           summary: "Served-state window: the joint fleet does not cover 30 days"

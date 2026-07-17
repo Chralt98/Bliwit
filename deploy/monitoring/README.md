@@ -78,16 +78,32 @@ The attestation monitor serves `bleavit_release_monitor_*` health/check/error,
 integrity, byte-mismatch, resolver-divergence, signature/attestation,
 generation, channel-match, spec-coverage, repoint-lag, ANT-change, and webhook
 failure series. Existing keeper series are documented in `keeper/README.md`;
-the O5 inactivity rule uses the keeper's connected and per-role last-success
-gauges. Collator/node exporters are scraped as substrate exporters and remain
+the O5 inactivity rule uses the keeper's connected gauge and applies only to
+roles whose per-process `planned_total` has advanced. This excludes disabled
+roles while still alerting when an enabled role has planned work but has never
+succeeded. After a keeper restart, a never-cranked role is necessarily
+unobservable until it first plans work; production rules MUST still be
+instantiated per required role so activity in one role cannot mask another.
+Collator/node exporters are scraped as substrate exporters and remain
 operator-version-specific; no rule assumes a non-frozen node metric name.
+
+## Self-monitoring
+
+Operators MUST use standard Prometheus meta-monitoring to alert when
+`bleavit_chain_scrape_errors_total` increases and when either O5 daemon's target
+is absent or has `up == 0` (`bleavit-chain-alerts` and
+`bleavit-attestation-monitor`). Domain decode failures deliberately remove only
+the affected chain-exporter families rather than publishing healthy-looking
+zeros, so operators SHOULD also alert on absent required series. These are
+operator-supplied exporter-health checks, not 12 §6.3 rows, and therefore are
+not part of `check_alert_coverage.py`.
 
 ## 12 §6.3 row map
 
 | Domain | Alert source | Status |
 |---|---|---|
 | Epoch progress | chain exporter (`epoch_status`) | live |
-| Proposal state | chain exporter (`proposal_summaries`, `execution_queue`) | live |
+| Proposal state | chain exporter (`proposal_summaries`, `Epoch.IntakeProposals` occupancy/bound) | live |
 | Markets | runtime-side book P&L + `b·ln2` | seam — B10 |
 | TWAP | live unsealed-window coverage projection | seam — B10; `decision_stats` is sealed-window only |
 | Liquidity floors | runtime-side effective POL/floor | seam — B10 |
@@ -117,6 +133,11 @@ without fabricating those not-yet-authored runbooks. B10 is the existing
 runtime-wiring closure milestone and is named on runtime-side telemetry gaps
 where the frozen API and safe metadata-driven reads cannot produce the
 canonical value.
+
+The served-state alert uses the maximum retention reported by the joint fleet:
+all retention windows end at now, so the longest operator window is the joint
+window. O3 owns any stricter per-operator shortfall sub-alerts when it defines
+the probe exporter and operator topology.
 
 ## Attestation configuration and provisional release schema
 
