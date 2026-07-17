@@ -9,8 +9,20 @@ jobs:
   rust:
     name: Rust workspace
     runs-on: ubuntu-latest
+    env:
+      # Incremental artifacts roughly double the target size for no CI
+      # benefit; stock runners have ~14 GB free against a ~35 GB build.
+      CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v4
+      - name: Free runner disk space (the workspace build needs ~35 GB)
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          df -h /
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
           components: rustfmt, clippy
@@ -20,6 +32,16 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
       - name: Rust workspace, runtime wasm, and try-runtime gates
         run: tools/ci/rust-workspace-gates.sh
+
+  supply-chain:
+    name: Supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check lockfiles and RustSec advisories
+        run: tools/ci/supply-chain-gates.sh
 
   reference-model:
     name: Reference model
@@ -31,8 +53,15 @@ jobs:
           python-version: '3.12'
       - name: Run reference model tests
         run: PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
-      - name: Run deploy validator tests
-        run: python3 -m unittest discover -s tools/deploy/tests
+      - name: Run tooling tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests; do
+            if [[ -d "$suite" ]]; then
+              python3 -m unittest discover -s "$suite"
+            fi
+          done
       - name: Check generated vector corpus
         run: python3 tools/reference-model/generate-vectors.py --check
       - name: Check normative LMSR documentation table

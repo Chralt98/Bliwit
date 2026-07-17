@@ -27,3 +27,6 @@ target
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# B8 release-pipeline working directory (workflows and local dry-runs)
+release-work/
