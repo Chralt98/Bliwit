@@ -190,6 +190,9 @@ impl_runtime_apis! {
 
     impl cumulus_primitives_core::RelayParentOffsetApi<Block> for Runtime {
         fn relay_parent_offset() -> u32 { 0 }
+        fn max_claim_queue_offset() -> u8 {
+            ParachainSystem::max_claim_queue_offset()
+        }
     }
 
     impl cumulus_primitives_core::GetParachainInfo<Block> for Runtime {

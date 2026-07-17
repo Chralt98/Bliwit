@@ -1,49 +1,42 @@
 [advisories]
+# Re-triaged FROM SCRATCH 2026-07-17 at the stable2603 → stable2606 line move
+# (D-19, PLAN B11): every entry below was re-proven pin-forced on the NEW tree
+# with a fresh `cargo update --precise` attempt (verbatim blockers recorded in
+# PLAN.md's B11 session log). The 16 `wasmtime 35.0.0` entries the old file
+# carried are deleted — wasmtime 36.0.12 (via sc-executor-wasmtime 0.47.0)
+# clears all of them. `lru` RUSTSEC-2026-0002 stays deliberately unwaived:
+# `informational = "unsound"` is an allowed warning, not a vulnerability.
+# Each surviving entry states the pin that forces it and the per-family exit
+# criterion that clears it; a stable2606-N maintenance bump re-triages the list.
 ignore = [
-    # hickory-proto 0.24.4/0.25.2: pinned by stable2603 libp2p-dns/libp2p-mdns and litep2p; the fix is >=0.26.1, not lockfile-compatible. Remove at the next stable2603 maintenance bump.
+    # hickory-proto 0.24.4 (dormant libp2p-mdns copy) + 0.25.2 (reachable litep2p
+    # copy): libp2p-mdns 0.46.0 requires ^0.24.1 and hickory-resolver 0.25.2 —
+    # litep2p 0.14.3's DEFAULT backend — requires ^0.25; the fix is >=0.26.1,
+    # semver-unreachable from both. litep2p-forced on the reachable copy: clears
+    # when litep2p adopts hickory 0.26.1+ (an SDK dropping libp2p clears only the
+    # dormant copy).
     "RUSTSEC-2026-0119",
-    # hickory-proto 0.25.2: pinned by stable2603 litep2p 0.13.3; upstream lists no patched 0.25 release. Remove at the next stable2603 maintenance bump.
+    # hickory-proto 0.25.2 (reachable litep2p copy): upstream lists no patched
+    # release at all. Same litep2p-forced exit as above, and an upstream fix must
+    # exist first.
     "RUSTSEC-2026-0118",
-    # ring 0.16.20: pinned through stable2603 libp2p's rcgen 0.11.3; the fix is >=0.17.12, not lockfile-compatible. Remove at the next stable2603 maintenance bump.
+    # ring 0.16.20: libp2p-forced — libp2p-tls 0.5.0 → rcgen 0.11.3 → ring ^0.16;
+    # the fix is >=0.17.12, semver-unreachable. Clears when upstream libp2p moves
+    # rcgen/ring or the SDK drops the libp2p backend. (The linked copy is a
+    # lockfile ghost: libp2p-tls is never compiled into the collator.)
     "RUSTSEC-2025-0009",
-    # rustls-webpki 0.101.7: pinned by stable2603 libp2p-tls 0.5.0; the fix is >=0.103.12, not lockfile-compatible. Remove at the next stable2603 maintenance bump.
+    # rustls-webpki 0.101.7: libp2p-forced — libp2p-tls 0.5.0 requires ^0.101.4;
+    # the fix is >=0.103.12, semver-unreachable. Clears when upstream libp2p
+    # moves rustls-webpki or the SDK drops the libp2p backend. (Lockfile ghost,
+    # as above.)
     "RUSTSEC-2026-0098",
-    # rustls-webpki 0.101.7: pinned by stable2603 libp2p-tls 0.5.0; the fix is >=0.103.12, not lockfile-compatible. Remove at the next stable2603 maintenance bump.
+    # rustls-webpki 0.101.7: same libp2p-forced pin and exit as RUSTSEC-2026-0098.
     "RUSTSEC-2026-0099",
-    # rustls-webpki 0.101.7: pinned by stable2603 libp2p-tls 0.5.0; the fix is >=0.103.13, not lockfile-compatible. Remove at the next stable2603 maintenance bump.
+    # rustls-webpki 0.101.7: same libp2p-forced pin and exit; fix is >=0.103.13.
     "RUSTSEC-2026-0104",
-    # tracing-subscriber 0.3.19: stable2603 sc-tracing 45.0.0 requires exactly =0.3.19, so Cargo rejects the >=0.3.20 fix as a lockfile-only update. Remove at the next stable2603 maintenance bump.
+    # tracing-subscriber 0.3.19: sc-tracing-forced — sc-tracing 47.0.0 itself
+    # requires exactly =0.3.19 (no libp2p/litep2p change touches it), so Cargo
+    # rejects the >=0.3.20 fix as a lockfile-only update. Clears only when a
+    # train ships sc-tracing without the exact pin.
     "RUSTSEC-2025-0055",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2025-0118",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; the affected range excludes <29 but no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0006",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0020",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0021",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0085",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0086",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0087",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0088",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0089",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0091",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0092",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0093",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0094",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0095",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0096",
-    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
-    "RUSTSEC-2026-0114",
 ]

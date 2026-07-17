@@ -130,6 +130,14 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
 - **Kernel attestation (mediums)**: bonded attestor registry (values-elected, ≥3), 2-of-3 signed attestations with challenge window — no longer presence-only.
 - **Oracle bonds (mediums)**: challenge/report bonds scale with cohort value-at-stake: `bond = max(flat_floor, bps × cohort_escrow)`.
 
+### D-19. SDK release line: `polkadot-stable2603` → `polkadot-stable2606` (2026-07-17, PLAN B11)
+
+- The pinned Polkadot SDK release line moves from `polkadot-stable2603` (umbrella `polkadot-sdk 2603.0.0`, last adopted at maintenance tag `polkadot-stable2603-1`) to **`polkadot-stable2606`** (umbrella `polkadot-sdk 2606.0.0`). [01 §9](01-system-overview.md)'s pinning regime classifies a line move — unlike a `stable2603-N` maintenance tag — as a project decision recorded here.
+- **Motivation ([15 §4.5](15-invariants-and-testing.md) TH-34, the standing supply-chain obligation):** under the `=`-exact pin regime every one of the 25 open dependency advisories was unfixable in place. The stable2606 line clears the only reachable class — all 16 `wasmtime` advisories (35.0.0, a line with no backport, → 36.0.12 under `sc-executor-wasmtime 0.47.0`), the class under the collator's wasm-execution trust boundary — and none of the other 9: `sc-network 0.58.0` still declares `libp2p ^0.54.1` and `sc-tracing 47.0.0` still exact-pins `tracing-subscriber "=0.3.19"`. The survivors stay waived under per-family exit criteria annotated in `.cargo/audit.toml` and `tools/ci/ghsa-waivers.toml`.
+- The whole train moved as a unit (~60 `=` pins re-sourced from the 2606.0.0 umbrella manifest, one atomic commit, full gate suite re-run) per the 01 §9 regime; the stable2606 tree no longer needs the vendored `core2 0.4.0` workaround, which was removed with the move.
+- Maintenance tags of the new line (`polkadot-stable2606-N`) are adopted as ordinary pin bumps per 01 §9; no new decision entry is required until the line changes again.
+- XCM v5 remains the latest stable wire version on stable2606 (re-verified at adoption; `staging-xcm 24.0.0` ships v3/v4/v5); the [02 §8](02-integration-contract.md) v5-frozen surfaces are unaffected.
+
 ---
 
 ## Part 2 — Finding disposition table

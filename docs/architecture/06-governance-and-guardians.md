@@ -68,7 +68,7 @@ Terminal oracle adjudication fixes money-settling facts for whole cohorts; it no
 2. **Pre-cohort conviction snapshot.** The tally for an `OracleResolution` referendum concerning a dispute whose subject is cohort *e* weights each vote by `min(current conviction-locked VIT, conviction-locked VIT as of SnapshotBlock(e))`, where `SnapshotBlock(e)` is the block at which cohort *e* was created (recorded by `pallet-epoch` as `CohortSnapshotBlock: map EpochId → BlockNumber`, bounded by the ≤ 4 live cohorts). **Capital that entered, or locked, after the disputed cohort began therefore has zero incremental weight in its adjudication** — buying VIT after seeing the dispute cannot buy the verdict. Locks reduced or unlocked since the snapshot count at their current (lower) value, so exiting always costs weight and never adds it.
 3. The referendum's admissible call remains exactly `oracle.adjudicate(round_id, verdict)`; the round id binds the subject cohort, from which the tally engine derives the snapshot block.
 
-**[VERIFY]** whether the stock `pallet-conviction-voting`/`pallet-referenda` pair on `polkadot-stable2603` can be configured with an external per-poll voting-power provider (custom `Polling`/`Tally` impl) without forking. Fallback (design default if not): a vendored conviction-voting instance for the `oracle` track only, sharing lock storage read-only.
+**[VERIFY]** whether the stock `pallet-conviction-voting`/`pallet-referenda` pair on `polkadot-stable2606` can be configured with an external per-poll voting-power provider (custom `Polling`/`Tally` impl) without forking. Fallback (design default if not): a vendored conviction-voting instance for the `oracle` track only, sharing lock storage read-only.
 
 ### 2.4 Entrenchment path (carried forward)
 

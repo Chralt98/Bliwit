@@ -305,7 +305,7 @@ fn all_methods_are_callable_through_api_ref() {
 fn runtime_api_id_and_version_are_frozen() {
     assert_eq!(
         runtime_decl_for_futarchy_api::ID,
-        sp_core::hashing::blake2_64(b"FutarchyApi")
+        [52, 172, 53, 103, 236, 227, 15, 254]
     );
     assert_eq!(runtime_decl_for_futarchy_api::VERSION, 1);
 }

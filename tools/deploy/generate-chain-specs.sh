@@ -11,8 +11,14 @@ properties="tokenSymbol=VIT,tokenDecimals=12,ss58Format=7777"
 
 cargo build -p bleavit-runtime --release --features substrate-wasm-builder --locked
 
-if [[ ! -x "$builder" ]]; then
-  cargo install staging-chain-spec-builder --version 17.0.0 --locked --root target/tools
+# The pin is enforced by version, not mere presence: a stale binary left by an
+# earlier train's pin (developer worktree, restored CI cache) must not silently
+# generate specs that claim the new pin (Codex PR-#103 P2; same pattern as the
+# cargo-audit guard in tools/ci/supply-chain-gates.sh).
+builder_version="19.0.0"
+if [[ ! -x "$builder" ]] || [[ "$("$builder" --version 2>/dev/null || true)" != *"$builder_version"* ]]; then
+  cargo install staging-chain-spec-builder --version "$builder_version" --locked \
+    --root target/tools --force
 fi
 
 mkdir -p "$out"

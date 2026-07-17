@@ -4,7 +4,7 @@ Chain specs are generated from the runtime's committed genesis presets with the
 pinned `staging-chain-spec-builder`:
 
 ```sh
-cargo install staging-chain-spec-builder --version 17.0.0 --locked
+cargo install staging-chain-spec-builder --version 19.0.0 --locked
 cargo build -p bleavit-runtime --release --features substrate-wasm-builder
 ```
 

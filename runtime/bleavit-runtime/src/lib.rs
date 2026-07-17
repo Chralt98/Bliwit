@@ -134,8 +134,10 @@ pub fn native_version() -> sp_version::NativeVersion {
     }
 }
 
-/// Stable2603's Cumulus storage proof-size reclaim extension. Its successor
-/// pallet wrapper is outside the pinned stable2603 closure available to B1a.
+/// The deprecated Cumulus storage proof-size reclaim extension. Its successor
+/// (`frame_system::WeightReclaim`, in-closure since the D-19 stable2606 move)
+/// changes the TxExtension stack — a transaction-format/metadata change that is
+/// deliberately NOT part of a maintenance train bump (SQ-228).
 #[allow(deprecated)]
 pub type StorageWeightReclaim =
     cumulus_primitives_storage_weight_reclaim::StorageWeightReclaim<Runtime>;

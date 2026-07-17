@@ -965,8 +965,9 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
     }
 }
 
-/// Closed bare-leaf admission set required because stable2603 scheduler uses
-/// filtered dispatch (SQ-32 branch (i)). Every call here produces a values
+/// Closed bare-leaf admission set required because the stable2606 scheduler
+/// uses filtered dispatch (SQ-32 branch (i); re-verified on pallet-scheduler
+/// 50.0.0 at the D-19 line move). Every call here produces a values
 /// origin (ConstitutionalValues or OracleResolution) at enactment and still
 /// passes its own exact `EnsureOrigin` — the second of the two independent
 /// checks. Bare leaves only: the origin-blind [`Contains`] impl never admits a

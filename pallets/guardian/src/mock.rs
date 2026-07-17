@@ -228,6 +228,7 @@ impl pallet_guardian::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
             ledger_drift: true,
         });
     }
+    fn prime_review_approved(_action: crate::ActionId) {}
     fn prime_maintenance_epoch(epoch: futarchy_primitives::EpochId) {
         CurrentEpochValue::set(epoch);
     }

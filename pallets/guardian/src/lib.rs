@@ -184,6 +184,9 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     /// rerunnable/`Queued` proposal status and every verified trigger live. In a
     /// real runtime this seeds the equivalent `pallet-epoch`/oracle/ledger state.
     fn prime_for_worst_case();
+    /// Mark the auto-submitted retrospective review approved so the measured
+    /// ratification exercises the real closed-referendum refund path.
+    fn prime_review_approved(action: ActionId);
     /// Advance the real epoch feed for the maintenance benchmark.
     fn prime_maintenance_epoch(epoch: EpochId);
     /// Close a seeded review so the measured verdict may refund both deposits.

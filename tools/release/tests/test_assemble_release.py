@@ -94,8 +94,11 @@ class AssembleReleaseTests(unittest.TestCase):
         self.supply_summary.write_text(
             json.dumps(
                 {
-                    "schema": "bleavit.supply-chain.v1",
+                    "schema": "bleavit.supply-chain.v2",
                     "ignored_advisory_ids": ["RUSTSEC-2026-0001"],
+                    "waived_ghsa_only": [
+                        {"id": "GHSA-vxx9-2994-q338", "package": "yamux", "version": "0.12.1"}
+                    ],
                     "workspaces": {
                         "root": {"allowed_warning_count": 2},
                         "keeper": {"allowed_warning_count": 0},

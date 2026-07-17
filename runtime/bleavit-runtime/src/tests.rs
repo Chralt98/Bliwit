@@ -1749,9 +1749,9 @@ fn development_preset_builds_and_pins_usdc_and_para_identity() {
 fn usdc_storage_keys_match_the_frozen_surface_manifest() {
     fn storage_key(item: &[u8], encoded_location: &[u8]) -> Vec<u8> {
         let mut key = Vec::with_capacity(64 + 16 + encoded_location.len());
-        key.extend_from_slice(&sp_core::hashing::twox_128(b"ForeignAssets"));
-        key.extend_from_slice(&sp_core::hashing::twox_128(item));
-        key.extend_from_slice(&sp_core::hashing::blake2_128(encoded_location));
+        key.extend_from_slice(&sp_io::hashing::twox_128(b"ForeignAssets"));
+        key.extend_from_slice(&sp_io::hashing::twox_128(item));
+        key.extend_from_slice(&sp_io::hashing::blake2_128(encoded_location));
         key.extend_from_slice(encoded_location);
         key
     }

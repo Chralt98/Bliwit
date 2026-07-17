@@ -60,7 +60,6 @@ rollout that removes `sudo` at Phase 4.
 | `zombienet/`, `chopsticks/`, `tools/env/` | B7: test-environment definitions as release artifacts (15 §4.7) — multi-node topologies + the 09 §7.1 drill suite, forked-state upgrade/playbook scenarios, and the pinned-tooling fetch/generate/validate scripts (`tools/env/pins.env` is the single pin home) |
 | [`models/`](models/README.md), `tools/verify/` | S1: TLA⁺ formal models of the conditional ledger and the T1–T24 proposal machine (15 §4.1) plus the pinned-TLC runner — main configs prove the invariants above anti-vacuity floors, witness configs must *violate* (reachability), mutation configs prove the invariants can fail |
 | [`fuzz/`](fuzz/README.md) | S2: `bleavit-fuzz` — cargo-fuzz (libFuzzer) targets for the three 15 §4.5 areas (SCALE payload decode, nested-wrapper filtering, LMSR trade paths), each asserting invariants (I-10/I-11/I-12) rather than mere no-panic. A separate nightly-pinned cargo workspace (like `keeper/`) so libFuzzer + nightly cannot disturb the runtime's exact pins; curated seed corpora + the `fuzz` CI job (`tools/ci/fuzz-gates.sh`) |
-| `vendor/` | Vendored `core2 0.4.0` (every published version is yanked; the node's networking closure requires it) — see `vendor/README.md` |
 | `frontend/` | Implementation root for Track F; currently a placeholder until the track begins |
 
 ## How this gets built
@@ -78,8 +77,8 @@ Humans and agents alike: read [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md), t
 
 ## Toolchain (pinned)
 
-- **Runtime:** Rust / Polkadot SDK, release line `polkadot-stable2603` (umbrella crate
-  `polkadot-sdk = "2603.0.0"`), FRAME + Cumulus; Zombienet, Chopsticks, try-runtime,
+- **Runtime:** Rust / Polkadot SDK, release line `polkadot-stable2606` (umbrella crate
+  `polkadot-sdk = "2606.0.0"`; D-19), FRAME + Cumulus; Zombienet, Chopsticks, try-runtime,
   TLA⁺/Quint, cargo-fuzz, frame-benchmarking (01 §9, 15 §4).
 - **Frontend:** TypeScript, polkadot-api 2.x, smoldot 3.x, Vite 8, Dexie 4; Arweave
   via permaweb-deploy/Turbo; Playwright + Lighthouse CI (01 §9, 10, 12).

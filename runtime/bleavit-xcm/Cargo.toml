@@ -13,7 +13,7 @@ pallet-futarchy-treasury = { path = "../../pallets/futarchy-treasury", default-f
 pallet-oracle = { path = "../../pallets/oracle", default-features = false }
 parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "max-encoded-len"] }
 scale-info = { version = "2.11.6", default-features = false, features = ["derive"] }
-# FRAME + XCM on the `polkadot-stable2603` pins (workspace-managed versions, 01 §9).
+# FRAME + XCM on the `polkadot-stable2606` pins (workspace-managed versions, 01 §9).
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }

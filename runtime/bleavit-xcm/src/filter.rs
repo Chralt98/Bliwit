@@ -8,7 +8,7 @@ pub enum XcmCallDisposition {
     TreasuryOnly,
 }
 
-/// Classifies every stable2603 `pallet_xcm::Call` variant (09 §6.1–§6.2).
+/// Classifies every stable2606 `pallet_xcm::Call` variant (09 §6.1–§6.2).
 ///
 /// The deprecated unlimited reserve-transfer call is denied: the limited form is the canonical
 /// exit and forces the user to state a remote weight bound (09 §6.2). All arbitrary-message,

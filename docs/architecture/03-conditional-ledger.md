@@ -12,7 +12,7 @@ RFC 2119 keywords (MUST/SHOULD/MAY) are normative.
 
 Sole custodian of market collateral and **sole mint/burn authority for every conditional instrument in the system** — decision-scalar, gate-binary and Baseline instruments alike (no other pallet may hold, mint or synthesize such claims; this closes the B-2 gap without weakening the authority rule). Everything else in the system may fail without loss of trader principal so long as this pallet's invariants hold. It exposes *no* admin calls, *no* general asset-management surface, and no configuration that can violate conservation.
 
-The pallet is small, frozen early, and heavily verified (audit scope A per BE §24.14). All escrow lives as USDC balance on the pallet's derived sovereign account in `pallet-assets` (`ForeignAssets` instance) — plain balance, no holds required **[VERIFY holds support on pallet-assets in stable2603; fallback: transfer-to-pallet-account escrow, which is the design default — this fallback is also the default for position storage deposits, §4.3]** — with existential state maintained by a 1-unit genesis endowment.
+The pallet is small, frozen early, and heavily verified (audit scope A per BE §24.14). All escrow lives as USDC balance on the pallet's derived sovereign account in `pallet-assets` (`ForeignAssets` instance) — plain balance, no holds required **[VERIFY holds support on pallet-assets in stable2606; fallback: transfer-to-pallet-account escrow, which is the design default — this fallback is also the default for position storage deposits, §4.3]** — with existential state maintained by a 1-unit genesis endowment.
 
 ---
 

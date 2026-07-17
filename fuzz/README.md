@@ -3,7 +3,7 @@
 This is a separate Cargo workspace because libFuzzer requires nightly Rust and
 brings a fuzz-only dependency graph. As with `keeper/`, keeping it outside the
 root workspace prevents those dependencies from perturbing the runtime's
-`=`-exact `polkadot-stable2603` pins.
+`=`-exact `polkadot-stable2606` pins.
 
 ## Targets and assertions
 

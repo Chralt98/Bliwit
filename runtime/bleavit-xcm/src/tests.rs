@@ -290,7 +290,7 @@ fn barrier_group_paid_asset_hub_known_responses_and_version_negotiation_work() {
                 max_weight: MAX_WEIGHT,
                 querier: None,
             },
-            // The stable2603 sender appends this topic to real ReportError responses.
+            // The stable2606 sender appends this topic to real ReportError responses.
             SetTopic([77; 32]),
         ])
     ));
@@ -1087,7 +1087,7 @@ fn health_group_router_outcomes_are_identical_to_the_inner_sender() {
 
 #[test]
 #[allow(deprecated)]
-fn filter_group_every_stable2603_call_variant_has_the_conservative_disposition() {
+fn filter_group_every_stable2606_call_variant_has_the_conservative_disposition() {
     let location: VersionedLocation = Location::parent().into();
     let assets: VersionedAssets = Assets::new().into();
     let unit_message: VersionedXcm<()> = VersionedXcm::V5(Xcm(vec![]));

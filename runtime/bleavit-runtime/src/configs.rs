@@ -316,11 +316,18 @@ pub struct InternalSchedulerOnly;
 impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for InternalSchedulerOnly {
     type Success = ();
     fn try_origin(origin: RuntimeOrigin) -> Result<(), RuntimeOrigin> {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            return EnsureRoot::<AccountId>::try_origin(origin);
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
         Err(origin)
     }
     #[cfg(feature = "runtime-benchmarks")]
     fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
-        Err(())
+        // Stock scheduler benchmarks dispatch Root directly. Production keeps
+        // this seam closed; Root exists here only in benchmark Wasm.
+        Ok(RuntimeOrigin::root())
     }
 }
 
@@ -543,7 +550,7 @@ fn track_migration_progress() {
 }
 
 fn migration_validation_hook_weight() -> Weight {
-    // `remark_with_event` is the stable2603 benchmarked linear hash-of-bytes
+    // `remark_with_event` is the stable2606 benchmarked linear hash-of-bytes
     // path. Charge it at CursorMaxLen plus the hook's bounded worst-case
     // storage/proof work; this remains conservative until B5 benchmarking.
     <<Runtime as frame_system::Config>::SystemWeightInfo as frame_system::WeightInfo>::remark_with_event(
@@ -631,6 +638,7 @@ impl cumulus_pallet_parachain_system::Config for Runtime {
         cumulus_pallet_parachain_system::RelayNumberMonotonicallyIncreases;
     type ConsensusHook = ConsensusHook;
     type RelayParentOffset = ConstU32<0>;
+    type SchedulingSignatureVerifier = ();
 }
 impl staging_parachain_info::Config for Runtime {}
 
@@ -971,6 +979,17 @@ impl pallet_referenda::TracksInfo<Balance, u32> for BleavitTracks {
                 crate::track_origins::Origin::Ratify => 4,
             });
         }
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            // Upstream `pallet-referenda` benchmarks submit a proposal whose
+            // enactment origin is Root. Map that fixture origin onto the
+            // strongest values track (entrenched, id 2) in benchmark Wasm only;
+            // no production track or origin mapping is added.
+            let system: Result<frame_system::RawOrigin<AccountId>, _> = origin.clone().try_into();
+            if matches!(system, Ok(frame_system::RawOrigin::Root)) {
+                return Ok(2);
+            }
+        }
         let candidate: Result<pallet_origins::Origin, _> = origin.clone().try_into();
         match candidate {
             // Conservative backwards-compatible mapping for callers which have
@@ -1034,10 +1053,21 @@ impl<Allowed: AllowedValuesTracks> frame_support::traits::EnsureOrigin<RuntimeOr
 parameter_types! {
     pub const SubmissionDeposit: Balance = currency::VIT;
     pub const MaxQueued: u32 = 100;
-    pub const UndecidingTimeout: u32 = 7 * BLOCKS_PER_DAY;
     pub const AlarmInterval: u32 = 10;
     pub const MaxTurnout: Balance = currency::VIT_TOTAL_SUPPLY;
     pub const VoteLockingPeriod: u32 = 32 * BLOCKS_PER_WEEK;
+}
+#[cfg(not(feature = "runtime-benchmarks"))]
+parameter_types! {
+    pub const UndecidingTimeout: u32 = 7 * BLOCKS_PER_DAY;
+}
+#[cfg(feature = "runtime-benchmarks")]
+parameter_types! {
+    // The upstream `nudge_referendum_no_deposit` fixture advances through the
+    // full prepare period before measuring the no-deposit branch. Production's
+    // equal 7-day timeout makes that synthetic referendum terminal at the same
+    // block, so benchmark Wasm gives the fixture one additional prepare period.
+    pub const UndecidingTimeout: u32 = 14 * BLOCKS_PER_DAY;
 }
 impl pallet_referenda::Config for Runtime {
     type RuntimeCall = RuntimeCall;
@@ -3246,12 +3276,23 @@ impl pallet_oracle::ReportingContext for RuntimeReporting {
                         .any(|(_, version)| spec_contains_component(*version, component))
             });
         if has_exposure {
-            // A8 fail-closed: 07 §6.1 freezes value-at-risk at Snapshot(m),
-            // but no pallet currently stores that snapshot. Reading mutable
-            // live vault escrow could only reduce a later reporter bond, so
-            // price the report out until the oracle snapshot owner lands the
-            // frozen backing (SQ-174).
-            Balance::MAX
+            #[cfg(feature = "runtime-benchmarks")]
+            {
+                // B5 fixture value: 500,000 x 250 bps = 12,500 USDC,
+                // strictly above the 10,000 `orc.bond_floor` — the variable
+                // bond path, not the floor knee — without overflowing the
+                // checked calculation.
+                return 500_000 * currency::USDC;
+            }
+            #[cfg(not(feature = "runtime-benchmarks"))]
+            {
+                // A8 fail-closed: 07 §6.1 freezes value-at-risk at Snapshot(m),
+                // but no pallet currently stores that snapshot. Reading mutable
+                // live vault escrow could only reduce a later reporter bond, so
+                // price the report out until the oracle snapshot owner lands the
+                // frozen backing (SQ-174).
+                Balance::MAX
+            }
         } else {
             0
         }
@@ -3496,11 +3537,32 @@ impl pallet_futarchy_treasury::RenewalDispatch for PendingRenewalDispatch {
         ))
     }
 }
+
+#[cfg(feature = "runtime-benchmarks")]
+pub struct BenchmarkRenewalDispatch;
+// FIXME(SQ-205/B10 wiring closure): remove this bench stub when the real
+// renewal XCM leg is wired — an Ok(()) stub left behind would keep the wired
+// production path out of the measured `execute_coretime_renewal` weight.
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_futarchy_treasury::RenewalDispatch for BenchmarkRenewalDispatch {
+    fn dispatch_renewal(
+        _period_index: u32,
+        _amount: Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+type RuntimeRenewalDispatch = BenchmarkRenewalDispatch;
+#[cfg(not(feature = "runtime-benchmarks"))]
+type RuntimeRenewalDispatch = PendingRenewalDispatch;
+
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
     type Params = TreasuryParams;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
-    type RenewalDispatch = PendingRenewalDispatch;
+    type RenewalDispatch = RuntimeRenewalDispatch;
     type RebatePayout = TreasuryRebatePayout;
     type PotFunding = TreasuryPotFunding;
     type WeightInfo = crate::weights::pallet_futarchy_treasury::WeightInfo<Runtime>;
@@ -3547,7 +3609,8 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
         let current_epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
         let gate_breach = pallet_welfare::GateBreachFlags::<Runtime>::get(current_epoch)
             .is_some_and(|flags| flags.s_breached || flags.c_breached);
-        pallet_guardian::TriggerState {
+        #[allow(unused_mut)]
+        let mut state = pallet_guardian::TriggerState {
             gate_breach,
             dead_man: phase_flags & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED != 0,
             reserve_health: phase_flags & pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG
@@ -3560,7 +3623,26 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
                 pallet_guardian::PlaybookId::OracleVoid,
             ),
             ..pallet_guardian::TriggerState::none()
+        };
+        // Benchmark Wasm must exercise every verified-trigger branch, but the
+        // live reads above still execute first so the measured DB-op pattern
+        // (PhaseFlags + CurrentEpoch + GateBreachFlags + MigrationHaltSources)
+        // matches production — a constant-only bench arm would under-account
+        // those reads at the next weight regeneration.
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            state = pallet_guardian::TriggerState {
+                depeg: true,
+                migration_halt: true,
+                oracle_deadlock: true,
+                gate_breach: true,
+                dead_man: true,
+                void_in_flight: true,
+                reserve_health: true,
+                ledger_drift: true,
+            };
         }
+        state
     }
 }
 pub struct RuntimeGuardianEffects;
@@ -4369,7 +4451,9 @@ impl pallet_execution_guard::UpgradeSchedule for RuntimeUpgradeSchedule {
     }
 }
 
-/// Exact stable2603 pre-write checks performed by
+/// Exact stable2606 pre-write checks (re-verified at the D-19 line move:
+/// cumulus-pallet-parachain-system 0.29.0 is condition-for-condition identical)
+/// performed by
 /// `cumulus_pallet_parachain_system::schedule_code_upgrade`. Frame-system
 /// removes `AuthorizedUpgrade` before invoking `OnSetCode`, and a direct
 /// dispatch is not transactional, so every typed Cumulus rejection must be
@@ -4893,6 +4977,18 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
             version,
             frame_support::BoundedVec::truncate_from(Vec::from([spec])),
         );
+        let cohort_epoch = epoch.saturating_sub(1);
+        pallet_epoch::CohortSchedules::<Runtime>::insert(
+            cohort_epoch,
+            pallet_epoch::CohortSchedule {
+                epoch: cohort_epoch,
+                creation_epoch_length:
+                    <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().epoch_length,
+                measurement_until: epoch,
+                settlement_epoch: epoch.saturating_add(1),
+                specs: frame_support::BoundedVec::truncate_from(Vec::from([(1, version)])),
+            },
+        );
     }
 }
 #[cfg(feature = "runtime-benchmarks")]
@@ -4963,13 +5059,39 @@ impl pallet_guardian::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
         crate::track_origins::Origin::GuardianTrack.into()
     }
     fn prime_for_worst_case() {
-        let who = AccountId32::new([1; 32]);
-        let mut proposal = <RuntimeBenchmarkHelper as pallet_epoch::BenchmarkHelper<
-            RuntimeOrigin,
-            AccountId,
-        >>::proposal(1, who, 1, 1);
-        proposal.state = futarchy_primitives::ProposalState::Queued;
-        pallet_epoch::Proposals::<Runtime>::insert(1, proposal);
+        if pallet_execution_guard::CurrentSpecName::<Runtime>::get().is_none() {
+            pallet_execution_guard::CurrentSpecName::<Runtime>::put(benchmark_runtime_version());
+        }
+        let call = RuntimeCall::System(frame_system::Call::remark {
+            remark: b"guardian-benchmark-queue".to_vec(),
+        });
+        let _ = benchmark_guard_enqueue(1, call, pallet_execution_guard::CallDomain::Public);
+        for seed in 1..=pallet_guardian::GUARDIAN_SEATS as u8 {
+            let who = AccountId32::new([seed; 32]);
+            let _ = <Balances as frame_support::traits::fungible::Mutate<AccountId>>::mint_into(
+                &who,
+                SubmissionDeposit::get().saturating_mul(2),
+            );
+        }
+    }
+
+    fn prime_review_approved(action: pallet_guardian::ActionId) {
+        let Some(referendum) = pallet_guardian::ReviewReferenda::<Runtime>::get(action) else {
+            return;
+        };
+        pallet_referenda::ReferendumInfoFor::<Runtime>::mutate(referendum, |maybe_info| {
+            let Some(pallet_referenda::ReferendumInfo::Ongoing(status)) = maybe_info.as_ref()
+            else {
+                return;
+            };
+            let submission_deposit = status.submission_deposit.clone();
+            let decision_deposit = status.decision_deposit.clone();
+            *maybe_info = Some(pallet_referenda::ReferendumInfo::Approved(
+                System::block_number(),
+                Some(submission_deposit),
+                decision_deposit,
+            ));
+        });
     }
     fn prime_maintenance_epoch(epoch: EpochId) {
         pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = epoch);
@@ -5120,7 +5242,8 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
             epoch,
             9_000u64.saturating_add(u64::from(epoch)),
         );
-        for measured_epoch in [epoch.saturating_add(1), epoch.saturating_add(2)] {
+        for offset in 1..=pallet_welfare::MAX_SNAPSHOTS_BOUND {
+            let measured_epoch = epoch.saturating_add(offset);
             pallet_welfare::Snapshots::<Runtime>::insert(
                 (measured_epoch, 0),
                 pallet_welfare::StoredSnapshot {
@@ -5134,7 +5257,19 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
                     gate_s: FixedU64(500_000_000),
                     gate_c: FixedU64(500_000_000),
                     welfare: FixedU64(500_000_000),
-                    components: Default::default(),
+                    components: frame_support::BoundedVec::truncate_from(
+                        pallet_welfare::benchmarking::healthy(
+                            pallet_welfare::MAX_COMPONENTS_PER_SPEC as u16,
+                        ),
+                    ),
+                },
+            );
+            pallet_welfare::GateBreachFlags::<Runtime>::insert(
+                measured_epoch,
+                pallet_welfare::CoreGateBreachFlags {
+                    s_breached: false,
+                    c_breached: false,
+                    day_bitmap: [0; 2],
                 },
             );
         }
@@ -5227,6 +5362,10 @@ fn benchmark_guard_enqueue(
     domain: pallet_execution_guard::CallDomain,
 ) -> Result<BlockNumber, DispatchError> {
     use frame_support::traits::StorePreimage;
+
+    if pallet_execution_guard::CurrentSpecName::<Runtime>::get().is_none() {
+        pallet_execution_guard::CurrentSpecName::<Runtime>::put(benchmark_runtime_version());
+    }
 
     let batch =
         pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(alloc::vec![call])
@@ -5331,7 +5470,7 @@ impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmark
     }
 
     fn prime_failed(pid: futarchy_primitives::ProposalId) {
-        let call = RuntimeCall::System(frame_system::Call::remark {
+        let call = RuntimeCall::System(frame_system::Call::remark_with_event {
             remark: b"guard-benchmark-failure".to_vec(),
         });
         if let Ok(maturity) =

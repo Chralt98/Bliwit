@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import re
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[3]
 
+# These tests pin what the release workflow must DO, not which release of a
+# third-party action it does it with. Asserting a literal `@v4` made Dependabot's
+# routine setup-node v4 -> v7 bump (#76) red two of them, because the action
+# major is exactly what Dependabot's job is to move; the toolchain version is
+# what the contract actually cares about and it is asserted separately.
+SETUP_NODE = re.compile(r"actions/setup-node@v\d+")
+
 
 class WorkflowContractTests(unittest.TestCase):
+    def assertSetsUpNode(self, haystack: str, message: str) -> None:
+        self.assertRegex(haystack, SETUP_NODE, message)
+
     def test_release_publication_is_draft_verified_and_prerelease(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         create = workflow.index('gh release create "$GITHUB_REF_NAME"')
@@ -50,13 +61,14 @@ class WorkflowContractTests(unittest.TestCase):
     def test_tag_gates_run_all_tooling_suites(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         gates = workflow[workflow.index("  gates:"):workflow.index("  artifacts:")]
-        self.assertIn("actions/setup-node@v7", gates)
+        self.assertSetsUpNode(gates, "the tag gates job must set up Node")
         self.assertIn("node-version: '22'", gates)
         for suite in (
             "tools/deploy/tests",
             "tools/reference-model/tests",
             "tools/release/tests",
             "tools/env/tests",
+            "tools/ci/tests",
         ):
             self.assertIn(suite, workflow)
         install_step = workflow.index(
@@ -86,7 +98,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertLess(generate, prewarm)
         self.assertLess(prewarm, produce)
         self.assertLess(produce, assemble)
-        self.assertIn("actions/setup-node@v7", workflow)
+        self.assertSetsUpNode(workflow, "the release workflow must set up Node")
         self.assertIn("node-version: '22'", workflow)
         self.assertIn("pyyaml==6.0.2 websockets==15.0.1", workflow)
         producer = workflow[produce:assemble]

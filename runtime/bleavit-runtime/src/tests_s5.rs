@@ -297,7 +297,7 @@ impl RuntimeMetadataModel {
             .into_iter()
             .filter(|version| matches!(version, 15 | 16))
             .max()
-            .expect("stable2603 must expose V15 or V16 metadata");
+            .expect("stable2606 must expose V15 or V16 metadata");
         let encoded = Runtime::metadata_at_version(version)
             .expect("a reported metadata version must be constructible");
         let prefixed = RuntimeMetadataPrefixed::decode(&mut &encoded[..])

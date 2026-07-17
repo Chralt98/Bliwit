@@ -62,7 +62,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
-      - name: Check lockfiles and RustSec advisories
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Check lockfiles, RustSec advisories, and GHSA-only advisories
         run: tools/ci/supply-chain-gates.sh
 
   reference-model:
@@ -79,7 +82,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests; do
+          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests tools/ci/tests; do
             if [[ -d "$suite" ]]; then
               python3 -m unittest discover -s "$suite"
             fi
@@ -99,6 +102,8 @@ jobs:
           python-version: '3.12'
       - name: Check local Markdown links
         run: python3 tools/ci/check-doc-links.py
+      - name: Check PLAN.md table structure
+        run: python3 tools/ci/check-plan-tables.py
 
   # S1 formal models — 15 §4.1; 03 §11.
   model-checking:
@@ -160,7 +165,7 @@ jobs:
         # needs `protoc`; the workspace build needs libclang (bindgen).
         run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
       - name: Install FRAME omni-bencher
-        run: cargo install --locked frame-omni-bencher --version 0.15.0
+        run: cargo install --locked frame-omni-bencher --version 0.22.0
       - name: Build benchmark runtime Wasm
         run: cargo build --locked --release -p bleavit-runtime --features runtime-benchmarks
       - name: Execute every pallet benchmark

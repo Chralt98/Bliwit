@@ -5,7 +5,8 @@ use futarchy_primitives::chain_identity::{
 };
 use staging_xcm::latest::{Junction, Location};
 
-/// XCM v5 is the stable2603 wire-version pin; negotiation remains enabled (09 §6.1).
+/// XCM v5 is the stable2606 wire-version pin (still the latest stable on the
+/// D-19 line; re-verified 2026-07-17); negotiation remains enabled (09 §6.1).
 pub const XCM_VERSION_PINNED: u32 = 5;
 
 /// An Asset Hub `pallet-assets` asset as seen from Bleavit: the one canonical
