@@ -120,6 +120,7 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
     fn adjudication_origin() -> RuntimeOrigin {
         RuntimeOrigin::signed(oracle_resolution_acc())
     }
+    fn prime_reporting(_: MetricId, _: EpochId, _: MetricSpecVersion) {}
 }
 
 /// Externalities with the default (empty registries) genesis.

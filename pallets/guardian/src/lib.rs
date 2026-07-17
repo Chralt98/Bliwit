@@ -135,6 +135,8 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     /// rerunnable/`Queued` proposal status and every verified trigger live. In a
     /// real runtime this seeds the equivalent `pallet-epoch`/oracle/ledger state.
     fn prime_for_worst_case();
+    /// Advance the real epoch feed for the maintenance benchmark.
+    fn prime_maintenance_epoch(epoch: EpochId);
 }
 
 #[frame_support::pallet]

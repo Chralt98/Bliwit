@@ -1,5 +1,7 @@
 //! Runtime configuration and the B1a fail-closed cross-pallet adapters.
 
+#[cfg(feature = "runtime-benchmarks")]
+use alloc::vec;
 use alloc::{borrow::Cow, vec::Vec};
 
 use frame_support::{
@@ -10,8 +12,8 @@ use frame_support::{
         fungibles::{Inspect, Mutate},
         tokens::Preservation,
         ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly,
-        InstanceFilter, Nothing, QueryPreimage, StorageInstance, TransformOrigin,
-        UnfilteredDispatchable, VariantCountOf, WithdrawReasons,
+        InstanceFilter, Nothing, QueryPreimage, StorageInstance, TransformOrigin, VariantCountOf,
+        WithdrawReasons,
     },
     weights::{
         constants::{
@@ -25,22 +27,29 @@ use frame_system::{
     limits::{BlockLength, BlockWeights},
     EnsureRoot, EnsureSigned,
 };
-use futarchy_primitives::{bounds, chain_identity, currency, kernel, EpochId, FixedU64, ParamKey};
+use futarchy_primitives::{
+    bounds, chain_identity, currency, kernel, EpochId, FixedU64, ParamKey, ProposalClass,
+    ProposalId, ProposalState, RuntimeVersionConstraint, H256,
+};
+#[cfg(feature = "runtime-benchmarks")]
+use futarchy_primitives::{keeper::CrankClass, EpochPhase};
 use parity_scale_codec::{Decode, Encode};
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 #[cfg(feature = "runtime-benchmarks")]
 use sp_runtime::AccountId32;
 use sp_runtime::{
-    traits::{AccountIdConversion, AccountIdLookup, Dispatchable},
+    traits::{AccountIdConversion, AccountIdLookup},
     DispatchError, Perbill,
 };
 
+#[cfg(feature = "runtime-benchmarks")]
+use crate::Welfare;
 use crate::{
     AccountId, AssetId, Aura, Balance, Balances, Block, BlockNumber, CollatorSelection,
-    ConditionalLedger, ConsensusHook, ForeignAssets, FutarchyTreasury, Hash, MessageQueue,
-    Migrations, Nonce, PalletInfo, ParachainSystem, PolkadotXcm, Preimage, Referenda, Runtime,
-    RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin, RuntimeTask,
-    Scheduler, Session, SessionKeys, System, XcmpQueue, USDC_ASSET_ID, VERSION,
+    ConditionalLedger, ConsensusHook, Epoch, ExecutionGuard, ForeignAssets, FutarchyTreasury, Hash,
+    MessageQueue, Migrations, Nonce, PalletInfo, ParachainSystem, PolkadotXcm, Preimage, Referenda,
+    Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin,
+    RuntimeTask, Scheduler, Session, SessionKeys, System, XcmpQueue, USDC_ASSET_ID, VERSION,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -82,6 +91,7 @@ impl frame_system::Config for Runtime {
     type Version = Version;
     type AccountData = pallet_balances::AccountData<Balance>;
     type DbWeight = RocksDbWeight;
+    type SystemWeightInfo = crate::weights::frame_system::WeightInfo<Runtime>;
     type BlockWeights = RuntimeBlockWeights;
     type BlockLength = RuntimeBlockLength;
     type SS58Prefix = Ss58Prefix;
@@ -100,7 +110,7 @@ impl pallet_timestamp::Config for Runtime {
     type Moment = u64;
     type OnTimestampSet = Aura;
     type MinimumPeriod = MinimumPeriod;
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_timestamp::WeightInfo<Runtime>;
 }
 
 impl pallet_balances::Config for Runtime {
@@ -109,7 +119,7 @@ impl pallet_balances::Config for Runtime {
     type DustRemoval = ();
     type ExistentialDeposit = ExistentialDeposit;
     type AccountStore = System;
-    type WeightInfo = pallet_balances::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = crate::weights::pallet_balances::WeightInfo<Runtime>;
     type MaxLocks = ConstU32<50>;
     type MaxReserves = ConstU32<50>;
     type ReserveIdentifier = [u8; 8];
@@ -159,7 +169,7 @@ impl pallet_assets::Config<pallet_assets::Instance1> for Runtime {
     type AssetIdParameter = AssetId;
     type Currency = Balances;
     type CreateOrigin = EnsureConstitutionalAssetCreate;
-    type ForceOrigin = frame_system::EnsureNever<AccountId>;
+    type ForceOrigin = ForeignAssetsForceOrigin;
     type AssetDeposit = AssetDeposit;
     type AssetAccountDeposit = AssetAccountDeposit;
     type MetadataDepositBase = MetadataDepositBase;
@@ -171,11 +181,21 @@ impl pallet_assets::Config<pallet_assets::Instance1> for Runtime {
     type ReserveData = ();
     type Extra = ();
     type CallbackHandle = ();
-    type WeightInfo = pallet_assets::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = crate::weights::pallet_assets::WeightInfo<Runtime>;
     type RemoveItemsLimit = ConstU32<1_000>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = AssetBenchmarkHelper;
 }
+
+// Production deliberately has no force origin for bridged USDC. The stock
+// `pallet-assets` benchmarks use `ForceOrigin` to create their isolated fixture
+// asset, so benchmark Wasm follows the Asset Hub convention and admits Root for
+// setup only. This cannot alter a production dispatch path because the alias is
+// selected at compile time by `runtime-benchmarks`.
+#[cfg(feature = "runtime-benchmarks")]
+type ForeignAssetsForceOrigin = EnsureRoot<AccountId>;
+#[cfg(not(feature = "runtime-benchmarks"))]
+type ForeignAssetsForceOrigin = frame_system::EnsureNever<AccountId>;
 
 #[cfg(feature = "runtime-benchmarks")]
 pub struct AssetBenchmarkHelper;
@@ -285,7 +305,7 @@ parameter_types! {
 
 impl pallet_preimage::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_preimage::WeightInfo<Runtime>;
     type Currency = Balances;
     type ManagerOrigin = pallet_origins::EnsureConstitutionalValues;
     type Consideration = frame_support::traits::fungible::HoldConsideration<
@@ -306,11 +326,18 @@ pub struct PendingSchedulerOrigin;
 impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for PendingSchedulerOrigin {
     type Success = ();
     fn try_origin(origin: RuntimeOrigin) -> Result<(), RuntimeOrigin> {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            return EnsureRoot::<AccountId>::try_origin(origin);
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
         Err(origin)
     }
     #[cfg(feature = "runtime-benchmarks")]
     fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
-        Err(())
+        // Stock scheduler benchmarks dispatch Root directly. Production keeps
+        // this seam closed; Root exists here only in benchmark Wasm.
+        Ok(RuntimeOrigin::root())
     }
 }
 
@@ -325,7 +352,7 @@ impl pallet_scheduler::Config for Runtime {
     type MaximumWeight = MaximumSchedulerWeight;
     type ScheduleOrigin = PendingSchedulerOrigin;
     type MaxScheduledPerBlock = ConstU32<50>;
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_scheduler::WeightInfo<Runtime>;
     type OriginPrivilegeCmp = EqualPrivilegeOnly;
     type Preimages = Preimage;
     type BlockNumberProvider = System;
@@ -335,7 +362,7 @@ impl pallet_utility::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type RuntimeCall = RuntimeCall;
     type PalletsOrigin = <RuntimeOrigin as frame_support::traits::OriginTrait>::PalletsOrigin;
-    type WeightInfo = pallet_utility::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = crate::weights::pallet_utility::WeightInfo<Runtime>;
 }
 
 #[derive(
@@ -382,7 +409,7 @@ impl pallet_proxy::Config for Runtime {
     type ProxyDepositBase = ProxyDepositBase;
     type ProxyDepositFactor = ProxyDepositFactor;
     type MaxProxies = ConstU32<32>;
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_proxy::WeightInfo<Runtime>;
     type MaxPending = ConstU32<32>;
     type CallHasher = sp_runtime::traits::BlakeTwo256;
     type AnnouncementDepositBase = AnnouncementDepositBase;
@@ -396,7 +423,7 @@ impl pallet_multisig::Config for Runtime {
     type DepositBase = ConstU128<{ currency::VIT_EXISTENTIAL_DEPOSIT }>;
     type DepositFactor = ConstU128<{ currency::VIT_EXISTENTIAL_DEPOSIT }>;
     type MaxSignatories = ConstU32<100>;
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_multisig::WeightInfo<Runtime>;
     type BlockNumberProvider = System;
 }
 
@@ -477,6 +504,25 @@ fn active_migration_marker(cursor: &pallet_migrations::ActiveCursorOf<Runtime>) 
     // `started_at` is lifecycle metadata, not cursor progress. Track the MBM
     // index and the migration-owned cursor bytes that `step` actually returns.
     sp_io::hashing::blake2_256(&(cursor.index, &cursor.inner_cursor).encode())
+}
+
+/// PB-MIGRATION remediation support (09 §7): retire the MBM cursor only when
+/// it is genuinely disposable — actually stuck, or an active cursor whose
+/// stall is still live and backed by the migration failure/stall halt sources.
+pub(crate) fn retire_stuck_migration_cursor_for_remediation() -> bool {
+    let retire = match pallet_migrations::Cursor::<Runtime>::get() {
+        Some(pallet_migrations::MigrationCursor::Stuck) => true,
+        Some(pallet_migrations::MigrationCursor::Active(ref cursor)) => {
+            MigrationHaltSources::get() & (MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT) != 0
+                && active_migration_stall_is_live(cursor)
+        }
+        None => false,
+    };
+    if retire {
+        pallet_migrations::Cursor::<Runtime>::kill();
+        MigrationProgressMarker::kill();
+    }
+    retire
 }
 
 fn active_migration_stall_is_live(cursor: &pallet_migrations::ActiveCursorOf<Runtime>) -> bool {
@@ -577,13 +623,13 @@ impl pallet_migrations::Config for Runtime {
     type MigrationStatusHandler = MigrationStatusToGuard;
     type FailedMigrationHandler = MigrationFailureToGuard;
     type MaxServiceWeight = MigrationMaxServiceWeight;
-    type WeightInfo = pallet_migrations::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = crate::weights::pallet_migrations::WeightInfo<Runtime>;
 }
 
 impl pallet_sudo::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type RuntimeCall = RuntimeCall;
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_sudo::WeightInfo<Runtime>;
 }
 
 parameter_types! {
@@ -592,7 +638,7 @@ parameter_types! {
     pub const RelayOrigin: cumulus_primitives_core::AggregateMessageOrigin = cumulus_primitives_core::AggregateMessageOrigin::Parent;
 }
 impl cumulus_pallet_parachain_system::Config for Runtime {
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::cumulus_pallet_parachain_system::WeightInfo<Runtime>;
     type RuntimeEvent = RuntimeEvent;
     type OnSystemEvent = ExecutionGuardSystemEvent;
     type SelfParaId = staging_parachain_info::Pallet<Runtime>;
@@ -660,7 +706,7 @@ parameter_types! {
 }
 impl pallet_message_queue::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_message_queue::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type MessageProcessor = pallet_message_queue::mock_helpers::NoopMessageProcessor<
         cumulus_primitives_core::AggregateMessageOrigin,
@@ -704,7 +750,7 @@ impl cumulus_pallet_xcmp_queue::Config for Runtime {
     type MaxPageSize = ConstU32<{ 1 << 16 }>;
     type ControllerOrigin = EnsureRoot<AccountId>;
     type ControllerOriginConverter = ControllerOriginConverter;
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::cumulus_pallet_xcmp_queue::WeightInfo<Runtime>;
     type PriceForSiblingDelivery = polkadot_runtime_common::xcm_sender::NoPriceForMessageDelivery<
         cumulus_primitives_core::ParaId,
     >;
@@ -765,7 +811,7 @@ impl pallet_session::Config for Runtime {
     type SessionHandler = <SessionKeys as sp_runtime::traits::OpaqueKeys>::KeyTypeIdProviders;
     type Keys = SessionKeys;
     type DisablingStrategy = ();
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_session::WeightInfo<Runtime>;
     type Currency = Balances;
     type KeyDeposit = ();
 }
@@ -788,7 +834,7 @@ impl pallet_collator_selection::Config for Runtime {
     type ValidatorId = AccountId;
     type ValidatorIdOf = pallet_collator_selection::IdentityCollator;
     type ValidatorRegistration = Session;
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_collator_selection::WeightInfo<Runtime>;
 }
 
 // Custom protocol pallet configurations and their fail-closed A8/A11 seams
@@ -868,6 +914,17 @@ impl pallet_referenda::TracksInfo<Balance, u32> for BleavitTracks {
         TRACKS.iter().map(Cow::Borrowed)
     }
     fn track_for(origin: &Self::RuntimeOrigin) -> Result<Self::Id, ()> {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            // Upstream `pallet-referenda` benchmarks submit a proposal whose
+            // enactment origin is Root. Map that fixture origin onto the
+            // existing strongest values track in benchmark Wasm only; no
+            // production track or origin mapping is added.
+            let system: Result<frame_system::RawOrigin<AccountId>, _> = origin.clone().try_into();
+            if matches!(system, Ok(frame_system::RawOrigin::Root)) {
+                return Ok(0);
+            }
+        }
         let candidate: Result<pallet_origins::Origin, _> = origin.clone().try_into();
         match candidate {
             Ok(pallet_origins::Origin::ConstitutionalValues) => Ok(0),
@@ -880,15 +937,26 @@ impl pallet_referenda::TracksInfo<Balance, u32> for BleavitTracks {
 parameter_types! {
     pub const SubmissionDeposit: Balance = currency::VIT;
     pub const MaxQueued: u32 = 100;
-    pub const UndecidingTimeout: u32 = 7 * BLOCKS_PER_DAY;
     pub const AlarmInterval: u32 = 10;
     pub const MaxTurnout: Balance = currency::VIT_TOTAL_SUPPLY;
     pub const VoteLockingPeriod: u32 = 32 * BLOCKS_PER_WEEK;
 }
+#[cfg(not(feature = "runtime-benchmarks"))]
+parameter_types! {
+    pub const UndecidingTimeout: u32 = 7 * BLOCKS_PER_DAY;
+}
+#[cfg(feature = "runtime-benchmarks")]
+parameter_types! {
+    // The upstream `nudge_referendum_no_deposit` fixture advances through the
+    // full prepare period before measuring the no-deposit branch. Production's
+    // equal 7-day timeout makes that synthetic referendum terminal at the same
+    // block, so benchmark Wasm gives the fixture one additional prepare period.
+    pub const UndecidingTimeout: u32 = 14 * BLOCKS_PER_DAY;
+}
 impl pallet_referenda::Config for Runtime {
     type RuntimeCall = RuntimeCall;
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_referenda::WeightInfo<Runtime>;
     type Scheduler = Scheduler;
     type Currency = Balances;
     type SubmitOrigin = frame_system::EnsureSigned<AccountId>;
@@ -907,7 +975,7 @@ impl pallet_referenda::Config for Runtime {
 }
 impl pallet_conviction_voting::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_conviction_voting::WeightInfo<Runtime>;
     type Currency = Balances;
     type Polls = Referenda;
     type MaxTurnout = MaxTurnout;
@@ -918,17 +986,10 @@ impl pallet_conviction_voting::Config for Runtime {
 }
 
 impl pallet_origins::Config for Runtime {
-    type WeightInfo = ();
+    type WeightInfo = crate::weights::pallet_origins::WeightInfo<Runtime>;
 }
 
-/// Shared fail-closed A8 epoch seam. Epoch zero is the reserved pre-genesis
-/// sentinel; live epochs begin at one when A8 lands.
-pub struct PendingEpochClock;
-impl frame_support::traits::Get<EpochId> for PendingEpochClock {
-    fn get() -> EpochId {
-        0
-    }
-}
+type LiveEpochClock = pallet_epoch::CurrentEpoch<Runtime>;
 
 pub struct ConstitutionGovernanceOrigin;
 impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for ConstitutionGovernanceOrigin {
@@ -963,8 +1024,8 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for ConstitutionGovernan
 }
 impl pallet_constitution::Config for Runtime {
     type GovernanceOrigin = ConstitutionGovernanceOrigin;
-    type CurrentEpoch = PendingEpochClock;
-    type WeightInfo = pallet_constitution::weights::SubstrateWeight<Runtime>;
+    type CurrentEpoch = LiveEpochClock;
+    type WeightInfo = crate::weights::pallet_constitution::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
@@ -1004,6 +1065,16 @@ fn u32_param(name: &[u8]) -> u32 {
         Some(pallet_constitution::ParamValue::U32(value)) => value,
         _ => match default_param(key) {
             Some(pallet_constitution::ParamValue::U32(value)) => value,
+            _ => 0,
+        },
+    }
+}
+fn u8_param(name: &[u8]) -> u8 {
+    let key = pallet_constitution::key16(name);
+    match live_param(key) {
+        Some(pallet_constitution::ParamValue::U8(value)) => value,
+        _ => match default_param(key) {
+            Some(pallet_constitution::ParamValue::U8(value)) => value,
             _ => 0,
         },
     }
@@ -1071,6 +1142,8 @@ parameter_types! {
     pub const TreasuryPalletId: PalletId = PalletId(*b"bl/trsry");
     pub const IncidentPalletId: PalletId = PalletId(*b"bl/reg/i");
     pub const MilestonePalletId: PalletId = PalletId(*b"bl/reg/m");
+    pub const EpochPalletId: PalletId = PalletId(*b"bl/epoch");
+    pub const ExecutionGuardPalletId: PalletId = PalletId(*b"bl/guard");
 }
 pub fn market_account() -> AccountId {
     MarketPalletId::get().into_account_truncating()
@@ -1092,6 +1165,19 @@ pub fn fee_account() -> AccountId {
 }
 pub fn treasury_protocol_account() -> AccountId {
     LedgerPalletId::get().into_sub_account_truncating(*b"TREASRY_")
+}
+pub fn epoch_account() -> AccountId {
+    EpochPalletId::get().into_account_truncating()
+}
+/// B6's runtime tests drive the guard's `enqueue` through the configured
+/// `EnqueueAuthority`; on this runtime that is the epoch sovereign (I-9).
+#[cfg(test)]
+pub(crate) fn test_execution_enqueue_origin() -> RuntimeOrigin {
+    RuntimeOrigin::signed(epoch_account())
+}
+
+pub fn execution_guard_account() -> AccountId {
+    ExecutionGuardPalletId::get().into_account_truncating()
 }
 /// 08 §1.1 KEEPER USDC custody pot, derived under the canonical `bl/trsry`
 /// pallet id just like the genesis treasury/community/incentive pots.
@@ -1131,34 +1217,32 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureWelfareAccount
         Ok(RuntimeOrigin::signed(welfare_settlement_account()))
     }
 }
-/// A8 pending authority: no real origin is admitted before the epoch pallet
-/// lands. Production (`try_origin`) always rejects — the G-1 fail-closed
-/// direction for the `ResolveAuthority`/`MarketAdmin` seams that A8 will own.
-///
-/// Under `runtime-benchmarks` ONLY, a single sentinel account is accepted so
-/// B5's benchmarks for the A8-authority-gated calls can construct a passing
-/// origin (`try_successful_origin` returns exactly this account). This is gated
-/// out of production, so the fail-closed guarantee is unaffected.
-pub struct PendingA8Authority;
-#[cfg(feature = "runtime-benchmarks")]
-const A8_BENCH_ACCOUNT: [u8; 32] = [241; 32];
-impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for PendingA8Authority {
+pub struct EnsureEpochAccount;
+impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureEpochAccount {
     type Success = ();
     fn try_origin(origin: RuntimeOrigin) -> Result<(), RuntimeOrigin> {
-        #[cfg(feature = "runtime-benchmarks")]
-        {
-            let raw: Result<frame_system::RawOrigin<AccountId>, RuntimeOrigin> =
-                origin.clone().into();
-            if matches!(raw, Ok(frame_system::RawOrigin::Signed(who)) if who == AccountId32::new(A8_BENCH_ACCOUNT))
-            {
-                return Ok(());
-            }
+        match EnsureSigned::<AccountId>::try_origin(origin.clone()) {
+            Ok(who) if who == epoch_account() => Ok(()),
+            _ => Err(origin),
         }
-        Err(origin)
     }
     #[cfg(feature = "runtime-benchmarks")]
     fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
-        Ok(RuntimeOrigin::signed(AccountId32::new(A8_BENCH_ACCOUNT)))
+        Ok(RuntimeOrigin::signed(epoch_account()))
+    }
+}
+pub struct EnsureExecutionGuardAccount;
+impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureExecutionGuardAccount {
+    type Success = ();
+    fn try_origin(origin: RuntimeOrigin) -> Result<(), RuntimeOrigin> {
+        match EnsureSigned::<AccountId>::try_origin(origin.clone()) {
+            Ok(who) if who == execution_guard_account() => Ok(()),
+            _ => Err(origin),
+        }
+    }
+    #[cfg(feature = "runtime-benchmarks")]
+    fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
+        Ok(RuntimeOrigin::signed(execution_guard_account()))
     }
 }
 pub struct ProtocolAccounts;
@@ -1175,6 +1259,8 @@ impl Contains<AccountId> for ProtocolAccounts {
             IncidentPalletId::get().into_account_truncating(),
             MilestonePalletId::get().into_account_truncating(),
             welfare_settlement_account(),
+            epoch_account(),
+            execution_guard_account(),
         ];
         accounts.contains(who)
     }
@@ -1184,7 +1270,7 @@ impl pallet_conditional_ledger::Config for Runtime {
     type Collateral = ForeignAssets;
     type UsdcAssetId = UsdcAssetId;
     type MarketAuthority = EnsureMarketAccount;
-    type ResolveAuthority = PendingA8Authority;
+    type ResolveAuthority = EnsureEpochAccount;
     type SettleAuthority = EnsureWelfareAccount;
     type MinSplit = LedgerMinSplit;
     type PositionDeposit = LedgerPositionDeposit;
@@ -1195,14 +1281,18 @@ impl pallet_conditional_ledger::Config for Runtime {
     type InsuranceAccount = InsuranceAccount;
     type PalletId = LedgerPalletId;
     type KeeperRebate = FutarchyTreasury;
-    type WeightInfo = pallet_conditional_ledger::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = crate::weights::pallet_conditional_ledger::WeightInfo<Runtime>;
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
 impl pallet_market::Config for Runtime {
-    type WeightInfo = pallet_market::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = crate::weights::pallet_market::WeightInfo<Runtime>;
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = RuntimeBenchmarkHelper;
     type Fee = MarketFee;
     type ObsInterval = MarketObsInterval;
     type Kappa1e9 = MarketKappa;
-    type MarketAdmin = PendingA8Authority;
+    type MarketAdmin = EnsureEpochAccount;
     type ArchiveDelay = LedgerArchiveDelay;
     type PalletId = MarketPalletId;
     type KeeperRebate = FutarchyTreasury;
@@ -1232,29 +1322,82 @@ impl pallet_welfare::WelfareParamsProvider for WelfareParams {
         FixedU64(fixed_param(b"welfare.wA"))
     }
 }
-/// A8 pending inputs deliberately return empty vectors, causing snapshot cranks
-/// to reject instead of persisting a metric derived from absent inputs.
-pub struct PendingMetricInputs;
-impl pallet_welfare::MetricInputs for PendingMetricInputs {
-    fn onchain_components(_: EpochId, _: u16) -> Vec<pallet_welfare::ComponentValue> {
-        Vec::new()
+/// Runtime metric projection. Final oracle components and the incident
+/// multiplier are live; normalized on-chain/relay counters and daily inputs do
+/// not yet have a production source, so those entries remain absent and the
+/// welfare pallet rejects an incomplete snapshot (G-1).
+pub struct RuntimeMetricInputs;
+impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
+    fn onchain_components(epoch: EpochId, version: u16) -> Vec<pallet_welfare::ComponentValue> {
+        let Some(specs) = pallet_welfare::MetricSpecs::<Runtime>::get(version) else {
+            return Vec::new();
+        };
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            // The production on-chain counter projection is intentionally
+            // fail-closed until B-track sources exist. Benchmark Wasm injects
+            // a complete, max-bound component set so the crank measures the
+            // full admissible persistence path rather than an early error.
+            return specs
+                .iter()
+                .filter(|spec| spec.activation_epoch <= epoch)
+                .map(|spec| pallet_welfare::ComponentValue {
+                    id: spec.id,
+                    value: FixedU64(1_000_000_000),
+                })
+                .collect();
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        specs
+            .iter()
+            .filter(|spec| {
+                spec.activation_epoch <= epoch
+                    && matches!(spec.source, pallet_welfare::SourceClass::Attested)
+            })
+            .filter_map(|spec| {
+                pallet_oracle::Pallet::<Runtime>::settled_component(spec.id, epoch, version).map(
+                    |settled| pallet_welfare::ComponentValue {
+                        id: spec.id,
+                        value: settled.value,
+                    },
+                )
+            })
+            .collect()
     }
     fn incident_multiplier(epoch: EpochId) -> FixedU64 {
         // The IncidentRegistry aggregate IS the C_attested multiplier
         // (registry-core: an empty closed epoch records exactly 1.0). An
         // absent entry means the epoch is not closed yet; the neutral 1.0 is
-        // returned because this pending seam is unreachable while
-        // `onchain_components` is empty (snapshot cranks reject first) — A8's
-        // real MetricInputs must instead gate snapshots on registry close-out
-        // rather than fabricate a multiplier (returning 0 here would zero
-        // C_attested outright, which is fail-destructive, not fail-safe).
+        // returned because an incomplete component set still makes the
+        // snapshot fail. Returning zero would erase C_attested and would be
+        // fail-destructive rather than fail-safe.
         match pallet_registry::Aggregates::<Runtime>::get(epoch) {
             Some(value) => value,
             None => FixedU64(1_000_000_000),
         }
     }
-    fn daily_components(_: EpochId, _: u8, _: u16) -> Vec<pallet_welfare::ComponentValue> {
-        Vec::new()
+    fn daily_components(
+        epoch: EpochId,
+        _: u8,
+        version: u16,
+    ) -> Vec<pallet_welfare::ComponentValue> {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            return pallet_welfare::MetricSpecs::<Runtime>::get(version)
+                .into_iter()
+                .flatten()
+                .filter(|spec| spec.activation_epoch <= epoch)
+                .map(|spec| pallet_welfare::ComponentValue {
+                    id: spec.id,
+                    value: FixedU64(1_000_000_000),
+                })
+                .collect();
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            let _ = (epoch, version);
+            Vec::new()
+        }
     }
 }
 pub struct WelfareLedger;
@@ -1293,58 +1436,131 @@ impl pallet_welfare::LedgerSettlement for WelfareLedger {
 impl pallet_welfare::Config for Runtime {
     type MetricGovernanceOrigin = pallet_origins::EnsureConstitutionalValues;
     type Params = WelfareParams;
-    type MetricInputs = PendingMetricInputs;
+    type MetricInputs = RuntimeMetricInputs;
     type Ledger = WelfareLedger;
-    type CurrentEpoch = PendingEpochClock;
+    type CurrentEpoch = LiveEpochClock;
     type KeeperRebate = FutarchyTreasury;
-    type WeightInfo = pallet_welfare::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = crate::weights::pallet_welfare::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
 
-/// A8 pending reporting seam: welfare supplies known spec metadata, while a
-/// zero window and stake keep new reports fail-closed until epoch timing lands.
-pub struct PendingReporting;
-impl pallet_oracle::ReportingContext for PendingReporting {
-    fn report_window_end(_: EpochId) -> u32 {
-        0
+fn epoch_end(epoch: EpochId) -> Option<u32> {
+    let current = pallet_epoch::EpochOf::<Runtime>::get();
+    let schedule = pallet_epoch::Schedule::<Runtime>::get();
+    if current.index == epoch {
+        return schedule.epoch_start_block.checked_add(schedule.length);
+    }
+    // There is no epoch-indexed, bounded historical schedule source. Scanning
+    // retained proposal schedules would make this signed path unbounded, so a
+    // past/future epoch has no admissible reporting window (SQ-141).
+    None
+}
+
+fn frozen_versions_for_measurement(epoch: EpochId) -> Vec<u16> {
+    let mut versions = Vec::new();
+    // A cohort can measure for at most the kernel-bounded live-cohort horizon.
+    // Direct gets keep this projection bounded even if historical schedules
+    // accumulate before their owning pallet gains a reap path (SQ-92).
+    for distance in 1..=futarchy_primitives::bounds::MAX_NON_TERMINAL_COHORTS {
+        let Some(cohort_epoch) = epoch.checked_sub(distance) else {
+            continue;
+        };
+        if let Some(schedule) = pallet_epoch::CohortSchedules::<Runtime>::get(cohort_epoch) {
+            if epoch > schedule.measurement_until {
+                continue;
+            }
+            for (_, version) in schedule.specs {
+                if !versions.contains(&version) {
+                    versions.push(version);
+                }
+            }
+        }
+    }
+    versions
+}
+
+pub struct RuntimeReporting;
+impl pallet_oracle::ReportingContext for RuntimeReporting {
+    #[allow(clippy::manual_unwrap_or, clippy::manual_unwrap_or_default)]
+    fn report_window_end(epoch: EpochId) -> u32 {
+        match epoch_end(epoch).and_then(|end| end.checked_add(kernel::ORC_REPORT_WINDOW_BLOCKS)) {
+            Some(end) => end,
+            None => 0,
+        }
     }
     fn is_expected_spec_version(component: u16, epoch: EpochId, version: u16) -> bool {
-        match pallet_welfare::MetricSpecs::<Runtime>::get(version) {
-            Some(specs) => specs
-                .iter()
-                .any(|spec| spec.id == component && spec.activation_epoch <= epoch),
-            None => false,
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            return pallet_welfare::MetricSpecs::<Runtime>::get(version).is_some_and(|specs| {
+                specs
+                    .iter()
+                    .any(|spec| spec.id == component && spec.activation_epoch <= epoch)
+            });
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            let _ = (component, epoch, version);
+            // The oracle core accepts StakeAtRisk=0 with a zero bond. Until a
+            // cohort-escrow custody projection exists, reject report admission
+            // outright rather than opening an economically unbonded game (G-1).
+            false
         }
     }
     fn stake_at_risk(_: u16, _: EpochId) -> Balance {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            // Exercise the value-scaled bond calculation above its floor.
+            return 400_000u128.saturating_mul(currency::USDC);
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        // No production cohort-escrow custody/source exists yet. Zero makes
+        // the projection honest; `is_expected_spec_version` separately rejects
+        // every report so the core cannot interpret this as a zero bond (G-1).
         0
     }
     fn expected_components(epoch: EpochId) -> Vec<(u16, u16)> {
-        pallet_welfare::MetricSpecs::<Runtime>::iter()
-            .flat_map(|(version, specs)| {
-                specs.into_iter().filter_map(move |spec| {
-                    (spec.activation_epoch <= epoch).then_some((spec.id, version))
-                })
+        frozen_versions_for_measurement(epoch)
+            .into_iter()
+            .flat_map(|version| {
+                pallet_welfare::MetricSpecs::<Runtime>::get(version)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(move |spec| {
+                        (spec.activation_epoch <= epoch).then_some((spec.id, version))
+                    })
             })
             .collect()
     }
 }
 impl pallet_oracle::Config for Runtime {
     type AdjudicationOrigin = pallet_origins::EnsureOracleResolution;
-    type Reporting = PendingReporting;
-    // B4 pending probe-dispatch seam: `()` sends nothing, so every probe times
-    // out fail-static (07 §8, I-24 — absence is never healthy). Swapped for
-    // `bleavit_xcm::probe::XcmProbeDispatcher` when the stub XCM config below
-    // (`xcm_config`: Barrier/AssetTransactor/Trader/XcmSender = ()) is replaced
-    // by the bleavit-xcm components (the B4 runtime-integration follow-up).
-    type ProbeDispatch = ();
+    type Reporting = RuntimeReporting;
+    // Production remains fail-static until the B4 XCM dispatcher is wired.
+    // Benchmark Wasm uses a live no-op sender so the reserve-probe benchmark
+    // reaches its documented post-commit rebate path.
+    type ProbeDispatch = RuntimeProbeDispatch;
     type KeeperRebate = FutarchyTreasury;
     type MaxRoundCloseBatch = ConstU32<{ kernel::TICK_BATCH }>;
-    type WeightInfo = pallet_oracle::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = crate::weights::pallet_oracle::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
+
+#[cfg(feature = "runtime-benchmarks")]
+pub struct BenchmarkProbeDispatch;
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_oracle::ProbeDispatch for BenchmarkProbeDispatch {
+    fn live() -> bool {
+        true
+    }
+
+    fn probe_due(_: u64) {}
+}
+#[cfg(feature = "runtime-benchmarks")]
+type RuntimeProbeDispatch = BenchmarkProbeDispatch;
+#[cfg(not(feature = "runtime-benchmarks"))]
+type RuntimeProbeDispatch = ();
 
 pub struct RegistryParams;
 impl pallet_registry::RegistryParams for RegistryParams {
@@ -1362,7 +1578,7 @@ impl pallet_registry::WatchtowerRegistry<AccountId> for OracleWatchtowers {
     }
 }
 /// The current welfare shell has no external-component write endpoint. The
-/// aggregate remains in registry storage and is pulled by `PendingMetricInputs`.
+/// aggregate remains in registry storage and is pulled by `RuntimeMetricInputs`.
 pub struct WelfarePullSink;
 impl pallet_registry::WelfareSink for WelfarePullSink {
     fn note_external_component(
@@ -1373,25 +1589,37 @@ impl pallet_registry::WelfareSink for WelfarePullSink {
         Ok(())
     }
 }
-/// A8 pending registry epoch seam: known welfare spec data is readable, but
-/// the zero filing window and target authorize no new epoch filing activity.
-pub struct PendingRegistryEpoch;
-impl pallet_registry::EpochContext for PendingRegistryEpoch {
-    fn filing_window_end(_: EpochId) -> u32 {
-        0
+/// Epoch-backed registry context. Ambiguous concurrent frozen versions and the
+/// absent milestone-target field fail closed instead of selecting a value.
+pub struct RuntimeRegistryEpoch;
+impl pallet_registry::EpochContext for RuntimeRegistryEpoch {
+    fn filing_window_end(epoch: EpochId) -> u32 {
+        if frozen_versions_for_measurement(epoch).len() == 1 {
+            <RuntimeReporting as pallet_oracle::ReportingContext>::report_window_end(epoch)
+        } else {
+            // `frozen_spec_version` cannot return Option. Close admission as
+            // well as returning the sentinel so a caller cannot file a
+            // fabricated spec-0 record during an ambiguous/no-version epoch.
+            0
+        }
     }
     fn frozen_spec_version(epoch: EpochId) -> u16 {
-        pallet_welfare::MetricSpecs::<Runtime>::iter_keys()
-            .filter(
-                |version| match pallet_welfare::MetricSpecs::<Runtime>::get(version) {
-                    Some(specs) => specs.iter().any(|spec| spec.activation_epoch <= epoch),
-                    None => false,
-                },
-            )
-            .max()
-            .map_or(0, |version| version)
+        let versions = frozen_versions_for_measurement(epoch);
+        if versions.len() == 1 {
+            versions[0]
+        } else {
+            0
+        }
     }
     fn milestone_target(_: EpochId) -> u32 {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            // The production source is absent (SQ-141); benchmark Wasm supplies
+            // a non-zero frozen target so Milestone aggregation takes its full
+            // division/clamp path.
+            return registry_core::MILESTONE_TARGET_POINTS;
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
         0
     }
 }
@@ -1408,7 +1636,7 @@ macro_rules! registry_config {
             type Params = RegistryParams;
             type Watchtowers = OracleWatchtowers;
             type Welfare = WelfarePullSink;
-            type Epoch = PendingRegistryEpoch;
+            type Epoch = RuntimeRegistryEpoch;
             type ResolutionAuthority = pallet_origins::EnsureOracleResolution;
             type InsuranceAccount = InsuranceAccount;
             type PalletId = $id;
@@ -1417,8 +1645,9 @@ macro_rules! registry_config {
             type ArchiveDelay = LedgerArchiveDelay;
             type MaxFilingsPerEpoch = ConstU32<{ kernel::REG_MAX_FILINGS_EPOCH }>;
             type MaxEvidenceLen = ConstU32<32>;
-            // Registry exposes only its B5 placeholder `WeightInfo for ()` today.
-            type WeightInfo = ();
+            // Both registry instances share the one generated weight file (the
+            // benchmarks run per-instance over the same code paths).
+            type WeightInfo = crate::weights::pallet_registry::WeightInfo<Runtime>;
             #[cfg(feature = "runtime-benchmarks")]
             type BenchmarkHelper = RuntimeBenchmarkHelper;
         }
@@ -1494,7 +1723,9 @@ impl pallet_futarchy_treasury::RebatePayout<AccountId> for TreasuryRebatePayout 
 /// `bleavit_xcm::coretime::XcmRenewalDispatcher` is wired with the stub XCM
 /// config swap (09 §4: an unwireable transfer must not consume the quote or
 /// mark the period funded; the keeper simply retries once wired).
+#[cfg(not(feature = "runtime-benchmarks"))]
 pub struct PendingRenewalDispatch;
+#[cfg(not(feature = "runtime-benchmarks"))]
 impl pallet_futarchy_treasury::RenewalDispatch for PendingRenewalDispatch {
     fn dispatch_renewal(
         _period_index: u32,
@@ -1505,61 +1736,138 @@ impl pallet_futarchy_treasury::RenewalDispatch for PendingRenewalDispatch {
         ))
     }
 }
+
+#[cfg(feature = "runtime-benchmarks")]
+pub struct BenchmarkRenewalDispatch;
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_futarchy_treasury::RenewalDispatch for BenchmarkRenewalDispatch {
+    fn dispatch_renewal(
+        _period_index: u32,
+        _amount: Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+}
+#[cfg(feature = "runtime-benchmarks")]
+type RuntimeRenewalDispatch = BenchmarkRenewalDispatch;
+#[cfg(not(feature = "runtime-benchmarks"))]
+type RuntimeRenewalDispatch = PendingRenewalDispatch;
+
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
     type Params = TreasuryParams;
-    // PendingEpochClock is fixed at epoch 0, so the keeper meter conservatively
-    // has one total budget and cannot reset until the A8 runtime wiring swaps it.
-    type CurrentEpoch = PendingEpochClock;
-    type RenewalDispatch = PendingRenewalDispatch;
+    // The A8 runtime wiring landed: the live epoch clock drives the keeper
+    // meter's per-epoch reset (08 §6.3).
+    type CurrentEpoch = LiveEpochClock;
+    type RenewalDispatch = RuntimeRenewalDispatch;
     type RebatePayout = TreasuryRebatePayout;
-    type WeightInfo = pallet_futarchy_treasury::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = crate::weights::pallet_futarchy_treasury::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
 
-/// A8 pending guardian proposal-status seam: `Other` authorizes no action.
-pub struct PendingGuardianStatus;
-impl pallet_guardian::GuardianProposalStatus for PendingGuardianStatus {
-    fn status(_: u64) -> (pallet_guardian::ProposalStatus, bool) {
-        (pallet_guardian::ProposalStatus::Other, false)
+pub struct RuntimeGuardianStatus;
+impl pallet_guardian::GuardianProposalStatus for RuntimeGuardianStatus {
+    fn status(pid: u64) -> (pallet_guardian::ProposalStatus, bool) {
+        let proposal = pallet_epoch::Proposals::<Runtime>::get(pid)
+            .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid));
+        let Some(proposal) = proposal else {
+            return (pallet_guardian::ProposalStatus::Other, false);
+        };
+        let status = match proposal.state {
+            futarchy_primitives::ProposalState::Trading => pallet_guardian::ProposalStatus::Trading,
+            futarchy_primitives::ProposalState::Extended => {
+                pallet_guardian::ProposalStatus::Extended
+            }
+            // `Suspended` is deliberately NOT mapped to `Queued`: guardian-core
+            // gates `DelayOnce` on `status == Queued` (06 §5 — delay-once acts on
+            // queued execution only), and a suspended proposal is not queued.
+            futarchy_primitives::ProposalState::Queued => pallet_guardian::ProposalStatus::Queued,
+            futarchy_primitives::ProposalState::Executed => {
+                pallet_guardian::ProposalStatus::Executed
+            }
+            futarchy_primitives::ProposalState::Rerun => pallet_guardian::ProposalStatus::Rerun,
+            _ => pallet_guardian::ProposalStatus::Other,
+        };
+        (status, proposal.rerun)
     }
 }
-/// Guard-owned machine triggers that already have a production source. A8's
-/// remaining trigger signals stay false until its reserved runtime slot lands.
 pub struct RuntimeGuardianTriggers;
 impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
     fn current() -> pallet_guardian::TriggerState {
-        pallet_guardian::TriggerState {
-            // The relay-abort bit is guardian-visible but deliberately does
-            // not freeze the normal re-proposal lane: Abort preserves the old
-            // code and must not replace one wedge with another.
-            migration_halt: MigrationHaltSources::get() != 0,
-            ..pallet_guardian::TriggerState::none()
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            // Some production trigger feeds are deliberately absent/fail-closed
+            // in B1a. The guardian benchmark must nevertheless exercise every
+            // admissible playbook branch, so benchmark Wasm supplies the full
+            // verified-trigger context through this Config seam.
+            return pallet_guardian::TriggerState {
+                depeg: true,
+                migration_halt: true,
+                oracle_deadlock: true,
+                gate_breach: true,
+                dead_man: true,
+                void_in_flight: true,
+                reserve_health: true,
+                ledger_drift: true,
+            };
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            // Current-epoch record only (06 §5 auto-release; PR #66 Codex P1):
+            // a breached record retained from a prior epoch must not keep
+            // authorizing suspend_on_gate after recovery.
+            let gate_breach = crate::classifier::current_epoch_gate_breach();
+            let dead_man = pallet_constitution::PhaseFlags::<Runtime>::get()
+                & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED
+                != 0;
+            let current_epoch = pallet_epoch::EpochOf::<Runtime>::get().index;
+            let void_in_flight = (0..=futarchy_primitives::bounds::MAX_NON_TERMINAL_COHORTS)
+                .filter_map(|distance| current_epoch.checked_sub(distance))
+                .filter_map(pallet_epoch::Cohorts::<Runtime>::get)
+                .any(|cohort| matches!(cohort.status, pallet_epoch::CohortStatus::Void));
+            pallet_guardian::TriggerState {
+                // No price/depeg probe, oracle-deadlock classifier or persisted
+                // ledger-drift flag exists yet; false prevents fabricated powers.
+                depeg: false,
+                // B6: the halt trigger is sourced from the aggregated halt-sources word
+                // (includes the relay-abort bit; Abort preserves old code and must
+                // not freeze the re-proposal lane).
+                migration_halt: MigrationHaltSources::get() != 0,
+                oracle_deadlock: false,
+                gate_breach,
+                dead_man,
+                void_in_flight,
+                reserve_health: pallet_oracle::Pallet::<Runtime>::reserve_unhealthy(),
+                ledger_drift: false,
+            }
         }
     }
 }
-/// A8/referenda integration pending adapter. Empty guardian membership at B1a
-/// genesis means no review can become overdue before the real adapter lands.
-pub struct PendingGuardianScheduler;
-impl pallet_guardian::GuardianReviewScheduler for PendingGuardianScheduler {
+/// The guardian scheduler traits are infallible (`u32`) and are called only
+/// after the action was persisted. A failed stock-referenda submission could
+/// therefore not roll the action back; until the seam becomes fallible, return
+/// the explicit sentinel and never claim a referendum was scheduled (G-1).
+pub struct PendingGuardianReviewScheduler;
+impl pallet_guardian::GuardianReviewScheduler for PendingGuardianReviewScheduler {
     fn schedule_review(_: u32) -> u32 {
         u32::MAX
     }
 }
-impl pallet_guardian::GuardianRecallScheduler for PendingGuardianScheduler {
+pub struct PendingGuardianRecallScheduler;
+impl pallet_guardian::GuardianRecallScheduler for PendingGuardianRecallScheduler {
     fn schedule_recall(_: u32) -> u32 {
         u32::MAX
     }
 }
 impl pallet_guardian::Config for Runtime {
     type ValuesOrigin = pallet_origins::EnsureConstitutionalValues;
-    type CurrentEpoch = PendingEpochClock;
-    type ProposalStatusProvider = PendingGuardianStatus;
+    type CurrentEpoch = LiveEpochClock;
+    type ProposalStatusProvider = RuntimeGuardianStatus;
     type TriggerProvider = RuntimeGuardianTriggers;
-    type ReviewScheduler = PendingGuardianScheduler;
-    type RecallScheduler = PendingGuardianScheduler;
-    type WeightInfo = pallet_guardian::weights::SubstrateWeight<Runtime>;
+    type ReviewScheduler = PendingGuardianReviewScheduler;
+    type RecallScheduler = PendingGuardianRecallScheduler;
+    type WeightInfo = crate::weights::pallet_guardian::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
@@ -1567,7 +1875,918 @@ impl pallet_attestor::Config for Runtime {
     type ValuesOrigin = pallet_origins::EnsureConstitutionalValues;
     // Ratification shares ConstitutionalValues pending the stock-referenda track split SQ.
     type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
-    type WeightInfo = pallet_attestor::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = crate::weights::pallet_attestor::WeightInfo<Runtime>;
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = RuntimeBenchmarkHelper;
+}
+
+// -----------------------------------------------------------------------------
+// A8 epoch machine and A11 execution guard
+
+pub struct RuntimeEpochParams;
+impl pallet_epoch::EpochParamsProvider for RuntimeEpochParams {
+    fn get() -> pallet_epoch::CoreEpochParams {
+        let v_min = [
+            balance_param(b"dec.v_min.param"),
+            balance_param(b"dec.v_min.trs"),
+            balance_param(b"dec.v_min.code"),
+            balance_param(b"dec.v_min.meta"),
+            0,
+        ];
+        pallet_epoch::CoreEpochParams {
+            epoch_length: u32_param(b"epoch.length"),
+            epoch_slots: u8_param(b"epoch.slots"),
+            horizon_k: u8_param(b"epoch.horizon_k"),
+            decision_window: u32_param(b"dec.window"),
+            trailing_window: u32_param(b"dec.trailing"),
+            delta: [
+                FixedU64(fixed_param(b"dec.delta.param")),
+                FixedU64(fixed_param(b"dec.delta.trs")),
+                FixedU64(fixed_param(b"dec.delta.code")),
+                FixedU64(fixed_param(b"dec.delta.meta")),
+                FixedU64(1_000_000_000),
+            ],
+            sigma: [
+                FixedU64(fixed_param(b"dec.sigma.param")),
+                FixedU64(fixed_param(b"dec.sigma.trs")),
+                FixedU64(fixed_param(b"dec.sigma.code")),
+                FixedU64(fixed_param(b"dec.sigma.meta")),
+                FixedU64(0),
+            ],
+            delta_max: FixedU64(fixed_param(b"dec.delta_max")),
+            coverage_pct: percent_param(b"dec.coverage"),
+            v_min,
+            gate_v_min: v_min.map(|value| value / 10),
+            gate_p_max: [FixedU64(fixed_param(b"gate.p_max")); 2],
+            gate_eps: [FixedU64(fixed_param(b"gate.eps")); 2],
+            gate_nb_coverage_pct: percent_param(b"gate.nb_coverage"),
+            gate_nb_convergence: FixedU64(fixed_param(b"gate.nb_conv")),
+            timelock: [
+                u32_param(b"exec.lock.param"),
+                u32_param(b"exec.lock.trs"),
+                u32_param(b"exec.lock.code"),
+                u32_param(b"exec.lock.meta"),
+                0,
+            ],
+            grace: [
+                u32_param(b"exec.grace"),
+                u32_param(b"exec.grace"),
+                u32_param(b"exec.grace"),
+                u32_param(b"exec.grace"),
+                0,
+            ],
+            intake_max_per_account: u8_param(b"intake.max_acct"),
+        }
+    }
+}
+
+/// Market storage supplies live spot and baseline identifiers. The market
+/// pallet does not expose decision-window TWAP/coverage/contest telemetry or a
+/// canonical market-id allocator, so deployment and decision grading remain
+/// explicit fail-closed seams instead of fabricating books or grade inputs.
+pub struct RuntimeEpochMarket;
+impl pallet_epoch::MarketAccess<AccountId> for RuntimeEpochMarket {
+    fn open_markets(
+        proposal: &futarchy_primitives::Proposal<AccountId>,
+        _: bool,
+        requires_gates: bool,
+    ) -> Result<futarchy_primitives::MarketSet, DispatchError> {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            // No production canonical market-id allocator or decision telemetry
+            // exists yet. This reaches epoch's largest gate-bearing six-book
+            // branch with deterministic quotes, but cannot also hydrate the
+            // sibling market pallet's observation history. Pallet-market's own
+            // benchmarks cover that bounded work.
+            if !pallet_conditional_ledger::Vaults::<Runtime>::contains_key(proposal.id) {
+                ConditionalLedger::create_vault(
+                    RuntimeOrigin::signed(market_account()),
+                    proposal.id,
+                    proposal.metric_spec,
+                )?;
+            }
+            return Ok(benchmark_market_set(
+                proposal.id,
+                proposal.epoch,
+                requires_gates,
+            ));
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            let _ = (proposal, requires_gates);
+            Err(DispatchError::Other(
+                "epoch market deployment source absent",
+            ))
+        }
+    }
+    fn baseline_market(epoch: EpochId) -> Option<u64> {
+        #[cfg(feature = "runtime-benchmarks")]
+        if let Some(market) = pallet_market::BaselineMarketOf::<Runtime>::get(epoch) {
+            return Some(market);
+        } else {
+            return Some(9_000u64.saturating_add(u64::from(epoch)));
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        pallet_market::BaselineMarketOf::<Runtime>::get(epoch)
+    }
+    fn twap_full(market: u64) -> Option<FixedU64> {
+        #[cfg(feature = "runtime-benchmarks")]
+        return Some(benchmark_quote(market));
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            let _ = market;
+            None
+        }
+    }
+    fn twap_trailing(market: u64, _: u32) -> Option<FixedU64> {
+        #[cfg(feature = "runtime-benchmarks")]
+        return Some(benchmark_quote(market));
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            let _ = market;
+            None
+        }
+    }
+    fn spot(market: u64) -> Option<FixedU64> {
+        #[cfg(feature = "runtime-benchmarks")]
+        return Some(benchmark_quote(market));
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        pallet_market::Markets::<Runtime>::get(market).map(|book| book.last_quote_1e9)
+    }
+    fn decision_grade(
+        _: u64,
+        _: pallet_epoch::BookRole,
+        _: ProposalClass,
+        _: &pallet_epoch::CoreEpochParams,
+    ) -> bool {
+        #[cfg(feature = "runtime-benchmarks")]
+        return true;
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        false
+    }
+    fn measured_depth(_: ProposalId) -> Balance {
+        #[cfg(feature = "runtime-benchmarks")]
+        return 1_000_000u128.saturating_mul(currency::USDC);
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        0
+    }
+    fn published_flow_per_day(_: ProposalId) -> Option<Balance> {
+        #[cfg(feature = "runtime-benchmarks")]
+        return Some(currency::USDC);
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        None
+    }
+    fn second_insufficiency(_: ProposalId) -> bool {
+        false
+    }
+    fn previous_settled_baseline_twap(_: EpochId) -> Option<FixedU64> {
+        None
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_market_set(
+    pid: ProposalId,
+    epoch: EpochId,
+    gates: bool,
+) -> futarchy_primitives::MarketSet {
+    let first = pid.saturating_mul(10);
+    futarchy_primitives::MarketSet {
+        accept: first.saturating_add(1),
+        reject: first.saturating_add(2),
+        gates: gates.then_some([
+            first.saturating_add(3),
+            first.saturating_add(4),
+            first.saturating_add(5),
+            first.saturating_add(6),
+        ]),
+        baseline: 9_000u64.saturating_add(u64::from(epoch)),
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_quote(market: u64) -> FixedU64 {
+    match market % 10 {
+        1 => FixedU64(750_000_000),
+        2 => FixedU64(250_000_000),
+        // Code-proposal safety gates must pass so the epoch benchmark reaches
+        // the full attestation and execution-queue path instead of measuring
+        // the cheaper gate-veto/cohort path.
+        3 | 5 => FixedU64(10_000_000),
+        4 | 6 => FixedU64(50_000_000),
+        _ => FixedU64(500_000_000),
+    }
+}
+
+pub struct RuntimeEpochOracle;
+impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
+    fn any_open_dispute_touching(spec: u16) -> bool {
+        pallet_oracle::Rounds::<Runtime>::iter_values()
+            .any(|round| round.spec_version == spec && round.challenger.is_some())
+    }
+}
+
+pub struct RuntimeEpochGuardian;
+impl pallet_epoch::GuardianAccess for RuntimeEpochGuardian {
+    fn hold_active(pid: ProposalId) -> bool {
+        pallet_epoch::Proposals::<Runtime>::get(pid)
+            .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
+            .is_some_and(|proposal| matches!(proposal.state, ProposalState::Suspended))
+    }
+    fn dead_man_engaged() -> bool {
+        pallet_constitution::PhaseFlags::<Runtime>::get()
+            & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED
+            != 0
+    }
+    fn review_window_closed(_: ProposalId) -> bool {
+        // Guardian storage does not retain an action-to-proposal binding after
+        // dispatch/reap, so this cannot be derived without inventing identity.
+        false
+    }
+}
+
+pub struct RuntimeEpochAttestation;
+impl pallet_epoch::AttestationAccess for RuntimeEpochAttestation {
+    fn present_and_quorate(pid: ProposalId, payload_hash: H256) -> bool {
+        let Some(payload_len) = pallet_epoch::Proposals::<Runtime>::get(pid)
+            .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
+            .filter(|proposal| proposal.payload_hash == payload_hash)
+            .map(|proposal| proposal.payload_len)
+        else {
+            return false;
+        };
+        let artifact_hash = <RuntimeGuardPreimages as pallet_execution_guard::Preimages>::fetch(
+            payload_hash,
+            payload_len,
+        )
+        .and_then(|bytes| {
+            let mut input = &bytes[..];
+            let calls = pallet_execution_guard::RuntimeBatch::<Runtime>::decode(&mut input).ok()?;
+            if !input.is_empty() {
+                return None;
+            }
+            match calls.iter().find_map(
+                <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
+                    RuntimeCall,
+                >>::authorize_upgrade_hash,
+            ) {
+                Some(hash) => Some(hash),
+                None => Some(payload_hash),
+            }
+        });
+        artifact_hash.is_some_and(|hash| pallet_attestor::Pallet::<Runtime>::has_quorum(pid, hash))
+    }
+}
+
+pub struct RuntimeEpochConstitution;
+impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeEpochConstitution {
+    fn static_checks_pass(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
+        let Some(bytes) = <RuntimeGuardPreimages as pallet_execution_guard::Preimages>::fetch(
+            proposal.payload_hash,
+            proposal.payload_len,
+        ) else {
+            return false;
+        };
+        let mut input = &bytes[..];
+        let Ok(batch) = pallet_execution_guard::RuntimeBatch::<Runtime>::decode(&mut input) else {
+            return false;
+        };
+        input.is_empty()
+            && batch.iter().all(|call| {
+                crate::classifier::capability_enabled_for_call(proposal.class, call)
+                    && (<crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
+                        RuntimeCall,
+                    >>::authorize_upgrade_hash(call)
+                    .is_some()
+                        || <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
+                        RuntimeCall,
+                    >>::safety_filter(proposal.class, call))
+            })
+    }
+    fn queue_time_check(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
+        // Re-run the exact payload/class capability projection at decision
+        // time. Resource and rate-meter conflicts are independently checked by
+        // epoch and the execution guard.
+        Self::static_checks_pass(proposal)
+    }
+    fn in_cap_prize(proposal: &futarchy_primitives::Proposal<AccountId>) -> Option<Balance> {
+        #[cfg(feature = "runtime-benchmarks")]
+        return Some(proposal.ask);
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        // Treasury's committed outflow is exact. PARAM/CODE/META require the
+        // certified envelope and sec.prize floors whose production source is
+        // not yet calibrated; None is the mandated conservative default.
+        matches!(proposal.class, ProposalClass::Treasury).then_some(proposal.ask)
+    }
+    fn ledger_frozen() -> bool {
+        pallet_constitution::PhaseFlags::<Runtime>::get()
+            & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN
+            != 0
+    }
+    fn phase_flags() -> u32 {
+        pallet_constitution::PhaseFlags::<Runtime>::get()
+    }
+    #[allow(clippy::manual_unwrap_or, clippy::manual_unwrap_or_default)]
+    fn active_metric_spec_version() -> u16 {
+        let epoch = Epoch::current_epoch();
+        match pallet_welfare::MetricSpecs::<Runtime>::iter()
+            .filter(|(_, specs)| specs.iter().any(|spec| spec.activation_epoch <= epoch))
+            .map(|(version, _)| version)
+            .max()
+        {
+            Some(version) => version,
+            None => 0,
+        }
+    }
+    fn treasury_gate_required(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
+        matches!(proposal.class, ProposalClass::Code | ProposalClass::Meta)
+            || (matches!(proposal.class, ProposalClass::Treasury)
+                && proposal.ask > pallet_futarchy_treasury::Pallet::<Runtime>::nav().nav / 100)
+    }
+}
+
+pub struct RuntimeEpochPreimage;
+impl pallet_epoch::PreimageAccess for RuntimeEpochPreimage {
+    fn len(hash: H256) -> Option<u32> {
+        <RuntimeGuardPreimages as pallet_execution_guard::Preimages>::len(hash)
+    }
+    fn request(hash: H256) -> frame_support::dispatch::DispatchResult {
+        let hash = hash.into();
+        if <Preimage as QueryPreimage>::len(&hash).is_none() {
+            return Err(DispatchError::Other("epoch qualification preimage absent"));
+        }
+        <Preimage as QueryPreimage>::request(&hash);
+        Ok(())
+    }
+    fn unrequest(hash: H256) {
+        let hash = hash.into();
+        if <Preimage as QueryPreimage>::is_requested(&hash) {
+            <Preimage as QueryPreimage>::unrequest(&hash);
+        }
+    }
+}
+
+pub struct RuntimeEpochGuard;
+impl pallet_epoch::ExecutionGuardAccess for RuntimeEpochGuard {
+    fn enqueue(
+        pid: ProposalId,
+        payload_hash: H256,
+        version_constraint: Option<RuntimeVersionConstraint>,
+        maturity: u32,
+        grace: u32,
+        requires_ratification: bool,
+    ) -> frame_support::dispatch::DispatchResult {
+        let proposal = pallet_epoch::Proposals::<Runtime>::get(pid)
+            .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
+            .ok_or(DispatchError::Other("epoch proposal absent"))?;
+        if proposal.payload_hash != payload_hash {
+            return Err(DispatchError::Other("epoch payload binding mismatch"));
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        if !proposal.resources.is_empty() {
+            // No production writer currently projects live machinery/resource
+            // conflicts into the guard's BlockedMeters set. Refuse every
+            // resource-bearing proposal until that bounded source exists.
+            return Err(DispatchError::Other("guard resource source absent"));
+        }
+        let version_constraint =
+            version_constraint.ok_or(DispatchError::Other("epoch version constraint absent"))?;
+        let bytes = <RuntimeGuardPreimages as pallet_execution_guard::Preimages>::fetch(
+            payload_hash,
+            proposal.payload_len,
+        )
+        .ok_or(DispatchError::Other("epoch preimage absent"))?;
+        let mut input = &bytes[..];
+        let calls = pallet_execution_guard::RuntimeBatch::<Runtime>::decode(&mut input)
+            .map_err(|_| DispatchError::Other("epoch preimage is not runtime batch"))?;
+        if !input.is_empty() {
+            return Err(DispatchError::Other("epoch preimage has trailing bytes"));
+        }
+        let mut domains = pallet_execution_guard::StoredDomains::default();
+        for call in &calls {
+            let derived = <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<RuntimeCall>>::rederive_call(call)?;
+            for domain in derived.domains {
+                if !domains.contains(&domain) {
+                    domains
+                        .try_push(domain)
+                        .map_err(|_| DispatchError::Other("epoch domain bound exceeded"))?;
+                }
+            }
+        }
+        let meters =
+            pallet_execution_guard::StoredMeters::try_from(proposal.resources.clone().into_inner())
+                .map_err(|_| DispatchError::Other("epoch resource bound exceeded"))?;
+        let ratify_ref = pallet_execution_guard::Ratifications::<Runtime>::get(pid)
+            .map(|record| record.referendum_index);
+        if requires_ratification && ratify_ref.is_none() {
+            return Err(DispatchError::Other("epoch ratification absent"));
+        }
+        let grace_end = maturity
+            .checked_add(grace)
+            .ok_or(DispatchError::Other("epoch grace-end overflow"))?;
+        let artifact = match calls.iter().find_map(
+            <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
+                RuntimeCall,
+            >>::authorize_upgrade_hash,
+        ) {
+            Some(hash) => hash,
+            None => payload_hash,
+        };
+        let attestation_id = pallet_attestor::Attestations::<Runtime>::get()
+            .into_iter()
+            .find_map(|attestation| {
+                (attestation.pid == pid && attestation.artifact_hash == artifact)
+                    .then_some(attestation.id)
+            });
+        let item = pallet_execution_guard::StoredQueuedExecution {
+            pid,
+            payload_hash,
+            payload_len: proposal.payload_len,
+            class: proposal.class,
+            maturity,
+            grace_end,
+            version_constraint,
+            meters_declared: meters,
+            ratify_ref,
+            ratification_passed: false,
+            attestation_id,
+            pre_upgrade_checkpoint: None,
+            cancelled: false,
+            declared_domains: domains,
+            failed_at: None,
+        };
+        frame_support::storage::with_storage_layer(|| {
+            <Preimage as QueryPreimage>::request(&payload_hash.into());
+            ExecutionGuard::enqueue(RuntimeOrigin::signed(epoch_account()), item, false)
+        })
+    }
+    fn queue_reject_reason(pid: ProposalId) -> Option<futarchy_primitives::RejectReason> {
+        ExecutionGuard::queue_reject_reason(pid)
+    }
+    fn retry_exhausted(pid: ProposalId) -> bool {
+        ExecutionGuard::retry_exhausted(pid)
+    }
+    fn dequeue_terminal(pid: ProposalId) -> frame_support::dispatch::DispatchResult {
+        ExecutionGuard::dequeue_terminal(pid)
+    }
+}
+
+pub struct RuntimeEpochWelfare;
+impl pallet_epoch::WelfareSettlement for RuntimeEpochWelfare {
+    fn compute_settlement(
+        cohort_epoch: EpochId,
+        spec: u16,
+        target: pallet_epoch::SettlementTarget,
+    ) -> Result<FixedU64, DispatchError> {
+        let target = match target {
+            pallet_epoch::SettlementTarget::Proposal {
+                pid,
+                has_gate_books,
+            } => pallet_welfare::SettleTarget::Proposal {
+                pid,
+                has_gate_books,
+            },
+            pallet_epoch::SettlementTarget::Baseline => pallet_welfare::SettleTarget::Baseline,
+        };
+        pallet_welfare::Pallet::<Runtime>::compute_settlement(cohort_epoch, spec, target)?;
+        pallet_welfare::Snapshots::<Runtime>::get((cohort_epoch, spec))
+            .map(|snapshot| snapshot.welfare)
+            .ok_or(DispatchError::Other("welfare settlement snapshot absent"))
+    }
+}
+
+pub struct RuntimeEpochLedger;
+impl pallet_epoch::LedgerResolution for RuntimeEpochLedger {
+    fn create_vault(pid: ProposalId, spec: u16) -> frame_support::dispatch::DispatchResult {
+        if let Some(vault) = pallet_conditional_ledger::Vaults::<Runtime>::get(pid) {
+            return if vault.spec == spec {
+                Ok(())
+            } else {
+                Err(DispatchError::Other("epoch vault spec mismatch"))
+            };
+        }
+        ConditionalLedger::create_vault(RuntimeOrigin::signed(market_account()), pid, spec)
+    }
+    fn resolve(
+        pid: ProposalId,
+        branch: futarchy_primitives::Branch,
+    ) -> frame_support::dispatch::DispatchResult {
+        ConditionalLedger::resolve(RuntimeOrigin::signed(epoch_account()), pid, branch)
+    }
+    fn void(pid: ProposalId) -> frame_support::dispatch::DispatchResult {
+        ConditionalLedger::void(RuntimeOrigin::signed(epoch_account()), pid)
+    }
+}
+
+impl pallet_epoch::Config for Runtime {
+    type Params = RuntimeEpochParams;
+    type Market = RuntimeEpochMarket;
+    type Oracle = RuntimeEpochOracle;
+    type Guardian = RuntimeEpochGuardian;
+    type Attestation = RuntimeEpochAttestation;
+    type Constitution = RuntimeEpochConstitution;
+    type Preimage = RuntimeEpochPreimage;
+    type ExecutionGuard = RuntimeEpochGuard;
+    type Welfare = RuntimeEpochWelfare;
+    type Ledger = RuntimeEpochLedger;
+    type GuardianOrigin = pallet_origins::EnsureGuardianHold;
+    type ExecutionGuardOrigin = EnsureExecutionGuardAccount;
+    type VoidAuthority = pallet_origins::EnsureEmergencyPlaybook;
+    type ConstitutionalValuesOrigin = pallet_origins::EnsureConstitutionalValues;
+    // B9 keeper rebates ride the treasury meter (08 §6.3).
+    type KeeperRebate = FutarchyTreasury;
+    type WeightInfo = crate::weights::pallet_epoch::WeightInfo<Runtime>;
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = RuntimeBenchmarkHelper;
+}
+
+pub struct RuntimeGuardEpoch;
+/// Test-only: whether `pid` exists in the real epoch pallet. B6's runtime e2e
+/// fixtures drive the guard with synthetic pids committed through the test-only
+/// payload store; for those, the epoch callbacks are no-ops (B6's original
+/// pending-handoff behavior). Any pid with real epoch state takes the full
+/// live path.
+#[cfg(test)]
+fn epoch_has_proposal(pid: ProposalId) -> bool {
+    pallet_epoch::Proposals::<Runtime>::contains_key(pid)
+        || pallet_epoch::IntakeProposals::<Runtime>::contains_key(pid)
+}
+
+#[cfg(test)]
+fn test_pending_epoch_payload(pid: ProposalId) -> Option<H256> {
+    sp_io::storage::get(&pending_epoch_payload_key(pid))
+        .and_then(|bytes| H256::decode(&mut &bytes[..]).ok())
+}
+
+impl pallet_execution_guard::EpochHandoff for RuntimeGuardEpoch {
+    fn payload_hash(pid: ProposalId) -> Option<H256> {
+        let live = pallet_epoch::Proposals::<Runtime>::get(pid)
+            .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
+            .map(|proposal| proposal.payload_hash);
+        #[cfg(test)]
+        return live.or_else(|| test_pending_epoch_payload(pid));
+        #[cfg(not(test))]
+        live
+    }
+    fn mark_executed(pid: ProposalId) -> frame_support::dispatch::DispatchResult {
+        #[cfg(test)]
+        if !epoch_has_proposal(pid) {
+            return Ok(());
+        }
+        Epoch::mark_executed(RuntimeOrigin::signed(execution_guard_account()), pid)
+    }
+    fn mark_failed_executed(pid: ProposalId) -> frame_support::dispatch::DispatchResult {
+        #[cfg(test)]
+        if !epoch_has_proposal(pid) {
+            return Ok(());
+        }
+        Epoch::mark_failed_executed(RuntimeOrigin::signed(execution_guard_account()), pid)
+    }
+    fn retry_exhausted_to_measurement(pid: ProposalId) -> frame_support::dispatch::DispatchResult {
+        #[cfg(test)]
+        if !epoch_has_proposal(pid) {
+            return Ok(());
+        }
+        Epoch::retry_exhausted_to_measurement(RuntimeOrigin::signed(execution_guard_account()), pid)
+    }
+    fn reject_or_stale(
+        pid: ProposalId,
+        reason: futarchy_primitives::RejectReason,
+    ) -> frame_support::dispatch::DispatchResult {
+        #[cfg(test)]
+        if !epoch_has_proposal(pid) {
+            let _ = reason;
+            return Ok(());
+        }
+        Epoch::expire_or_stale_queue(
+            RuntimeOrigin::signed(execution_guard_account()),
+            pid,
+            Some(reason),
+        )
+    }
+    fn is_terminal(pid: ProposalId) -> bool {
+        pallet_epoch::Proposals::<Runtime>::get(pid)
+            .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
+            .is_none_or(|proposal| {
+                matches!(
+                    proposal.state,
+                    ProposalState::Rejected(_)
+                        | ProposalState::Executed
+                        | ProposalState::Measuring
+                        | ProposalState::Settled
+                        | ProposalState::Cancelled
+                        | ProposalState::Expired
+                )
+            })
+    }
+}
+
+pub struct RuntimeGuardPreimages;
+impl pallet_execution_guard::Preimages for RuntimeGuardPreimages {
+    fn len(hash: H256) -> Option<u32> {
+        <Preimage as QueryPreimage>::len(&hash.into())
+    }
+    fn fetch(hash: H256, expected_len: u32) -> Option<Vec<u8>> {
+        if expected_len > futarchy_primitives::kernel::MAX_BYTES {
+            return None;
+        }
+        <Preimage as QueryPreimage>::fetch(&hash.into(), Some(expected_len))
+            .ok()
+            .map(Cow::into_owned)
+    }
+    fn unpin(hash: H256) -> frame_support::dispatch::DispatchResult {
+        let hash = hash.into();
+        if <Preimage as QueryPreimage>::is_requested(&hash) {
+            <Preimage as QueryPreimage>::unrequest(&hash);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_payload_hash() -> H256 {
+    benchmark_payload_hash_for(0)
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_payload_hash_for(seed: ProposalId) -> H256 {
+    sp_io::hashing::blake2_256(&benchmark_payload_bytes_for(seed))
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_payload_len() -> u32 {
+    benchmark_payload_bytes().len() as u32
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_payload_bytes() -> Vec<u8> {
+    benchmark_payload_bytes_for(0)
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_payload_bytes_for(seed: ProposalId) -> Vec<u8> {
+    let calls = (0..pallet_execution_guard::MAX_CALLS)
+        .map(|index| {
+            let mut remark = Vec::new();
+            remark.resize(4_000, index as u8);
+            if index == 0 {
+                remark[..core::mem::size_of::<ProposalId>()].copy_from_slice(&seed.to_le_bytes());
+            }
+            RuntimeCall::System(frame_system::Call::remark { remark })
+        })
+        .collect::<Vec<_>>();
+    benchmark_pad_payload(calls)
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_upgrade_payload_bytes(artifact_hash: H256, call_count: u32) -> Vec<u8> {
+    assert!((1..=pallet_execution_guard::MAX_CALLS_BOUND).contains(&call_count));
+    let mut calls = Vec::from([RuntimeCall::System(frame_system::Call::authorize_upgrade {
+        code_hash: artifact_hash.into(),
+    })]);
+    calls.extend((1..call_count).map(|index| {
+        RuntimeCall::System(frame_system::Call::remark {
+            remark: vec![index as u8; 4_000],
+        })
+    }));
+    // With at least one public leaf, fill the payload byte ceiling as well as
+    // the requested call count. A one-call Code batch must be the sole
+    // authorize call, so its smaller payload is the worst admissible case.
+    if call_count > 1 {
+        benchmark_pad_payload(calls)
+    } else {
+        pallet_execution_guard::RuntimeBatch::<Runtime>::truncate_from(calls).encode()
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_pad_payload(mut calls: Vec<RuntimeCall>) -> Vec<u8> {
+    let target = pallet_execution_guard::MAX_PAYLOAD_BYTES as usize;
+    loop {
+        let bytes =
+            pallet_execution_guard::RuntimeBatch::<Runtime>::truncate_from(calls.clone()).encode();
+        match bytes.len().cmp(&target) {
+            core::cmp::Ordering::Equal => return bytes,
+            core::cmp::Ordering::Less => {
+                let RuntimeCall::System(frame_system::Call::remark { remark }) = calls
+                    .last_mut()
+                    .expect("benchmark payload has a final call")
+                else {
+                    unreachable!("benchmark payload's final call is always a System remark")
+                };
+                remark.resize(remark.len().saturating_add(target - bytes.len()), 0xff);
+            }
+            core::cmp::Ordering::Greater => {
+                let RuntimeCall::System(frame_system::Call::remark { remark }) = calls
+                    .last_mut()
+                    .expect("benchmark payload has a final call")
+                else {
+                    unreachable!("benchmark payload's final call is always a System remark")
+                };
+                remark.truncate(remark.len().saturating_sub(bytes.len() - target));
+            }
+        }
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_ensure_payload_preimage(seed: ProposalId) -> (H256, u32) {
+    let bytes = benchmark_payload_bytes_for(seed);
+    let payload_len = bytes.len() as u32;
+    let hash = sp_io::hashing::blake2_256(&bytes);
+    if <Preimage as QueryPreimage>::len(&hash.into()).is_none() {
+        let noted = benchmark_note_preimage(bytes);
+        debug_assert_eq!(noted, hash);
+    }
+    (hash, payload_len)
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_attestations(pid: ProposalId, artifact_hash: H256) {
+    let members = (0..pallet_attestor::MAX_ATTESTORS)
+        .map(|index| pallet_attestor::AttestorInfo {
+            account: [100u8.saturating_add(index as u8); 32],
+            bond: pallet_attestor::ATTESTOR_BOND,
+            false_count: 0,
+            active: true,
+        })
+        .collect::<Vec<_>>();
+    pallet_attestor::Members::<Runtime>::put(frame_support::BoundedVec::truncate_from(members));
+
+    let attestations = (0..pallet_attestor::MAX_ATTESTATIONS)
+        .map(|id| {
+            // Put the two matching records at the tail so both queue-time
+            // binding and execute-time id lookup scan the full 256-entry
+            // attestation ledger before the real quorum scan.
+            let target = id
+                >= pallet_attestor::MAX_ATTESTATIONS
+                    .saturating_sub(futarchy_primitives::kernel::ATT_QUORUM);
+            pallet_attestor::Attestation {
+                id,
+                pid: if target {
+                    pid
+                } else {
+                    100_000u64.saturating_add(u64::from(id))
+                },
+                artifact_hash: if target {
+                    artifact_hash
+                } else {
+                    [id as u8; 32]
+                },
+                statement_hash: [id as u8; 32],
+                attestor: [100u8.saturating_add((id % pallet_attestor::MAX_ATTESTORS) as u8); 32],
+                submitted_at: 0,
+                challenge_deadline: 0,
+                challenge: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    pallet_attestor::Attestations::<Runtime>::put(frame_support::BoundedVec::truncate_from(
+        attestations,
+    ));
+    pallet_attestor::NextAttestationId::<Runtime>::put(pallet_attestor::MAX_ATTESTATIONS);
+}
+
+pub struct RuntimeGuardAttestations;
+impl pallet_execution_guard::Attestations for RuntimeGuardAttestations {
+    fn artifact_hash(attestation_id: u32) -> Option<H256> {
+        pallet_attestor::Attestations::<Runtime>::get()
+            .into_iter()
+            .find_map(|attestation| {
+                (attestation.id == attestation_id).then_some(attestation.artifact_hash)
+            })
+    }
+    fn present_unrevoked_unchallenged(attestation_id: u32) -> bool {
+        pallet_attestor::Attestations::<Runtime>::get()
+            .into_iter()
+            .find(|attestation| attestation.id == attestation_id)
+            .is_some_and(|attestation| {
+                !matches!(
+                    attestation.challenge,
+                    Some(pallet_attestor::ChallengeStatus::Open { .. })
+                        | Some(pallet_attestor::ChallengeStatus::Upheld)
+                )
+            })
+    }
+    fn has_quorum(pid: ProposalId, artifact_hash: H256) -> bool {
+        pallet_attestor::Pallet::<Runtime>::has_quorum(pid, artifact_hash)
+    }
+}
+
+pub struct RuntimeGuardGuardian;
+impl pallet_execution_guard::GuardianState for RuntimeGuardGuardian {
+    fn rerun_held(pid: ProposalId) -> bool {
+        <RuntimeEpochGuardian as pallet_epoch::GuardianAccess>::hold_active(pid)
+    }
+    fn ledger_freeze_active() -> bool {
+        <RuntimeEpochConstitution as pallet_epoch::ConstitutionAccess<AccountId>>::ledger_frozen()
+            || pallet_guardian::Pallet::<Runtime>::playbook_active(
+                pallet_guardian::PlaybookId::LedgerFreeze,
+            )
+    }
+}
+
+pub struct RuntimeGuardParams;
+fn class_index(class: ProposalClass) -> usize {
+    match class {
+        ProposalClass::Param => 0,
+        ProposalClass::Treasury => 1,
+        ProposalClass::Code => 2,
+        ProposalClass::Meta => 3,
+        ProposalClass::Constitutional => 4,
+    }
+}
+impl pallet_execution_guard::Params for RuntimeGuardParams {
+    fn exec_timelock(class: ProposalClass) -> u32 {
+        <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().timelock
+            [class_index(class)]
+    }
+    fn exec_grace(class: ProposalClass) -> u32 {
+        <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().grace[class_index(class)]
+    }
+    fn code_spacing() -> u32 {
+        u32_param(b"code.spacing")
+    }
+}
+
+pub struct RuntimeReleaseChannel;
+impl pallet_execution_guard::ReleaseChannelWriter for RuntimeReleaseChannel {
+    fn on_upgrade_authorized(
+        target_spec_version: u32,
+        authorized_at: u32,
+    ) -> frame_support::dispatch::DispatchResult {
+        let mut bytes = pallet_constitution::ReleaseChannel::<Runtime>::get().bytes;
+        bytes[108..112].copy_from_slice(&System::block_number().to_le_bytes());
+        bytes[112..116].copy_from_slice(&target_spec_version.to_le_bytes());
+        bytes[116..120].copy_from_slice(&authorized_at.to_le_bytes());
+        let flags = u32::from_le_bytes([bytes[164], bytes[165], bytes[166], bytes[167]]) | (1 << 2);
+        bytes[164..168].copy_from_slice(&flags.to_le_bytes());
+        pallet_constitution::Pallet::<Runtime>::note_release_channel(bytes)
+    }
+    fn on_upgrade_applied(target_spec_version: u32) -> frame_support::dispatch::DispatchResult {
+        // Tolerant clear (G-1/SQ-134, PR #65 P1): an applied upgrade cannot be
+        // retried, so a writer-(b) `set_release_channel` rewrite that no longer
+        // shows this pending upgrade is newer and authoritative — leave it
+        // untouched and let the guard record the application. Only a channel
+        // still showing exactly this pending upgrade is cleared (the
+        // authorize-path already wrote `spec_version = target`).
+        let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
+        let mut bytes = channel.bytes;
+        let pending_authorized_at =
+            u32::from_le_bytes([bytes[116], bytes[117], bytes[118], bytes[119]]);
+        let spec_version = u32::from_le_bytes([bytes[112], bytes[113], bytes[114], bytes[115]]);
+        if pending_authorized_at == 0 || spec_version != target_spec_version {
+            return Ok(());
+        }
+        bytes[108..112].copy_from_slice(&System::block_number().to_le_bytes());
+        bytes[116..120].copy_from_slice(&0u32.to_le_bytes());
+        let flags =
+            u32::from_le_bytes([bytes[164], bytes[165], bytes[166], bytes[167]]) & !(1 << 2);
+        bytes[164..168].copy_from_slice(&flags.to_le_bytes());
+        pallet_constitution::Pallet::<Runtime>::note_release_channel(bytes)
+    }
+    fn on_upgrade_aborted(target_spec_version: u32) -> frame_support::dispatch::DispatchResult {
+        // Tolerant clear (G-1/SQ-131 relay-abort ruling): a newer
+        // `set_release_channel` rewrite during the in-flight upgrade is
+        // authoritative — leave it untouched. Only a channel still showing
+        // exactly this pending upgrade is cleared (bump `updated_at`, zero
+        // `pending_authorized_at`, drop the urgent flag; `spec_version` stays
+        // at status quo — the old code keeps running).
+        let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
+        let mut bytes = channel.bytes;
+        let pending_authorized_at =
+            u32::from_le_bytes([bytes[116], bytes[117], bytes[118], bytes[119]]);
+        let spec_version = u32::from_le_bytes([bytes[112], bytes[113], bytes[114], bytes[115]]);
+        if pending_authorized_at == 0 || spec_version != target_spec_version {
+            return Ok(());
+        }
+        bytes[108..112].copy_from_slice(&System::block_number().to_le_bytes());
+        bytes[116..120].copy_from_slice(&0u32.to_le_bytes());
+        let flags =
+            u32::from_le_bytes([bytes[164], bytes[165], bytes[166], bytes[167]]) & !(1 << 2);
+        bytes[164..168].copy_from_slice(&flags.to_le_bytes());
+        pallet_constitution::Pallet::<Runtime>::note_release_channel(bytes)
+    }
+}
+
+impl pallet_execution_guard::Config for Runtime {
+    type Epoch = RuntimeGuardEpoch;
+    type EnqueueAuthority = EnsureEpochAccount;
+    type Attestations = RuntimeGuardAttestations;
+    type Guardian = RuntimeGuardGuardian;
+    type Params = RuntimeGuardParams;
+    // B6's two new pallet seams (upgrade path e2e): guard-side capability
+    // projection and the parachain-system upgrade-schedule/migrations bridge.
+    type Capabilities = RuntimeCapabilities;
+    type UpgradeSchedule = RuntimeUpgradeSchedule;
+    type Preimages = RuntimeGuardPreimages;
+    type ReleaseChannel = RuntimeReleaseChannel;
+    type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
+    type Dispatcher = crate::classifier::RuntimeDispatcher;
+    type MaxRuntimeCodeBytes = ConstU32<2_097_152>;
+    // B9 keeper rebates ride the treasury meter (08 §6.3).
+    type KeeperRebate = FutarchyTreasury;
+    type WeightInfo = crate::weights::pallet_execution_guard::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
@@ -1602,143 +2821,6 @@ pub(crate) fn set_test_execution_payload(
 /// Slot 61 is intentionally still empty. This adapter makes every production
 /// enqueue fail its immutable epoch commitment check and makes terminal
 /// callbacks no-ops; only cfg-gated tests/benchmarks can seed a commitment.
-pub struct PendingEpochHandoff;
-impl pallet_execution_guard::EpochHandoff for PendingEpochHandoff {
-    fn payload_hash(pid: futarchy_primitives::ProposalId) -> Option<futarchy_primitives::H256> {
-        #[cfg(any(test, feature = "runtime-benchmarks"))]
-        {
-            sp_io::storage::get(&pending_epoch_payload_key(pid))
-                .and_then(|bytes| Decode::decode(&mut &bytes[..]).ok())
-        }
-        #[cfg(not(any(test, feature = "runtime-benchmarks")))]
-        {
-            let _ = pid;
-            None
-        }
-    }
-    fn mark_executed(_: futarchy_primitives::ProposalId) -> DispatchResult {
-        Ok(())
-    }
-    fn mark_failed_executed(_: futarchy_primitives::ProposalId) -> DispatchResult {
-        Ok(())
-    }
-    fn retry_exhausted_to_measurement(_: futarchy_primitives::ProposalId) -> DispatchResult {
-        Ok(())
-    }
-    fn reject_or_stale(
-        _: futarchy_primitives::ProposalId,
-        _: futarchy_primitives::RejectReason,
-    ) -> DispatchResult {
-        Ok(())
-    }
-    fn is_terminal(_: futarchy_primitives::ProposalId) -> bool {
-        false
-    }
-}
-
-/// Only A8 may enqueue (I-9). Until slot 61 is wired, production rejects every
-/// origin. A sentinel exists solely in test/benchmark builds.
-pub struct PendingExecutionEnqueueAuthority;
-#[cfg(any(test, feature = "runtime-benchmarks"))]
-const EXECUTION_ENQUEUE_TEST_ACCOUNT: [u8; 32] = [242; 32];
-impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for PendingExecutionEnqueueAuthority {
-    type Success = ();
-    fn try_origin(origin: RuntimeOrigin) -> Result<(), RuntimeOrigin> {
-        #[cfg(any(test, feature = "runtime-benchmarks"))]
-        {
-            let raw: Result<frame_system::RawOrigin<AccountId>, RuntimeOrigin> =
-                origin.clone().into();
-            if matches!(raw, Ok(frame_system::RawOrigin::Signed(who)) if who == AccountId::new(EXECUTION_ENQUEUE_TEST_ACCOUNT))
-            {
-                return Ok(());
-            }
-        }
-        Err(origin)
-    }
-    #[cfg(feature = "runtime-benchmarks")]
-    fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
-        Ok(RuntimeOrigin::signed(AccountId::new(
-            EXECUTION_ENQUEUE_TEST_ACCOUNT,
-        )))
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn test_execution_enqueue_origin() -> RuntimeOrigin {
-    RuntimeOrigin::signed(AccountId::new(EXECUTION_ENQUEUE_TEST_ACCOUNT))
-}
-
-pub struct RuntimeAttestations;
-impl pallet_execution_guard::Attestations for RuntimeAttestations {
-    fn artifact_hash(attestation_id: u32) -> Option<futarchy_primitives::H256> {
-        pallet_attestor::Attestations::<Runtime>::get()
-            .into_iter()
-            .find_map(|record| (record.id == attestation_id).then_some(record.artifact_hash))
-    }
-    fn present_unrevoked_unchallenged(attestation_id: u32) -> bool {
-        let record = pallet_attestor::Attestations::<Runtime>::get()
-            .into_iter()
-            .find(|record| record.id == attestation_id);
-        record.is_some_and(|record| {
-            matches!(
-                record.challenge,
-                None | Some(pallet_attestor::ChallengeStatus::Upheld)
-            ) && pallet_attestor::Members::<Runtime>::get()
-                .iter()
-                .any(|member| member.account == record.attestor && member.active)
-        })
-    }
-    fn has_quorum(
-        pid: futarchy_primitives::ProposalId,
-        artifact_hash: futarchy_primitives::H256,
-    ) -> bool {
-        crate::Attestor::has_quorum(pid, artifact_hash)
-    }
-}
-
-pub struct RuntimeGuardianState;
-impl pallet_execution_guard::GuardianState for RuntimeGuardianState {
-    fn rerun_held(pid: futarchy_primitives::ProposalId) -> bool {
-        // Slot 61 is not wired, so the exact A8 `in_rerun` bit is not yet
-        // available. Conservatively retain the hold while the dispatched
-        // guardian action remains live; unlike `RerunUsed`, this is not a
-        // lifetime veto on an adopted rerun that later re-enters the queue.
-        pallet_guardian::PendingActions::<Runtime>::get()
-            .iter()
-            .any(|action| {
-                action.dispatched
-                    && matches!(
-                        action.power,
-                        pallet_guardian::GuardianPower::DelayOnce { pid: held }
-                            | pallet_guardian::GuardianPower::ForceRerun { pid: held }
-                            if held == pid
-                    )
-            })
-    }
-    fn ledger_freeze_active() -> bool {
-        crate::Guardian::playbook_active(pallet_guardian::PlaybookId::LedgerFreeze)
-    }
-}
-
-pub struct ExecutionParams;
-impl pallet_execution_guard::Params for ExecutionParams {
-    fn exec_timelock(class: futarchy_primitives::ProposalClass) -> BlockNumber {
-        match class {
-            futarchy_primitives::ProposalClass::Param => u32_param(b"exec.lock.param"),
-            futarchy_primitives::ProposalClass::Treasury => u32_param(b"exec.lock.trs"),
-            futarchy_primitives::ProposalClass::Code => u32_param(b"exec.lock.code"),
-            futarchy_primitives::ProposalClass::Meta => u32_param(b"exec.lock.meta"),
-            futarchy_primitives::ProposalClass::Constitutional => 0,
-        }
-    }
-    fn exec_grace(_: futarchy_primitives::ProposalClass) -> BlockNumber {
-        u32_param(b"exec.grace")
-    }
-    fn code_spacing() -> BlockNumber {
-        u32_param(b"code.spacing")
-    }
-}
-
 pub struct RuntimeCapabilities;
 impl RuntimeCapabilities {
     fn enabled(
@@ -1777,7 +2859,7 @@ impl RuntimeCapabilities {
             ) => Self::enabled(class, pallet_constitution::Capability::TreasurySpend),
             _ => {
                 let Ok(analysis) =
-                    <RuntimeBatchDispatcher as pallet_execution_guard::BatchDispatcher<
+                    <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
                         RuntimeCall,
                     >>::rederive_call(call)
                 else {
@@ -1833,128 +2915,6 @@ impl pallet_execution_guard::Capabilities<RuntimeCall> for RuntimeCapabilities {
     }
 }
 
-pub struct RuntimePreimages;
-impl pallet_execution_guard::Preimages for RuntimePreimages {
-    fn len(hash: futarchy_primitives::H256) -> Option<u32> {
-        <Preimage as QueryPreimage>::len(&Hash::from(hash))
-    }
-    fn fetch(hash: futarchy_primitives::H256) -> Option<Vec<u8>> {
-        <Preimage as QueryPreimage>::fetch(&Hash::from(hash), None)
-            .ok()
-            .map(Cow::into_owned)
-    }
-    fn unpin(hash: futarchy_primitives::H256) -> DispatchResult {
-        let hash = Hash::from(hash);
-        if !<Preimage as QueryPreimage>::is_requested(&hash) {
-            return Err(DispatchError::Unavailable);
-        }
-        <Preimage as QueryPreimage>::unrequest(&hash);
-        Ok(())
-    }
-}
-
-fn write_release_u32(
-    bytes: &mut [u8; pallet_constitution::RELEASE_CHANNEL_LEN],
-    range: core::ops::Range<usize>,
-    value: u32,
-) -> DispatchResult {
-    let slot = bytes
-        .get_mut(range)
-        .ok_or(DispatchError::Other("release channel offset"))?;
-    slot.copy_from_slice(&value.to_le_bytes());
-    Ok(())
-}
-
-pub struct RuntimeReleaseChannel;
-impl pallet_execution_guard::ReleaseChannelWriter for RuntimeReleaseChannel {
-    fn on_upgrade_authorized(
-        target_spec_version: u32,
-        authorized_at: BlockNumber,
-    ) -> DispatchResult {
-        let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
-        let mut bytes = channel.bytes;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_UPDATED_AT,
-            authorized_at,
-        )?;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_SPEC_VERSION,
-            target_spec_version,
-        )?;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_PENDING_AUTHORIZED_AT,
-            authorized_at,
-        )?;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_FLAGS,
-            channel.flags() | pallet_constitution::RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
-        )?;
-        crate::Constitution::note_release_channel(bytes)
-    }
-    fn on_upgrade_applied(target_spec_version: u32) -> DispatchResult {
-        let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
-        // Tolerant clear (G-1/SQ-134, PR #65 P1): the caller has already
-        // verified the installed `:code` hash and version — an applied
-        // upgrade cannot be retried, so a writer-(b) `set_release_channel`
-        // rewrite that no longer shows this pending upgrade must not wedge
-        // `PendingUpgrade`. Writer (b)'s newer value is authoritative; leave
-        // it untouched and let the guard record the application.
-        if channel.pending_authorized_at() == 0 || channel.spec_version() != target_spec_version {
-            return Ok(());
-        }
-        let mut bytes = channel.bytes;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_UPDATED_AT,
-            System::block_number(),
-        )?;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_PENDING_AUTHORIZED_AT,
-            0,
-        )?;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_FLAGS,
-            channel.flags() & !pallet_constitution::RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
-        )?;
-        crate::Constitution::note_release_channel(bytes)
-    }
-    fn on_upgrade_aborted(target_spec_version: u32) -> DispatchResult {
-        let channel = pallet_constitution::ReleaseChannel::<Runtime>::get();
-        // Tolerant clear (G-1/SQ-131): a writer-(b) `set_release_channel`
-        // rewrite during the in-flight upgrade is newer and authoritative —
-        // leave it untouched and still let the guard restore its status quo.
-        // Only a channel that still shows exactly this pending upgrade is
-        // cleared (bump `updated_at`, zero pending, drop URGENT — the same
-        // writer-(a) shape as the applied-path clear, SQ-133 offsets).
-        if channel.pending_authorized_at() == 0 || channel.spec_version() != target_spec_version {
-            return Ok(());
-        }
-        let mut bytes = channel.bytes;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_UPDATED_AT,
-            System::block_number(),
-        )?;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_PENDING_AUTHORIZED_AT,
-            0,
-        )?;
-        write_release_u32(
-            &mut bytes,
-            pallet_constitution::RELEASE_CHANNEL_FLAGS,
-            channel.flags() & !pallet_constitution::RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
-        )?;
-        crate::Constitution::note_release_channel(bytes)
-    }
-}
-
 pub struct RuntimeUpgradeSchedule;
 impl pallet_execution_guard::UpgradeSchedule for RuntimeUpgradeSchedule {
     fn scheduling_performed() -> bool {
@@ -1966,129 +2926,12 @@ impl pallet_execution_guard::UpgradeSchedule for RuntimeUpgradeSchedule {
     }
 }
 
-fn guard_domain(
-    domain: origins_core::CallDomain,
-) -> Result<pallet_execution_guard::CallDomain, DispatchError> {
-    match domain {
-        origins_core::CallDomain::Public => Ok(pallet_execution_guard::CallDomain::Public),
-        origins_core::CallDomain::Param => Ok(pallet_execution_guard::CallDomain::Param),
-        origins_core::CallDomain::Treasury => Ok(pallet_execution_guard::CallDomain::Treasury),
-        origins_core::CallDomain::Code => Ok(pallet_execution_guard::CallDomain::Code),
-        origins_core::CallDomain::Meta => Ok(pallet_execution_guard::CallDomain::Meta),
-        origins_core::CallDomain::InternalRoot => {
-            Ok(pallet_execution_guard::CallDomain::InternalRootApplyUpgrade)
-        }
-        origins_core::CallDomain::Nobody
-        | origins_core::CallDomain::ConstitutionalValues
-        | origins_core::CallDomain::OracleResolution
-        | origins_core::CallDomain::GuardianHold
-        | origins_core::CallDomain::EmergencyPlaybook => {
-            Err(DispatchError::Other("guard-inadmissible call domain"))
-        }
-    }
-}
-
-fn collect_guard_domains(
-    call: &origins_core::RuntimeCall,
-    domains: &mut pallet_execution_guard::ReDerivedDomains,
-    nested_calls: &mut u32,
-) -> DispatchResult {
-    *nested_calls = nested_calls
-        .checked_add(1)
-        .ok_or(DispatchError::Other("guard nested-call overflow"))?;
-    match call {
-        origins_core::RuntimeCall::Leaf(domain) => {
-            let domain = guard_domain(*domain)?;
-            if !domains.contains(&domain) {
-                domains
-                    .try_push(domain)
-                    .map_err(|_| DispatchError::Other("too many guard domains"))?;
-            }
-        }
-        origins_core::RuntimeCall::UtilityBatch(calls)
-        | origins_core::RuntimeCall::UtilityBatchAll(calls)
-        | origins_core::RuntimeCall::UtilityForceBatch(calls) => {
-            for call in calls {
-                collect_guard_domains(call, domains, nested_calls)?;
-            }
-        }
-        origins_core::RuntimeCall::UtilityDispatchAs(call)
-        | origins_core::RuntimeCall::UtilityAsDerivative(call)
-        | origins_core::RuntimeCall::UtilityWithWeight(call)
-        | origins_core::RuntimeCall::Proxy(call)
-        | origins_core::RuntimeCall::ProxyAnnounced(call)
-        | origins_core::RuntimeCall::MultisigAsMulti(call)
-        | origins_core::RuntimeCall::MultisigAsMultiThreshold1(call)
-        | origins_core::RuntimeCall::Sudo(call) => {
-            collect_guard_domains(&call.0, domains, nested_calls)?;
-        }
-        origins_core::RuntimeCall::Scheduler { call, .. } => {
-            collect_guard_domains(&call.0, domains, nested_calls)?;
-        }
-        origins_core::RuntimeCall::MultisigApproveAsMulti => {}
-    }
-    Ok(())
-}
-
-fn guard_has_non_atomic_wrapper(call: &origins_core::RuntimeCall) -> bool {
-    match call {
-        origins_core::RuntimeCall::UtilityBatch(_)
-        | origins_core::RuntimeCall::UtilityForceBatch(_)
-        | origins_core::RuntimeCall::Sudo(_) => true,
-        origins_core::RuntimeCall::UtilityBatchAll(calls) => {
-            calls.iter().any(guard_has_non_atomic_wrapper)
-        }
-        origins_core::RuntimeCall::UtilityDispatchAs(call)
-        | origins_core::RuntimeCall::UtilityAsDerivative(call)
-        | origins_core::RuntimeCall::UtilityWithWeight(call)
-        | origins_core::RuntimeCall::Proxy(call)
-        | origins_core::RuntimeCall::ProxyAnnounced(call)
-        | origins_core::RuntimeCall::MultisigAsMulti(call)
-        | origins_core::RuntimeCall::MultisigAsMultiThreshold1(call) => {
-            guard_has_non_atomic_wrapper(&call.0)
-        }
-        origins_core::RuntimeCall::Scheduler { call, .. } => guard_has_non_atomic_wrapper(&call.0),
-        origins_core::RuntimeCall::Leaf(_) | origins_core::RuntimeCall::MultisigApproveAsMulti => {
-            false
-        }
-    }
-}
-
-fn runtime_call_contains_apply(call: &RuntimeCall) -> bool {
-    match call {
-        RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { .. }) => true,
-        RuntimeCall::Utility(
-            pallet_utility::Call::batch { calls }
-            | pallet_utility::Call::batch_all { calls }
-            | pallet_utility::Call::force_batch { calls },
-        ) => calls.iter().any(runtime_call_contains_apply),
-        RuntimeCall::Utility(
-            pallet_utility::Call::as_derivative { call, .. }
-            | pallet_utility::Call::dispatch_as { call, .. }
-            | pallet_utility::Call::with_weight { call, .. },
-        )
-        | RuntimeCall::Proxy(
-            pallet_proxy::Call::proxy { call, .. }
-            | pallet_proxy::Call::proxy_announced { call, .. },
-        )
-        | RuntimeCall::Multisig(
-            pallet_multisig::Call::as_multi { call, .. }
-            | pallet_multisig::Call::as_multi_threshold_1 { call, .. },
-        )
-        | RuntimeCall::Sudo(
-            pallet_sudo::Call::sudo { call }
-            | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
-        ) => runtime_call_contains_apply(call),
-        _ => false,
-    }
-}
-
 /// Exact stable2603 pre-write checks performed by
 /// `cumulus_pallet_parachain_system::schedule_code_upgrade`. Frame-system
 /// removes `AuthorizedUpgrade` before invoking `OnSetCode`, and a direct
 /// dispatch is not transactional, so every typed Cumulus rejection must be
 /// refused by the filter before frame-system can consume the authorization.
-fn parachain_upgrade_preflight(code: &[u8]) -> DispatchResult {
+pub(crate) fn parachain_upgrade_preflight(code: &[u8]) -> DispatchResult {
     use cumulus_pallet_parachain_system as parachain_system;
 
     if !parachain_system::ValidationData::<Runtime>::exists() {
@@ -2110,149 +2953,6 @@ fn parachain_upgrade_preflight(code: &[u8]) -> DispatchResult {
     Ok(())
 }
 
-pub struct RuntimeBatchDispatcher;
-impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeBatchDispatcher {
-    fn rederive_call(
-        call: &RuntimeCall,
-    ) -> Result<pallet_execution_guard::ReDerivedCall, DispatchError> {
-        if Self::authorize_upgrade_hash(call).is_some() {
-            let mut domains = pallet_execution_guard::ReDerivedDomains::default();
-            domains
-                .try_push(pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade)
-                .map_err(|_| DispatchError::Other("authorize domain bound"))?;
-            return Ok(pallet_execution_guard::ReDerivedCall {
-                domains,
-                nested_calls: 1,
-            });
-        }
-        let projected = crate::classifier::project_for_guard(call);
-        let mut domains = pallet_execution_guard::ReDerivedDomains::default();
-        let mut nested_calls = 0;
-        collect_guard_domains(&projected, &mut domains, &mut nested_calls)?;
-        if runtime_call_contains_apply(call)
-            && !domains.contains(&pallet_execution_guard::CallDomain::InternalRootApplyUpgrade)
-        {
-            domains
-                .try_push(pallet_execution_guard::CallDomain::InternalRootApplyUpgrade)
-                .map_err(|_| DispatchError::Other("apply domain bound"))?;
-        }
-        Ok(pallet_execution_guard::ReDerivedCall {
-            domains,
-            nested_calls,
-        })
-    }
-
-    fn safety_filter(class: futarchy_primitives::ProposalClass, call: &RuntimeCall) -> bool {
-        let projected = crate::classifier::project_for_guard(call);
-        if guard_has_non_atomic_wrapper(&projected) {
-            return false;
-        }
-        origins_core::Origin::from_proposal_class(class).is_some_and(|origin| {
-            crate::classifier::RuntimeBaseCallFilter::contains_for(origin, call)
-        })
-    }
-
-    fn authorize_upgrade_hash(call: &RuntimeCall) -> Option<futarchy_primitives::H256> {
-        match call {
-            RuntimeCall::System(frame_system::Call::authorize_upgrade { code_hash }) => {
-                Some(code_hash.0)
-            }
-            _ => None,
-        }
-    }
-
-    fn dispatch_with_class_origin(
-        call: RuntimeCall,
-        class: futarchy_primitives::ProposalClass,
-    ) -> DispatchResult {
-        let class_origin =
-            origins_core::Origin::from_proposal_class(class).ok_or(DispatchError::BadOrigin)?;
-        if !crate::classifier::RuntimeBaseCallFilter::contains_for(class_origin, &call) {
-            return Err(DispatchError::Other("guard dispatch-time safety filter"));
-        }
-        let origin = pallet_origins::Origin::from(class_origin);
-        call.dispatch_bypass_filter(RuntimeOrigin::from(origin))
-            .map(|_| ())
-            .map_err(|error| error.error)
-    }
-
-    fn dispatch_authorize_upgrade(code_hash: futarchy_primitives::H256) -> DispatchResult {
-        let call = RuntimeCall::System(frame_system::Call::authorize_upgrade {
-            code_hash: Hash::from(code_hash),
-        });
-        call.dispatch_bypass_filter(RuntimeOrigin::root())
-            .map(|_| ())
-            .map_err(|error| error.error)
-    }
-
-    fn dispatch_apply_authorized_upgrade(code: Vec<u8>) -> DispatchResult {
-        frame_support::storage::with_storage_layer(|| {
-            parachain_upgrade_preflight(&code)?;
-
-            // PB-MIGRATION's rollback is a forward remediation upgrade. The
-            // stock frame-system preflight rejects every non-empty MBM cursor,
-            // so only an actually stuck cursor, or a still-live active stall
-            // backed by the migration failure/stall sources, is retired before
-            // scheduling. Unrelated alarms and resumed/healthy active work do
-            // not make a cursor disposable.
-            let retire_cursor = match pallet_migrations::Cursor::<Runtime>::get() {
-                Some(pallet_migrations::MigrationCursor::Stuck) => true,
-                Some(pallet_migrations::MigrationCursor::Active(ref cursor)) => {
-                    MigrationHaltSources::get() & (MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT)
-                        != 0
-                        && active_migration_stall_is_live(cursor)
-                }
-                None => false,
-            };
-            if retire_cursor {
-                pallet_migrations::Cursor::<Runtime>::kill();
-                MigrationProgressMarker::kill();
-            } else {
-                #[cfg(not(feature = "runtime-benchmarks"))]
-                System::can_set_code(&code, true).into_result()?;
-            }
-
-            let call = RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code });
-            call.dispatch(RuntimeOrigin::none())
-                .map(|_| ())
-                .map_err(|error| error.error)
-        })
-    }
-
-    fn observed_runtime_version(
-        code: &[u8],
-    ) -> Option<futarchy_primitives::RuntimeVersionConstraint> {
-        let decoded = sp_io::misc::runtime_version(code)
-            .and_then(|bytes| sp_version::RuntimeVersion::decode(&mut &bytes[..]).ok());
-        #[cfg(feature = "runtime-benchmarks")]
-        let decoded = decoded.or_else(|| {
-            let mut version = VERSION;
-            version.spec_version = version.spec_version.saturating_add(1);
-            Some(version)
-        });
-        let version = decoded?;
-        let spec_name = futarchy_primitives::BoundedVec::<u8, 32>::try_from(
-            version.spec_name.as_bytes().to_vec(),
-        )
-        .ok()?;
-        Some(futarchy_primitives::RuntimeVersionConstraint {
-            spec_name,
-            spec_version: version.spec_version,
-        })
-    }
-
-    fn checkpoint() -> (futarchy_primitives::H256, futarchy_primitives::H256) {
-        let parent_hash = System::parent_hash().0;
-        let root = sp_io::storage::root(VERSION.state_version());
-        let state_root = Hash::decode(&mut &root[..]).map_or([0; 32], |hash| hash.0);
-        (parent_hash, state_root)
-    }
-}
-
-/// The origin-blind base filter admits the permissionless frame-system apply
-/// call only after reproducing every artifact-dependent guard precondition.
-/// This prevents a direct call from consuming `AuthorizedUpgrade` with the
-/// wrong version or while pallet-migrations is active.
 pub(crate) fn direct_system_upgrade_allowed(code: &[u8]) -> bool {
     let Some(pending) = pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() else {
         return false;
@@ -2260,9 +2960,11 @@ pub(crate) fn direct_system_upgrade_allowed(code: &[u8]) -> bool {
     if sp_io::hashing::blake2_256(code) != pending.hash {
         return false;
     }
-    let Some(observed) = <RuntimeBatchDispatcher as pallet_execution_guard::BatchDispatcher<
-        RuntimeCall,
-    >>::observed_runtime_version(code) else {
+    let Some(observed) =
+        <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
+            RuntimeCall,
+        >>::observed_runtime_version(code)
+    else {
         return false;
     };
     let Some(current) = pallet_execution_guard::CurrentSpecName::<Runtime>::get() else {
@@ -2333,7 +3035,7 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
             sp_io::storage::get(sp_core::storage::well_known_keys::CODE).is_some_and(|code| {
                 let hash = sp_io::hashing::blake2_256(&code);
                 let observed =
-                    <RuntimeBatchDispatcher as pallet_execution_guard::BatchDispatcher<
+                    <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
                         RuntimeCall,
                     >>::observed_runtime_version(&code);
                 pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_some_and(
@@ -2373,27 +3075,121 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
     }
 }
 
-impl pallet_execution_guard::Config for Runtime {
-    type Epoch = PendingEpochHandoff;
-    type EnqueueAuthority = PendingExecutionEnqueueAuthority;
-    type Attestations = RuntimeAttestations;
-    type KeeperRebate = FutarchyTreasury;
-    type Guardian = RuntimeGuardianState;
-    type Params = ExecutionParams;
-    type Capabilities = RuntimeCapabilities;
-    type UpgradeSchedule = RuntimeUpgradeSchedule;
-    type Preimages = RuntimePreimages;
-    type ReleaseChannel = RuntimeReleaseChannel;
-    type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
-    type Dispatcher = RuntimeBatchDispatcher;
-    type MaxRuntimeCodeBytes = ConstU32<{ pallet_preimage::MAX_SIZE }>;
-    type WeightInfo = pallet_execution_guard::weights::SubstrateWeight<Runtime>;
-    #[cfg(feature = "runtime-benchmarks")]
-    type BenchmarkHelper = RuntimeBenchmarkHelper;
+#[cfg(feature = "runtime-benchmarks")]
+pub struct RuntimeBenchmarkHelper;
+
+#[cfg(feature = "runtime-benchmarks")]
+const BENCHMARK_KEEPER_REBATE: Balance = currency::USDC;
+#[cfg(feature = "runtime-benchmarks")]
+const BENCHMARK_REBATE_LINE_BALANCE: Balance = 100 * currency::USDC;
+
+/// Prime every storage/custody dependency of `do_keeper_rebate` so benchmark
+/// dispatches measure the full successful payout path, never the zero-pay or
+/// exhausted-latch path.
+#[cfg(feature = "runtime-benchmarks")]
+pub(crate) fn prime_keeper_rebate_worst_case() {
+    let key = pallet_constitution::key16(b"keeper.rebate");
+    pallet_constitution::Params::<Runtime>::insert(
+        key,
+        pallet_constitution::ParamRecord {
+            key,
+            value: pallet_constitution::ParamValue::Balance(BENCHMARK_KEEPER_REBATE),
+            min: pallet_constitution::ParamValue::Balance(1),
+            max: pallet_constitution::ParamValue::Balance(Balance::MAX),
+            max_delta: None,
+            cooldown_epochs: 0,
+            last_changed_epoch: 0,
+            class: pallet_constitution::ParamClass::Param,
+            kernel_bounded: false,
+        },
+    );
+
+    pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+        for line in [
+            pallet_futarchy_treasury::BudgetLine::Keeper,
+            pallet_futarchy_treasury::BudgetLine::Oracle,
+        ] {
+            if let Some((_, balance)) = state.lines.iter_mut().find(|(stored, _)| *stored == line) {
+                *balance = BENCHMARK_REBATE_LINE_BALANCE;
+            } else {
+                state
+                    .lines
+                    .try_push((line, BENCHMARK_REBATE_LINE_BALANCE))
+                    .expect("benchmark treasury has room for rebate lines");
+            }
+        }
+        state.keeper_meter = pallet_futarchy_treasury::KeeperMeter {
+            epoch: <LiveEpochClock as frame_support::traits::Get<EpochId>>::get(),
+            ..Default::default()
+        };
+    });
+
+    for pot in [treasury_keeper_account(), treasury_oracle_account()] {
+        let balance = <ForeignAssets as Inspect<AccountId>>::balance(USDC_ASSET_ID, &pot);
+        if balance < BENCHMARK_REBATE_LINE_BALANCE {
+            <ForeignAssets as Mutate<AccountId>>::mint_into(
+                USDC_ASSET_ID,
+                &pot,
+                BENCHMARK_REBATE_LINE_BALANCE - balance,
+            )
+            .expect("benchmark rebate pot funding must succeed");
+        }
+    }
 }
 
 #[cfg(feature = "runtime-benchmarks")]
-pub struct RuntimeBenchmarkHelper;
+fn assert_keeper_rebate_was_paid(class: CrankClass) {
+    let state = pallet_futarchy_treasury::State::<Runtime>::get();
+    let line = match class {
+        CrankClass::OracleLine => pallet_futarchy_treasury::BudgetLine::Oracle,
+        CrankClass::DecisionCritical | CrankClass::General => {
+            pallet_futarchy_treasury::BudgetLine::Keeper
+        }
+    };
+    let line_balance = state
+        .lines
+        .iter()
+        .find_map(|(stored, balance)| (*stored == line).then_some(*balance));
+    assert_eq!(
+        line_balance,
+        Some(BENCHMARK_REBATE_LINE_BALANCE - BENCHMARK_KEEPER_REBATE),
+        "benchmark crank must debit the funded rebate line"
+    );
+    match class {
+        CrankClass::OracleLine => {}
+        CrankClass::DecisionCritical => {
+            assert_eq!(state.keeper_meter.spent, BENCHMARK_KEEPER_REBATE);
+            assert_eq!(state.keeper_meter.general_spent, 0);
+        }
+        CrankClass::General => {
+            assert_eq!(state.keeper_meter.spent, BENCHMARK_KEEPER_REBATE);
+            assert_eq!(state.keeper_meter.general_spent, BENCHMARK_KEEPER_REBATE);
+        }
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+macro_rules! benchmark_keeper_rebate_hooks {
+    () => {
+        fn prime_keeper_rebate() {
+            prime_keeper_rebate_worst_case();
+        }
+
+        fn assert_keeper_rebate_paid(class: CrankClass) {
+            assert_keeper_rebate_was_paid(class);
+        }
+    };
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_conditional_ledger::BenchmarkHelper for RuntimeBenchmarkHelper {
+    benchmark_keeper_rebate_hooks!();
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_market::BenchmarkHelper for RuntimeBenchmarkHelper {
+    benchmark_keeper_rebate_hooks!();
+}
 
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_constitution::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
@@ -2429,30 +3225,118 @@ impl pallet_constitution::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHel
 }
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_welfare::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
+    benchmark_keeper_rebate_hooks!();
+
     fn metric_governance_origin() -> RuntimeOrigin {
         pallet_origins::Origin::ConstitutionalValues.into()
+    }
+    fn prime_finalized_epoch(epoch: EpochId) {
+        pallet_epoch::EpochOf::<Runtime>::mutate(|info| {
+            info.index = epoch.saturating_add(1);
+        });
+    }
+    fn prime_metric_inputs(_: u16) {
+        // RuntimeMetricInputs derives all active benchmark components from the
+        // live MetricSpecs map, so no additional storage fixture is required.
     }
 }
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
+    benchmark_keeper_rebate_hooks!();
+
     fn adjudication_origin() -> RuntimeOrigin {
         pallet_origins::Origin::OracleResolution.into()
+    }
+    fn prime_reporting(component: u16, epoch: EpochId, version: u16) {
+        pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = epoch);
+        pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
+            schedule.epoch_start_block = 0;
+            schedule.length =
+                <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().epoch_length;
+            schedule.next_length = schedule.length;
+        });
+        let spec = pallet_welfare::MetricSpec {
+            id: component,
+            version,
+            pillar: pallet_welfare::Pillar::A,
+            weight: FixedU64(1_000_000_000),
+            epsilon_floor: FixedU64(1),
+            activation_epoch: epoch,
+            source: pallet_welfare::SourceClass::Attested,
+            formula_ref: [1; 32],
+            units: [2; 16],
+            repr: [3; 16],
+            cadence_blocks: 1,
+            sanity_min: FixedU64(0),
+            sanity_max: FixedU64(1_000_000_000),
+            has_normalization_rule: true,
+            has_missing_data_rule: true,
+            has_gaming_vectors: true,
+            has_challenge_procedure: true,
+            prior_bounds: [FixedU64(1_000_000_000); pallet_welfare::HISTORY_PRIORS],
+        };
+        pallet_welfare::MetricSpecs::<Runtime>::insert(
+            version,
+            frame_support::BoundedVec::truncate_from(Vec::from([spec])),
+        );
     }
 }
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_registry::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmarkHelper {
+    benchmark_keeper_rebate_hooks!();
+
     fn resolution_origin() -> RuntimeOrigin {
         pallet_origins::Origin::OracleResolution.into()
     }
     fn funded_account(seed: u8) -> AccountId {
-        AccountId32::new([seed; 32])
+        let who = AccountId32::new([seed; 32]);
+        let reserve = currency::USDC.saturating_mul(1_000_000);
+        let _ = <ForeignAssets as frame_support::traits::fungibles::Mutate<AccountId>>::mint_into(
+            USDC_ASSET_ID,
+            &who,
+            reserve,
+        );
+        for sovereign in [
+            IncidentPalletId::get().into_account_truncating(),
+            MilestonePalletId::get().into_account_truncating(),
+        ] {
+            let _ =
+                <ForeignAssets as frame_support::traits::fungibles::Mutate<AccountId>>::mint_into(
+                    USDC_ASSET_ID,
+                    &sovereign,
+                    reserve,
+                );
+        }
+        who
     }
-    fn register_watchtower(_: &AccountId) {}
+    fn register_watchtower(who: &AccountId) {
+        let _ = pallet_oracle::Pallet::<Runtime>::register_watchtower(RuntimeOrigin::signed(
+            who.clone(),
+        ));
+    }
+    fn prime_epoch(epoch: EpochId) {
+        <RuntimeBenchmarkHelper as pallet_oracle::BenchmarkHelper<RuntimeOrigin>>::prime_reporting(
+            1, epoch, 1,
+        );
+        pallet_epoch::CohortSchedules::<Runtime>::insert(
+            epoch.saturating_sub(1),
+            pallet_epoch::CohortSchedule {
+                epoch: epoch.saturating_sub(1),
+                creation_epoch_length:
+                    <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().epoch_length,
+                measurement_until: epoch,
+                settlement_epoch: epoch.saturating_add(1),
+                specs: frame_support::BoundedVec::truncate_from(Vec::from([(1, 1)])),
+            },
+        );
+    }
 }
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_futarchy_treasury::BenchmarkHelper<RuntimeOrigin, AccountId>
     for RuntimeBenchmarkHelper
 {
+    benchmark_keeper_rebate_hooks!();
+
     fn treasury_origin() -> RuntimeOrigin {
         pallet_origins::Origin::FutarchyTreasury.into()
     }
@@ -2468,7 +3352,18 @@ impl pallet_guardian::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
     fn values() -> RuntimeOrigin {
         pallet_origins::Origin::ConstitutionalValues.into()
     }
-    fn prime_for_worst_case() {}
+    fn prime_for_worst_case() {
+        let who = AccountId32::new([1; 32]);
+        let mut proposal = <RuntimeBenchmarkHelper as pallet_epoch::BenchmarkHelper<
+            RuntimeOrigin,
+            AccountId,
+        >>::proposal(1, who, 1, 1);
+        proposal.state = ProposalState::Queued;
+        pallet_epoch::Proposals::<Runtime>::insert(1, proposal);
+    }
+    fn prime_maintenance_epoch(epoch: EpochId) {
+        pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = epoch);
+    }
 }
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_attestor::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
@@ -2482,152 +3377,667 @@ impl pallet_attestor::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
         pallet_origins::Origin::ConstitutionalValues.into()
     }
 }
-
 #[cfg(feature = "runtime-benchmarks")]
-fn benchmark_guard_enqueue(
-    pid: futarchy_primitives::ProposalId,
-    call: RuntimeCall,
-    domain: pallet_execution_guard::CallDomain,
-) -> Result<BlockNumber, DispatchError> {
-    use frame_support::traits::StorePreimage;
+impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmarkHelper {
+    benchmark_keeper_rebate_hooks!();
 
-    let batch =
-        pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(alloc::vec![call])
-            .map_err(|_| DispatchError::Other("benchmark guard batch bound"))?;
-    let bytes = batch.encode();
-    let payload_len = u32::try_from(bytes.len())
-        .map_err(|_| DispatchError::Other("benchmark guard payload length"))?;
-    let hash = <Preimage as StorePreimage>::note(Cow::Owned(bytes))?;
-    <Preimage as QueryPreimage>::request(&hash);
-    note_pending_epoch_payload(pid, hash.0);
-
-    let now = System::block_number();
-    let maturity = now
-        .checked_add(
-            <ExecutionParams as pallet_execution_guard::Params>::exec_timelock(
-                futarchy_primitives::ProposalClass::Param,
-            ),
-        )
-        .ok_or(DispatchError::Arithmetic(
-            sp_runtime::ArithmeticError::Overflow,
-        ))?;
-    let grace_end = maturity
-        .checked_add(
-            <ExecutionParams as pallet_execution_guard::Params>::exec_grace(
-                futarchy_primitives::ProposalClass::Param,
-            ),
-        )
-        .ok_or(DispatchError::Arithmetic(
-            sp_runtime::ArithmeticError::Overflow,
-        ))?;
-    let version_constraint = pallet_execution_guard::CurrentSpecName::<Runtime>::get()
-        .ok_or(DispatchError::Other("benchmark guard current version"))?;
-    let declared_domains =
-        pallet_execution_guard::pallet::StoredDomains::try_from(alloc::vec![domain])
-            .map_err(|_| DispatchError::Other("benchmark guard domain bound"))?;
-    crate::ExecutionGuard::enqueue(
-        RuntimeOrigin::signed(AccountId::new(EXECUTION_ENQUEUE_TEST_ACCOUNT)),
-        pallet_execution_guard::pallet::StoredQueuedExecution {
-            pid,
-            payload_hash: hash.0,
-            payload_len,
-            class: futarchy_primitives::ProposalClass::Param,
-            maturity,
-            grace_end,
-            version_constraint,
-            meters_declared: Default::default(),
-            ratify_ref: None,
-            ratification_passed: false,
-            attestation_id: None,
-            pre_upgrade_checkpoint: None,
-            cancelled: false,
-            declared_domains,
-            failed_at: None,
-        },
-        false,
-    )?;
-    Ok(maturity)
-}
-
-#[cfg(feature = "runtime-benchmarks")]
-impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
-    fn ratify_origin() -> RuntimeOrigin {
+    fn prime_submit_epoch(epoch: EpochId) {
+        // The benchmark runner dispatches calls in block one even when its raw
+        // externalities begin at zero; establish the same block during setup so
+        // the submission timestamp exercises the real shape check.
+        System::set_block_number(1);
+        let now = System::block_number();
+        let params = <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+        pallet_epoch::EpochOf::<Runtime>::put(pallet_epoch::EpochInfo {
+            index: epoch,
+            phase: EpochPhase::Intake,
+            phase_start_block: now,
+        });
+        pallet_epoch::Schedule::<Runtime>::put(pallet_epoch::EpochSchedule {
+            epoch_start_block: now,
+            length: params.epoch_length,
+            next_length: params.epoch_length,
+        });
+        // `frame-omni-bencher` starts from raw externalities, not the runtime
+        // genesis builder, so seed the same first admissible proposal id here.
+        pallet_epoch::NextProposalId::<Runtime>::put(1);
+    }
+    fn constitutional_values_origin() -> RuntimeOrigin {
         pallet_origins::Origin::ConstitutionalValues.into()
     }
-
-    fn prime_ratify(pid: futarchy_primitives::ProposalId, _: u32) {
-        note_pending_epoch_payload(pid, sp_io::hashing::blake2_256(&pid.encode()));
+    fn guardian_origin() -> RuntimeOrigin {
+        pallet_origins::Origin::GuardianHold.into()
     }
-
-    fn prime_execute(pid: futarchy_primitives::ProposalId) {
-        let key = pallet_constitution::key16(b"mkt.obs_interval");
-        let Some(mut record) = pallet_constitution::Params::<Runtime>::get(key) else {
-            return;
-        };
-        record.cooldown_epochs = 0;
-        pallet_constitution::Params::<Runtime>::insert(key, record);
-        let call = RuntimeCall::Constitution(pallet_constitution::Call::set_param {
-            key,
-            value: record.value,
-        });
-        if let Ok(maturity) =
-            benchmark_guard_enqueue(pid, call, pallet_execution_guard::CallDomain::Param)
-        {
-            System::set_block_number(maturity);
+    fn execution_guard_origin() -> RuntimeOrigin {
+        RuntimeOrigin::signed(execution_guard_account())
+    }
+    fn void_authority_origin() -> RuntimeOrigin {
+        pallet_origins::Origin::EmergencyPlaybook.into()
+    }
+    fn account(seed: u8) -> AccountId {
+        AccountId32::new([seed; 32])
+    }
+    fn proposal(
+        id: ProposalId,
+        who: AccountId,
+        now: u32,
+        epoch: EpochId,
+    ) -> futarchy_primitives::Proposal<AccountId> {
+        // Each proposal gets its own valid 64 KiB batch. In particular, the
+        // epoch tick benchmark now proves one PreimageFor read per item rather
+        // than collapsing ten commitments onto one physical trie key.
+        let (payload_hash, payload_len) = benchmark_ensure_payload_preimage(id);
+        futarchy_primitives::Proposal {
+            id,
+            proposer: who,
+            class: ProposalClass::Param,
+            state: ProposalState::Submitted,
+            epoch,
+            submitted_at: now,
+            payload_hash,
+            payload_len,
+            ask: 0,
+            bond: 1,
+            resources: Default::default(),
+            metric_spec: 1,
+            decide_at: 0,
+            rerun: false,
+            extended: false,
+            delayed_once: false,
+            markets: None,
+            maturity: None,
+            grace_end: None,
+            version_constraint: Some(RuntimeVersionConstraint {
+                spec_name: futarchy_primitives::BoundedVec::try_from(
+                    VERSION.spec_name.as_bytes().to_vec(),
+                )
+                .expect("benchmark runtime spec name fits the frozen bound"),
+                spec_version: VERSION.spec_version,
+            }),
+            decision: None,
         }
     }
-
-    fn prime_failed(pid: futarchy_primitives::ProposalId) {
-        let call = RuntimeCall::System(frame_system::Call::remark {
-            remark: b"guard-benchmark-failure".to_vec(),
-        });
-        if let Ok(maturity) =
-            benchmark_guard_enqueue(pid, call, pallet_execution_guard::CallDomain::Public)
-        {
-            System::set_block_number(maturity);
-            let caller = AccountId::new([241; 32]);
-            let _ = crate::ExecutionGuard::execute(RuntimeOrigin::signed(caller), pid);
-            if let Some(failed_at) = pallet_execution_guard::pallet::Queue::<Runtime>::get(pid)
-                .and_then(|queued| queued.failed_at)
-            {
-                System::set_block_number(
-                    failed_at
-                        .saturating_add(pallet_execution_guard::RETRY_WINDOW)
-                        .saturating_add(1),
+    fn prime_decision(
+        pid: ProposalId,
+        epoch: EpochId,
+        gates: bool,
+    ) -> futarchy_primitives::MarketSet {
+        if !pallet_conditional_ledger::Vaults::<Runtime>::contains_key(pid) {
+            ConditionalLedger::create_vault(RuntimeOrigin::signed(market_account()), pid, 1)
+                .expect("benchmark vault creation must succeed");
+        }
+        if gates {
+            let payload_hash = benchmark_payload_hash_for(pid);
+            pallet_execution_guard::Ratifications::<Runtime>::insert(
+                pid,
+                pallet_execution_guard::pallet::RatificationRecord {
+                    referendum_index: pid as u32,
+                    payload_hash,
+                    ratified_at: 1,
+                },
+            );
+            benchmark_fill_attestations(pid, payload_hash);
+        }
+        benchmark_market_set(pid, epoch, gates)
+    }
+    fn prime_guard_enqueue(pid: ProposalId) {
+        // Leave exactly one queue slot and one eight-meter held-resource slot
+        // for the measured epoch decision's nested guard enqueue.
+        benchmark_fill_guard_queue_to(pallet_execution_guard::MAX_QUEUE_BOUND - 1, pid);
+        benchmark_fill_guard_records();
+        benchmark_fill_guard_envelopes();
+    }
+    fn prime_settlement(epoch: EpochId) {
+        for (pid, proposal) in pallet_epoch::Proposals::<Runtime>::iter() {
+            if proposal.epoch == epoch {
+                let _ = ConditionalLedger::resolve(
+                    RuntimeOrigin::signed(epoch_account()),
+                    pid,
+                    futarchy_primitives::Branch::Accept,
                 );
             }
         }
+        if !pallet_conditional_ledger::BaselineVaults::<Runtime>::contains_key(epoch) {
+            ConditionalLedger::create_baseline_vault(
+                RuntimeOrigin::signed(market_account()),
+                epoch,
+            )
+            .expect("benchmark baseline vault creation must succeed");
+        }
+        pallet_market::BaselineMarketOf::<Runtime>::insert(
+            epoch,
+            9_000u64.saturating_add(u64::from(epoch)),
+        );
+        // The runtime settlement adapter reads the cohort-key snapshot after
+        // delegating the actual H=2 computation to welfare. Keep that adapter
+        // lookup populated in addition to the two normative measurement epochs.
+        for measured_epoch in [epoch, epoch.saturating_add(1), epoch.saturating_add(2)] {
+            pallet_welfare::Snapshots::<Runtime>::insert(
+                (measured_epoch, 1),
+                pallet_welfare::StoredSnapshot {
+                    epoch: measured_epoch,
+                    spec_version: 1,
+                    s_pillar: FixedU64(500_000_000),
+                    c_onchain: FixedU64(500_000_000),
+                    c_attested: FixedU64(500_000_000),
+                    p_pillar: FixedU64(500_000_000),
+                    a_pillar: FixedU64(500_000_000),
+                    gate_s: FixedU64(500_000_000),
+                    gate_c: FixedU64(500_000_000),
+                    welfare: FixedU64(500_000_000),
+                    components: frame_support::BoundedVec::truncate_from(
+                        pallet_welfare::benchmarking::healthy(
+                            pallet_welfare::MAX_COMPONENTS_PER_SPEC as u16,
+                        ),
+                    ),
+                },
+            );
+        }
+        benchmark_fill_welfare_aggregate();
     }
+}
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
+    benchmark_keeper_rebate_hooks!();
 
-    fn prime_pending_upgrade(code: &[u8]) {
-        let hash = sp_io::hashing::blake2_256(code);
+    fn ratify_origin() -> RuntimeOrigin {
+        pallet_origins::Origin::ConstitutionalValues.into()
+    }
+    fn prime_ratify(pid: ProposalId, referendum_index: u32) {
+        let hash = benchmark_payload_hash();
+        let payload_len = benchmark_payload_len();
+        let meters = benchmark_guard_meters(pid);
+        benchmark_insert_epoch_proposal_with_resources(
+            pid,
+            hash,
+            payload_len,
+            ProposalState::Submitted,
+            meters.clone().into_inner(),
+        );
+        let mut item = benchmark_queue_item(pid, hash, payload_len, ProposalClass::Code);
+        item.meters_declared = meters;
+        item.ratify_ref = Some(referendum_index);
+        pallet_execution_guard::pallet::Queue::<Runtime>::insert(pid, item);
+        benchmark_fill_guard_queue(pid);
+        benchmark_fill_guard_records();
+        benchmark_fill_guard_envelopes();
+        benchmark_fill_ratifications(pid);
+    }
+    fn prime_execute(pid: ProposalId, calls: u32) {
+        let artifact_hash = [0x42; 32];
+        let spacing = <RuntimeGuardParams as pallet_execution_guard::Params>::code_spacing();
+        System::set_block_number(
+            spacing.saturating_mul(pallet_execution_guard::MAX_EXECUTION_RECORDS as u32 + 1),
+        );
+        let bytes = benchmark_upgrade_payload_bytes(artifact_hash, calls);
+        let hash = benchmark_note_preimage(bytes.clone());
+        let meters = benchmark_guard_meters(pid);
+        benchmark_insert_epoch_proposal_with_resources(
+            pid,
+            hash,
+            bytes.len() as u32,
+            ProposalState::Queued,
+            meters.clone().into_inner(),
+        );
+        let referendum_index = pid as u32;
+        pallet_execution_guard::pallet::Ratifications::<Runtime>::insert(
+            pid,
+            pallet_execution_guard::pallet::RatificationRecord {
+                referendum_index,
+                payload_hash: hash,
+                ratified_at: System::block_number(),
+            },
+        );
+        benchmark_fill_attestations(pid, artifact_hash);
+        let mut item = benchmark_queue_item(pid, hash, bytes.len() as u32, ProposalClass::Code);
+        item.meters_declared = meters;
+        item.ratify_ref = Some(referendum_index);
+        item.attestation_id = Some(
+            pallet_attestor::MAX_ATTESTATIONS
+                .saturating_sub(futarchy_primitives::kernel::ATT_QUORUM),
+        );
+        item.declared_domains = if calls > 1 {
+            frame_support::BoundedVec::truncate_from(Vec::from([
+                pallet_execution_guard::CallDomain::Public,
+                pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade,
+            ]))
+        } else {
+            frame_support::BoundedVec::truncate_from(Vec::from([
+                pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade,
+            ]))
+        };
         let now = System::block_number();
-        let _ = System::authorize_upgrade(RuntimeOrigin::root(), Hash::from(hash));
+        item.maturity = now.saturating_add(
+            <RuntimeGuardParams as pallet_execution_guard::Params>::exec_timelock(item.class),
+        );
+        item.grace_end = item.maturity.saturating_add(
+            <RuntimeGuardParams as pallet_execution_guard::Params>::exec_grace(item.class),
+        );
+        ExecutionGuard::enqueue(RuntimeOrigin::signed(epoch_account()), item, false)
+            .expect("benchmark guard enqueue must succeed");
+        System::set_block_number(now.saturating_add(
+            <RuntimeGuardParams as pallet_execution_guard::Params>::exec_timelock(
+                ProposalClass::Code,
+            ),
+        ));
+        benchmark_fill_guard_queue(pid);
+        benchmark_fill_guard_records();
+        benchmark_fill_guard_envelopes();
+        benchmark_fill_upgrade_spacing_history(System::block_number());
+        benchmark_fill_epoch_aggregate_for_measurement();
+    }
+    fn prime_failed(pid: ProposalId) {
+        let hash = benchmark_payload_hash();
+        let payload_len = benchmark_payload_len();
+        let meters = benchmark_guard_meters(pid);
+        benchmark_insert_epoch_proposal_with_resources(
+            pid,
+            hash,
+            payload_len,
+            ProposalState::FailedExecuted,
+            meters.clone().into_inner(),
+        );
+        let mut item = benchmark_queue_item(pid, hash, payload_len, ProposalClass::Param);
+        item.meters_declared = meters;
+        item.failed_at = Some(1);
+        pallet_execution_guard::pallet::Queue::<Runtime>::insert(pid, item);
+        benchmark_fill_guard_queue(pid);
+        benchmark_fill_guard_records();
+        benchmark_fill_guard_envelopes();
+        benchmark_fill_epoch_aggregate_for_measurement();
+        System::set_block_number(1u32.saturating_add(pallet_execution_guard::RETRY_WINDOW + 1));
+    }
+    fn prime_pending_upgrade(bytes: u32) -> Vec<u8> {
+        let code = benchmark_runtime_code(bytes);
+        let hash = sp_io::hashing::blake2_256(&code);
+        let now = System::block_number();
+        ParachainSystem::initialize_for_set_code_benchmark(code.len() as u32);
+        System::authorize_upgrade(RuntimeOrigin::root(), hash.into())
+            .expect("benchmark system upgrade authorization must succeed");
         pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::put(
             pallet_execution_guard::PendingUpgrade {
                 hash,
                 authorized_at: now,
-                applicable_at: now,
-                target_spec_version: VERSION.spec_version.saturating_add(1),
+                applicable_at: now.saturating_add(pallet_execution_guard::DESCRIPTOR_LEAD_TIME),
+                target_spec_version: VERSION.spec_version,
             },
         );
+        System::set_block_number(now.saturating_add(pallet_execution_guard::DESCRIPTOR_LEAD_TIME));
+        benchmark_fill_guard_queue(ProposalId::MAX);
+        benchmark_fill_guard_records();
+        benchmark_fill_guard_envelopes();
+        code
     }
+    fn prime_stale(pid: ProposalId) {
+        let hash = benchmark_payload_hash();
+        let payload_len = benchmark_payload_len();
+        let meters = benchmark_guard_meters(pid);
+        benchmark_insert_epoch_proposal_with_resources(
+            pid,
+            hash,
+            payload_len,
+            ProposalState::Queued,
+            meters.clone().into_inner(),
+        );
+        let mut item = benchmark_queue_item(pid, hash, payload_len, ProposalClass::Param);
+        item.meters_declared = meters;
+        item.version_constraint.spec_version =
+            item.version_constraint.spec_version.saturating_add(1);
+        pallet_execution_guard::pallet::Queue::<Runtime>::insert(pid, item);
+        benchmark_fill_guard_queue(pid);
+        benchmark_fill_guard_records();
+        benchmark_fill_guard_envelopes();
+        benchmark_fill_epoch_aggregate_for_measurement();
+    }
+}
 
-    fn prime_stale(pid: futarchy_primitives::ProposalId) {
-        let key = pallet_constitution::key16(b"mkt.obs_interval");
-        let Some(record) = pallet_constitution::Params::<Runtime>::get(key) else {
-            return;
-        };
-        let call = RuntimeCall::Constitution(pallet_constitution::Call::set_param {
-            key,
-            value: record.value,
-        });
-        if benchmark_guard_enqueue(pid, call, pallet_execution_guard::CallDomain::Param).is_ok() {
-            pallet_execution_guard::CurrentSpecName::<Runtime>::mutate(|current| {
-                if let Some(version) = current {
-                    version.spec_version = version.spec_version.saturating_add(1);
-                }
-            });
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_epoch_aggregate_for_measurement() {
+    let mut state = Epoch::epoch_state();
+    pallet_epoch::benchmarking::fill_epoch_state::<Runtime>(
+        &mut state,
+        pallet_epoch::MAX_INTAKE_QUEUE,
+        pallet_epoch::MAX_LIVE_PROPOSALS,
+        // All three guard callbacks measured here start the target's
+        // measurement cohort. Three existing cohorts are therefore the
+        // maximum admissible pre-state; the measured callback fills slot four.
+        pallet_epoch::MAX_NON_TERMINAL_COHORTS - 1,
+    );
+    Epoch::seed(state).expect("benchmark epoch aggregate must satisfy every frozen bound");
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_welfare_aggregate() {
+    let mut state = Welfare::welfare_state();
+    for version in 1..=pallet_welfare::MAX_METRIC_SPECS as u16 {
+        if state.specs.iter().all(|(stored, _)| *stored != version) {
+            state
+                .register_metric_spec(
+                    0,
+                    version,
+                    pallet_welfare::benchmarking::full_specs(version),
+                )
+                .expect("benchmark welfare specification must be valid");
         }
+    }
+    let mut epoch = 100u32;
+    while state.snapshots.len() < pallet_welfare::MAX_SNAPSHOTS {
+        state
+            .record_snapshot(
+                epoch,
+                1,
+                pallet_welfare::benchmarking::healthy(
+                    pallet_welfare::MAX_COMPONENTS_PER_SPEC as u16,
+                ),
+                FixedU64(1_000_000_000),
+                &pallet_welfare::CoreWelfareParams::DEFAULT,
+            )
+            .expect("benchmark welfare snapshot must be valid");
+        epoch = epoch.saturating_add(1);
+    }
+    epoch = 100;
+    while state.gate_flags.len() < pallet_welfare::MAX_GATE_FLAGS {
+        state
+            .record_daily_gate(
+                epoch,
+                0,
+                1,
+                pallet_welfare::benchmarking::healthy(
+                    pallet_welfare::MAX_COMPONENTS_PER_SPEC as u16,
+                ),
+                &pallet_welfare::CoreWelfareParams::DEFAULT,
+            )
+            .expect("benchmark welfare gate flags must be valid");
+        epoch = epoch.saturating_add(1);
+    }
+    Welfare::seed(&state).expect("benchmark welfare aggregate must satisfy every frozen bound");
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_runtime_version() -> RuntimeVersionConstraint {
+    RuntimeVersionConstraint {
+        spec_name: futarchy_primitives::BoundedVec::try_from(VERSION.spec_name.as_bytes().to_vec())
+            .expect("benchmark runtime spec name fits the frozen bound"),
+        spec_version: VERSION.spec_version,
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_push_leb128(mut value: usize, out: &mut Vec<u8>) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_custom_section(name: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    benchmark_push_leb128(name.len(), &mut body);
+    body.extend_from_slice(name);
+    body.extend_from_slice(payload);
+    let mut section = Vec::new();
+    section.push(0);
+    benchmark_push_leb128(body.len(), &mut section);
+    section.extend(body);
+    section
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_runtime_code(target_code_bytes: u32) -> Vec<u8> {
+    const WASM_HEADER: [u8; 8] = [0, 97, 115, 109, 1, 0, 0, 0];
+    const VERSION_SECTION: &[u8] = b"runtime_version";
+    const PADDING_SECTION: &[u8] = b"benchmark_padding";
+    let max_code_bytes = <<Runtime as pallet_execution_guard::Config>::MaxRuntimeCodeBytes as frame_support::traits::Get<u32>>::get()
+        as usize;
+    let target_code_bytes = target_code_bytes as usize;
+    assert!(target_code_bytes <= max_code_bytes);
+
+    // A minimal valid module with the same embedded RuntimeVersion is enough
+    // for both guard and frame-system version checks. A custom section pads it
+    // to the sampled byte count so the generated coefficient follows the exact
+    // `code.len()` quantity charged by the dispatch.
+    let mut code = Vec::from(WASM_HEADER);
+    code.extend(benchmark_custom_section(VERSION_SECTION, &VERSION.encode()));
+    assert!(
+        code.len()
+            .saturating_add(benchmark_custom_section(PADDING_SECTION, &[]).len())
+            <= target_code_bytes,
+        "benchmark runtime fixture needs at least the component's 512-byte floor"
+    );
+    let mut padding_len = target_code_bytes.saturating_sub(code.len());
+    loop {
+        let padding = vec![0; padding_len];
+        let section = benchmark_custom_section(PADDING_SECTION, &padding);
+        match code
+            .len()
+            .saturating_add(section.len())
+            .cmp(&target_code_bytes)
+        {
+            core::cmp::Ordering::Equal => {
+                code.extend(section);
+                break;
+            }
+            core::cmp::Ordering::Greater => padding_len = padding_len.saturating_sub(1),
+            core::cmp::Ordering::Less => {
+                padding_len = padding_len.saturating_add(1);
+            }
+        }
+    }
+    code
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_guard_meters(pid: ProposalId) -> pallet_execution_guard::StoredMeters {
+    let meters = (0..pallet_execution_guard::MAX_RESOURCE_LOCKS)
+        .map(|index| {
+            let mut meter = pid.to_le_bytes();
+            meter[7] = index as u8;
+            meter
+        })
+        .collect::<Vec<_>>();
+    frame_support::BoundedVec::truncate_from(meters)
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_note_preimage(bytes: Vec<u8>) -> H256 {
+    let who = AccountId32::new([249; 32]);
+    let _ = <Balances as frame_support::traits::fungible::Mutate<AccountId>>::mint_into(
+        &who,
+        currency::VIT,
+    );
+    let hash = sp_io::hashing::blake2_256(&bytes);
+    Preimage::note_preimage(RuntimeOrigin::signed(who), bytes)
+        .expect("benchmark preimage note must succeed");
+    hash
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_queue_item(
+    pid: ProposalId,
+    payload_hash: H256,
+    payload_len: u32,
+    class: ProposalClass,
+) -> pallet_execution_guard::StoredQueuedExecution {
+    pallet_execution_guard::StoredQueuedExecution {
+        pid,
+        payload_hash,
+        payload_len,
+        class,
+        maturity: 0,
+        grace_end: u32::MAX,
+        version_constraint: benchmark_runtime_version(),
+        meters_declared: Default::default(),
+        ratify_ref: None,
+        ratification_passed: false,
+        attestation_id: None,
+        pre_upgrade_checkpoint: None,
+        cancelled: false,
+        declared_domains: frame_support::BoundedVec::truncate_from(Vec::from([
+            pallet_execution_guard::CallDomain::Public,
+        ])),
+        failed_at: None,
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_insert_epoch_proposal_with_resources(
+    pid: ProposalId,
+    payload_hash: H256,
+    payload_len: u32,
+    state: ProposalState,
+    resources: Vec<[u8; 8]>,
+) {
+    let epoch = pallet_epoch::EpochOf::<Runtime>::get().index;
+    let who = AccountId32::new([248; 32]);
+    let mut proposal = <RuntimeBenchmarkHelper as pallet_epoch::BenchmarkHelper<
+        RuntimeOrigin,
+        AccountId,
+    >>::proposal(pid, who, 1, epoch);
+    proposal.payload_hash = payload_hash;
+    proposal.payload_len = payload_len;
+    proposal.state = state;
+    proposal.decide_at = 1;
+    proposal.maturity = Some(0);
+    proposal.grace_end = Some(u32::MAX);
+    proposal.decision = Some(futarchy_primitives::DecisionOutcome::Adopt);
+    proposal.markets = Some(benchmark_market_set(pid, epoch, false));
+    proposal.resources = futarchy_primitives::BoundedVec::try_from(resources.clone())
+        .expect("benchmark resource set fits the kernel bound");
+    pallet_epoch::Proposals::<Runtime>::insert(pid, proposal);
+    pallet_epoch::ProposalSchedules::<Runtime>::insert(
+        pid,
+        pallet_epoch::ProposalSchedule {
+            epoch,
+            epoch_start_block: 0,
+            epoch_length: <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get()
+                .epoch_length,
+            decide_at: 1,
+            metric_spec: 1,
+        },
+    );
+    pallet_epoch::ResourceLocks::<Runtime>::mutate(|locks| {
+        for resource in resources {
+            let _ = locks.try_push((resource, pid));
+        }
+    });
+    if !pallet_conditional_ledger::Vaults::<Runtime>::contains_key(pid) {
+        ConditionalLedger::create_vault(RuntimeOrigin::signed(market_account()), pid, 1)
+            .expect("benchmark callback vault creation must succeed");
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_guard_queue(except: ProposalId) {
+    benchmark_fill_guard_queue_to(pallet_execution_guard::MAX_QUEUE_BOUND, except);
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_guard_queue_to(target: u32, except: ProposalId) {
+    let mut pid = 10_000;
+    while pallet_execution_guard::pallet::Queue::<Runtime>::count() < target {
+        if pid != except {
+            let mut item = benchmark_queue_item(
+                pid,
+                benchmark_payload_hash(),
+                benchmark_payload_len(),
+                ProposalClass::Param,
+            );
+            item.meters_declared = benchmark_guard_meters(pid);
+            pallet_execution_guard::pallet::Queue::<Runtime>::insert(pid, item);
+        }
+        pid = pid.saturating_add(1);
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_guard_envelopes() {
+    let held = pallet_execution_guard::pallet::Queue::<Runtime>::iter()
+        .flat_map(|(pid, item)| {
+            item.meters_declared
+                .into_inner()
+                .into_iter()
+                .map(move |meter| (pid, meter))
+        })
+        .collect::<Vec<_>>();
+    pallet_execution_guard::pallet::HeldResources::<Runtime>::put(
+        frame_support::BoundedVec::truncate_from(held),
+    );
+
+    // Blocked meters are an independent bounded maintenance envelope. Keep
+    // them disjoint from every queued declaration so the measured successful
+    // path still performs the maximum scan without taking an early rejection.
+    let blocked = (0..pallet_execution_guard::MAX_BLOCKED_METERS_BOUND)
+        .map(|index| {
+            let mut meter = [0xff; 8];
+            meter[4..8].copy_from_slice(&index.to_le_bytes());
+            meter
+        })
+        .collect::<Vec<_>>();
+    pallet_execution_guard::pallet::BlockedMeters::<Runtime>::put(
+        frame_support::BoundedVec::truncate_from(blocked),
+    );
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_guard_records() {
+    let records = (0..pallet_execution_guard::MAX_EXECUTION_RECORDS)
+        .map(|index| futarchy_primitives::ExecutionRecord {
+            pid: 20_000u64.saturating_add(index as u64),
+            payload_hash: [index as u8; 32],
+            class: ProposalClass::Param,
+            executed_at: index as u32,
+            result: futarchy_primitives::DispatchOutcomeCode::Ok,
+        })
+        .collect::<Vec<_>>();
+    pallet_execution_guard::pallet::ExecutionRecords::<Runtime>::put(
+        frame_support::BoundedVec::truncate_from(records),
+    );
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_upgrade_spacing_history(now: u32) {
+    let spacing = <RuntimeGuardParams as pallet_execution_guard::Params>::code_spacing();
+    let count = pallet_execution_guard::MAX_EXECUTION_RECORDS as u32;
+    let history = (0..count)
+        .map(|index| {
+            (
+                now.saturating_sub(spacing.saturating_mul(count.saturating_sub(index))),
+                spacing,
+            )
+        })
+        .collect::<Vec<_>>();
+    let history = pallet_execution_guard::pallet::StoredUpgradeSpacingHistory::try_from(history)
+        .expect("benchmark upgrade history equals the execution-record bound");
+    pallet_execution_guard::pallet::UpgradeSpacingHistory::<Runtime>::put(history.clone());
+    if let Some((authorized_at, _)) = history.last() {
+        pallet_execution_guard::pallet::LastUpgradeAuthorized::<Runtime>::put(*authorized_at);
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_ratifications(except: ProposalId) {
+    let mut pid = 30_000;
+    while pallet_execution_guard::pallet::Ratifications::<Runtime>::count().saturating_add(1)
+        < pallet_execution_guard::MAX_RATIFICATIONS_BOUND
+    {
+        if pid != except {
+            pallet_execution_guard::pallet::Ratifications::<Runtime>::insert(
+                pid,
+                pallet_execution_guard::pallet::RatificationRecord {
+                    referendum_index: pid as u32,
+                    payload_hash: [pid as u8; 32],
+                    ratified_at: 1,
+                },
+            );
+        }
+        pid = pid.saturating_add(1);
     }
 }

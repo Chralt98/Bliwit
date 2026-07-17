@@ -15,7 +15,7 @@ pub use weights::WeightInfo;
 pub mod weights;
 
 #[cfg(feature = "runtime-benchmarks")]
-mod benchmarking;
+pub mod benchmarking;
 #[cfg(test)]
 mod mock;
 #[cfg(test)]
@@ -110,6 +110,12 @@ pub trait ConstitutionAccess<AccountId> {
 
 pub trait PreimageAccess {
     fn len(hash: H256) -> Option<u32>;
+    /// Acquire epoch's qualification-to-queue ownership reference. The
+    /// implementation participates in the caller's storage transaction.
+    fn request(hash: H256) -> DispatchResult;
+    /// Release one reference owned by epoch. Implementations must be
+    /// idempotent/fail-safe: a missing underlying request is a no-op.
+    fn unrequest(hash: H256);
 }
 
 /// A8 → A11 producer seam. Only an adopted decision invokes this endpoint.
@@ -151,6 +157,7 @@ pub trait LedgerResolution {
 
 #[cfg(feature = "runtime-benchmarks")]
 pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
+    fn prime_submit_epoch(epoch: EpochId);
     fn constitutional_values_origin() -> RuntimeOrigin;
     fn guardian_origin() -> RuntimeOrigin;
     fn execution_guard_origin() -> RuntimeOrigin;
@@ -163,7 +170,11 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
         epoch: EpochId,
     ) -> Proposal<AccountId>;
     fn prime_decision(pid: ProposalId, epoch: EpochId, gates: bool) -> MarketSet;
+    /// Saturate the real execution-guard aggregate before a decision enqueues.
+    fn prime_guard_enqueue(pid: ProposalId);
     fn prime_settlement(epoch: EpochId);
+    fn prime_keeper_rebate() {}
+    fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
 
 /// `Get<EpochId>` projection for sibling pallets (treasury/registry/welfare).
@@ -419,6 +430,14 @@ pub mod pallet {
     #[pallet::storage]
     pub type BaselineCarry<T: Config> = StorageValue<_, (EpochId, u8), OptionQuery>;
 
+    /// Epoch-owned preimage references between T5 qualification and either a
+    /// pre-queue terminal or the atomic T9 handoff to execution-guard. Keeping
+    /// the owner keyed by proposal makes request/unrequest idempotent even
+    /// when keeper cranks are retried (06 §4; 09 §7.3).
+    #[pallet::storage]
+    pub type QualificationPins<T: Config> =
+        StorageMap<_, Blake2_128Concat, ProposalId, H256, OptionQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -545,6 +564,7 @@ pub mod pallet {
                     && !proposal.rerun
                     && !proposal.extended
                     && !proposal.delayed_once
+                    && proposal.payload_len <= futarchy_primitives::kernel::MAX_BYTES
                     && proposal.markets.is_none()
                     && proposal.maturity.is_none()
                     && proposal.grace_end.is_none()
@@ -559,7 +579,13 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::withdraw())]
         pub fn withdraw(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            Self::mutate(|state, _| state.withdraw(CoreOrigin::Signed, pid, &who))
+            Self::mutate(|state, _| {
+                state.withdraw(CoreOrigin::Signed, pid, &who)?;
+                // T2 is normally pre-qualification and therefore unpinned;
+                // retain an idempotent cleanup for legacy/corrupt ownership.
+                Self::release_qualification_pin(pid);
+                Ok(())
+            })
         }
 
         /// Permissionless bounded crank. An empty batch advances only the phase
@@ -618,8 +644,9 @@ pub mod pallet {
                     } else {
                         None
                     };
-                    let preimage_ok =
-                        T::Preimage::len(proposal.payload_hash) == Some(proposal.payload_len);
+                    let preimage_ok = proposal.payload_len
+                        <= futarchy_primitives::kernel::MAX_BYTES
+                        && T::Preimage::len(proposal.payload_hash) == Some(proposal.payload_len);
                     let guard_owned_before = matches!(
                         proposal.state,
                         ProposalState::Queued | ProposalState::FailedExecuted
@@ -642,13 +669,30 @@ pub mod pallet {
                         },
                         &params,
                     )?;
+                    let state_after = state.proposal_view(pid)?.state;
+                    if matches!(
+                        proposal.state,
+                        ProposalState::Submitted | ProposalState::Screening
+                    ) && state_after == ProposalState::Qualified
+                    {
+                        // T5: request before the qualified state is persisted.
+                        // Both writes share this storage layer, so a failed
+                        // request rolls the transition back for a keeper retry.
+                        Self::pin_at_qualification(pid, proposal.payload_hash)?;
+                    }
+                    if !Self::epoch_owns_prequeue_pin(state_after) {
+                        // Covers pre-queue T20/stale force-rejects. Queued and
+                        // failed-executed proposals handed ownership to A11 at
+                        // T9 and therefore have no QualificationPins entry.
+                        Self::release_qualification_pin(pid);
+                    }
                     advanced |= state
                         .events
                         .iter()
                         .skip(events_before)
                         .any(|event| !matches!(event, CoreEvent::NoOp));
                     let guard_owned_after = matches!(
-                        state.proposal_view(pid)?.state,
+                        state_after,
                         ProposalState::Queued | ProposalState::FailedExecuted
                     );
                     if guard_owned_before && !guard_owned_after {
@@ -760,8 +804,8 @@ pub mod pallet {
                     true
                 };
                 let guards = DecisionGuards {
-                    preimage_ok: T::Preimage::len(proposal.payload_hash)
-                        == Some(proposal.payload_len),
+                    preimage_ok: proposal.payload_len <= futarchy_primitives::kernel::MAX_BYTES
+                        && T::Preimage::len(proposal.payload_hash) == Some(proposal.payload_len),
                     resource_locks_held: state.resource_locks_held(pid),
                     process_hold: T::Oracle::any_open_dispute_touching(proposal.metric_spec)
                         || T::Guardian::hold_active(pid)
@@ -826,6 +870,12 @@ pub mod pallet {
                         matches!(queued.class, ProposalClass::Code | ProposalClass::Meta),
                     )?;
                 }
+                if outcome != DecisionOutcome::Extend {
+                    // Reject outcomes never queue. For Adopt, A11 acquired its
+                    // own reference inside `enqueue`; dropping epoch's reference
+                    // here is the atomic qualification→guard ownership handoff.
+                    Self::release_qualification_pin(pid);
+                }
                 Self::persist(state)
             });
             if result.is_ok() && decision_advanced {
@@ -839,6 +889,10 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::settle_cohort(*batch))]
         pub fn settle_cohort(origin: OriginFor<T>, epoch: EpochId, batch: u32) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            ensure!(
+                batch > 0 && batch <= futarchy_primitives::kernel::SETTLE_COHORT_MAX_ITEMS,
+                Error::<T>::BatchTooLarge
+            );
             let params = Self::live_params()?;
             let now = Self::now();
             let result = frame_support::storage::with_storage_layer(|| {
@@ -847,6 +901,12 @@ pub mod pallet {
                 let baseline_twap =
                     T::Market::twap_full(baseline).ok_or(Error::<T>::BadDecisionInput)?;
                 let mut state = Self::load();
+                let cohort_members = state
+                    .cohorts
+                    .iter()
+                    .find(|cohort| cohort.epoch == epoch)
+                    .map(|cohort| cohort.proposals.clone())
+                    .ok_or(Error::<T>::BadState)?;
                 state.horizon_k = params.horizon_k;
                 state.epoch.next_length = params.epoch_length;
                 Self::sync_clock(&mut state, now).map_err(Self::map_core_error)?;
@@ -861,6 +921,11 @@ pub mod pallet {
                         now,
                     )
                     .map_err(Self::map_core_error)?;
+                if !state.cohorts.iter().any(|cohort| cohort.epoch == epoch) {
+                    for pid in cohort_members {
+                        Self::release_qualification_pin(pid);
+                    }
+                }
                 Self::persist(state)
             });
             if result.is_ok() {
@@ -984,6 +1049,7 @@ pub mod pallet {
                 // entry. Force-rejecting it is terminal, so release the guard state in
                 // lockstep (idempotent — a no-op for pre-queue states with no entry).
                 state.force_reject_process_hold(CoreOrigin::GuardianHold, ledger, pid)?;
+                Self::release_qualification_pin(pid);
                 T::ExecutionGuard::dequeue_terminal(pid).map_err(|_| CoreError::ExecutionGuard)
             })
         }
@@ -993,7 +1059,17 @@ pub mod pallet {
         pub fn void_cohort(origin: OriginFor<T>, epoch: EpochId) -> DispatchResult {
             T::VoidAuthority::ensure_origin(origin)?;
             Self::mutate(|state, ledger| {
-                state.void_cohort(CoreOrigin::VoidAuthority, ledger, epoch)
+                let members = state
+                    .cohorts
+                    .iter()
+                    .find(|cohort| cohort.epoch == epoch)
+                    .map(|cohort| cohort.proposals.clone())
+                    .ok_or(CoreError::BadState)?;
+                state.void_cohort(CoreOrigin::VoidAuthority, ledger, epoch)?;
+                for pid in members {
+                    Self::release_qualification_pin(pid);
+                }
+                Ok(())
             })
         }
     }
@@ -1124,7 +1200,7 @@ pub mod pallet {
         }
 
         #[cfg(any(test, feature = "runtime-benchmarks"))]
-        pub(crate) fn seed(state: EpochState<T::AccountId>) -> DispatchResult {
+        pub fn seed(state: EpochState<T::AccountId>) -> DispatchResult {
             Self::persist(state)
         }
 
@@ -1145,6 +1221,39 @@ pub mod pallet {
                 ProposalClass::Code | ProposalClass::Meta => true,
                 ProposalClass::Treasury => T::Constitution::treasury_gate_required(proposal),
                 ProposalClass::Param | ProposalClass::Constitutional => false,
+            }
+        }
+
+        fn epoch_owns_prequeue_pin(state: ProposalState) -> bool {
+            matches!(
+                state,
+                ProposalState::Qualified
+                    | ProposalState::Trading
+                    | ProposalState::Extended
+                    | ProposalState::Rerun
+            )
+        }
+
+        fn pin_at_qualification(pid: ProposalId, hash: H256) -> Result<(), CoreError> {
+            if let Some(existing) = QualificationPins::<T>::get(pid) {
+                return if existing == hash {
+                    Ok(())
+                } else {
+                    Err(CoreError::TryStateViolation)
+                };
+            }
+            T::Preimage::request(hash).map_err(|_| CoreError::BadDecisionInput)?;
+            QualificationPins::<T>::insert(pid, hash);
+            Ok(())
+        }
+
+        fn release_qualification_pin(pid: ProposalId) {
+            if let Some(hash) = QualificationPins::<T>::take(pid) {
+                // G-1: cleanup must never turn a terminal transition into an
+                // error. Runtime implementations guard the underlying
+                // QueryPreimage unrequest, making this an idempotent no-op if
+                // external state is already missing.
+                T::Preimage::unrequest(hash);
             }
         }
 
@@ -1672,6 +1781,16 @@ pub mod pallet {
                 return Err(TryRuntimeError::Other(
                     "epoch orphan cohort schedule violates I-16",
                 ));
+            }
+            for (pid, hash) in QualificationPins::<T>::iter() {
+                let proposal = Proposals::<T>::get(pid).ok_or(TryRuntimeError::Other(
+                    "epoch qualification preimage pin is orphaned",
+                ))?;
+                if proposal.payload_hash != hash || !Self::epoch_owns_prequeue_pin(proposal.state) {
+                    return Err(TryRuntimeError::Other(
+                        "epoch qualification preimage pin outlived pre-queue ownership",
+                    ));
+                }
             }
             Ok(())
         }

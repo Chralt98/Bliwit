@@ -9,9 +9,10 @@ use sp_runtime::traits::AccountIdConversion;
 
 use crate::{
     configs::{LedgerPalletId, TreasuryPalletId},
-    AccountId, Balance, BalancesConfig, CollatorSelectionConfig, ConstitutionConfig,
-    ForeignAssetsConfig, ParachainInfoConfig, PolkadotXcmConfig, RuntimeGenesisConfig,
-    SessionConfig, SessionKeys, SudoConfig, VestingConfig, MILLISECS_PER_BLOCK, USDC_ASSET_ID,
+    AccountId, Balance, BalancesConfig, CollatorSelectionConfig, ConstitutionConfig, EpochConfig,
+    ExecutionGuardConfig, ForeignAssetsConfig, ParachainInfoConfig, PolkadotXcmConfig,
+    RuntimeGenesisConfig, SessionConfig, SessionKeys, SudoConfig, VestingConfig,
+    MILLISECS_PER_BLOCK, USDC_ASSET_ID,
 };
 
 const SAFE_XCM_VERSION: u32 = staging_xcm::prelude::XCM_VERSION;
@@ -151,9 +152,15 @@ fn testnet_genesis(
             phase_flags: BOOTSTRAP_PHASE_FLAGS,
             ..Default::default()
         },
+        epoch: EpochConfig {
+            index: 1,
+            start_block: 0,
+            ..Default::default()
+        },
         // Seeds CurrentSpecName from the live RuntimeVersion; all other guard
-        // state is empty until A8 lawfully enqueues a passed proposal.
-        execution_guard: Default::default(),
+        // state is empty until the epoch lawfully enqueues a passed proposal.
+        execution_guard: ExecutionGuardConfig::default(),
+
         sudo: SudoConfig { key: Some(root) },
     })
 }

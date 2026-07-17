@@ -50,6 +50,17 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+/// Runtime fixture hooks for benchmarks whose measured path pays a keeper
+/// rebate through a sibling pallet. Mock runtimes may keep the defaults.
+#[cfg(feature = "runtime-benchmarks")]
+pub trait BenchmarkHelper {
+    fn prime_keeper_rebate() {}
+    fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl BenchmarkHelper for () {}
+
 #[frame_support::pallet]
 pub mod pallet {
     use crate::weights::WeightInfo;
@@ -157,6 +168,10 @@ pub mod pallet {
 
         /// Benchmarked weights.
         type WeightInfo: WeightInfo;
+
+        /// Cross-pallet keeper-rebate fixture used only by runtime benchmarks.
+        #[cfg(feature = "runtime-benchmarks")]
+        type BenchmarkHelper: crate::BenchmarkHelper;
     }
 
     #[pallet::pallet]

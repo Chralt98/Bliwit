@@ -264,6 +264,7 @@ impl crate::BenchmarkHelper<RuntimeOrigin, AccountId32> for TestBenchmarkHelper 
             }
         });
     }
+    fn prime_epoch(_: EpochId) {}
 }
 
 // ---- test helpers ------------------------------------------------------------

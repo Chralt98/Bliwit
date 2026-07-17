@@ -7,7 +7,7 @@ repository.workspace = true
 build = "build.rs"
 
 [dependencies]
-# --- Local protocol crates (B6 wires A11; A8 remains a pending runtime seam).
+# --- Local protocol crates (all twelve production FRAME pallets).
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 origins-core = { path = "../../crates/origins-core", default-features = false }
 pallet-constitution = { path = "../../pallets/constitution", default-features = false }
@@ -21,6 +21,7 @@ pallet-guardian = { path = "../../pallets/guardian", default-features = false }
 pallet-attestor = { path = "../../pallets/attestor", default-features = false }
 pallet-execution-guard = { path = "../../pallets/execution-guard", default-features = false }
 pallet-welfare = { path = "../../pallets/welfare", default-features = false }
+pallet-epoch = { path = "../../pallets/epoch", default-features = false }
 registry-core = { path = "../../crates/registry-core", default-features = false }
 
 parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "max-encoded-len"] }
@@ -34,6 +35,8 @@ frame-executive = { workspace = true }
 frame-metadata-hash-extension = { workspace = true }
 frame-system-rpc-runtime-api = { workspace = true }
 frame-benchmarking = { workspace = true, optional = true }
+frame-system-benchmarking = { workspace = true, optional = true }
+cumulus-pallet-session-benchmarking = { workspace = true, optional = true }
 frame-try-runtime = { workspace = true, optional = true }
 
 # --- Standard pallets (01 §5.1).
@@ -91,6 +94,9 @@ sp-transaction-pool = { workspace = true }
 sp-version = { workspace = true }
 
 [dev-dependencies]
+# PoV-budget tests (13 §5) measure the frame-free cores' storage-value shapes.
+market-core = { path = "../../crates/market-core" }
+conditional-ledger-core = { path = "../../crates/conditional-ledger-core" }
 sp-externalities = { version = "=0.32.0" }
 sp-keyring = { workspace = true }
 sp-tracing = { workspace = true }
@@ -111,8 +117,10 @@ std = [
   "cumulus-primitives-core/std",
   "cumulus-primitives-storage-weight-reclaim/std",
   "cumulus-primitives-utility/std",
+  "cumulus-pallet-session-benchmarking?/std",
   "frame-benchmarking?/std",
   "frame-executive/std",
+  "frame-system-benchmarking?/std",
   "frame-metadata-hash-extension/std",
   "frame-support/std",
   "frame-system-rpc-runtime-api/std",
@@ -133,6 +141,7 @@ std = [
   "pallet-conviction-voting/std",
   "pallet-execution-guard/std",
   "pallet-futarchy-treasury/std",
+  "pallet-epoch/std",
   "pallet-guardian/std",
   "pallet-market/std",
   "pallet-message-queue/std",
@@ -179,11 +188,13 @@ std = [
 ]
 runtime-benchmarks = [
   "cumulus-pallet-parachain-system/runtime-benchmarks",
+  "cumulus-pallet-session-benchmarking/runtime-benchmarks",
   "cumulus-pallet-xcmp-queue/runtime-benchmarks",
   "cumulus-primitives-core/runtime-benchmarks",
   "cumulus-primitives-utility/runtime-benchmarks",
   "frame-benchmarking/runtime-benchmarks",
   "frame-support/runtime-benchmarks",
+  "frame-system-benchmarking/runtime-benchmarks",
   "frame-system/runtime-benchmarks",
   "pallet-asset-tx-payment/runtime-benchmarks",
   "pallet-assets/runtime-benchmarks",
@@ -196,6 +207,7 @@ runtime-benchmarks = [
   "pallet-conviction-voting/runtime-benchmarks",
   "pallet-execution-guard/runtime-benchmarks",
   "pallet-futarchy-treasury/runtime-benchmarks",
+  "pallet-epoch/runtime-benchmarks",
   "pallet-guardian/runtime-benchmarks",
   "pallet-market/runtime-benchmarks",
   "pallet-message-queue/runtime-benchmarks",
@@ -242,6 +254,7 @@ try-runtime = [
   "pallet-conviction-voting/try-runtime",
   "pallet-execution-guard/try-runtime",
   "pallet-futarchy-treasury/try-runtime",
+  "pallet-epoch/try-runtime",
   "pallet-guardian/try-runtime",
   "pallet-market/try-runtime",
   "pallet-message-queue/try-runtime",

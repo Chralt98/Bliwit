@@ -168,6 +168,11 @@ impl ProbeDispatch for () {
 pub trait BenchmarkHelper<RuntimeOrigin> {
     /// A runtime origin that [`Config::AdjudicationOrigin`] accepts.
     fn adjudication_origin() -> RuntimeOrigin;
+    /// Install the real cross-pallet reporting window/spec context consumed by
+    /// `report`; mock runtimes whose provider is already primed may no-op.
+    fn prime_reporting(component: MetricId, epoch: EpochId, version: MetricSpecVersion);
+    fn prime_keeper_rebate() {}
+    fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
 
 #[frame_support::pallet]

@@ -54,6 +54,10 @@ repository = "https://github.com/bleavit/bleavit"
 frame-support = { version = "=46.0.1", default-features = false }
 frame-system = { version = "=46.0.0", default-features = false }
 frame-benchmarking = { version = "=46.0.0", default-features = false }
+# Runtime-benchmark helper shims (B5): system `set_code` + parachain session
+# benchmarks need these SDK-side harness crates; versions from the same train.
+frame-system-benchmarking = { version = "=46.0.0", default-features = false }
+cumulus-pallet-session-benchmarking = { version = "=27.0.0", default-features = false }
 # Runtime API declarations on the same `polkadot-stable2603` release train.
 sp-api = { version = "=41.0.0", default-features = false }
 sp-runtime = { version = "=46.0.0", default-features = false }

@@ -41,6 +41,7 @@ mod tests;
 
 use alloc::vec::Vec;
 use frame_support::{
+    dispatch::{DispatchResultWithPostInfo, PostDispatchInfo},
     pallet_prelude::{ConstU32, DispatchError, DispatchResult},
     weights::Weight,
     BoundedVec,
@@ -97,11 +98,13 @@ pub trait EpochHandoff {
     fn is_terminal(pid: ProposalId) -> bool;
 }
 
-/// Read-only preimage projection. `fetch` must return the bytes stored under
-/// `hash`; the pallet re-hashes and length-checks them and never trusts the key.
+/// Read-only preimage projection. `fetch` must return only the bytes stored under
+/// the exact `(hash, expected_len)` key. Implementations must reject an expected
+/// length above the kernel payload cap before reading the payload bytes. The
+/// pallet still re-hashes and length-checks the result and never trusts the key.
 pub trait Preimages {
     fn len(hash: H256) -> Option<u32>;
-    fn fetch(hash: H256) -> Option<Vec<u8>>;
+    fn fetch(hash: H256, expected_len: u32) -> Option<Vec<u8>>;
     fn unpin(hash: H256) -> DispatchResult;
 }
 
@@ -176,9 +179,24 @@ pub trait BatchDispatcher<Call> {
     /// Recognizes only the exact allowlisted `system.authorize_upgrade(hash)`.
     fn authorize_upgrade_hash(call: &Call) -> Option<H256>;
     fn dispatch_with_class_origin(call: Call, class: ProposalClass) -> DispatchResult;
+    /// Post-info-preserving form used for execute refunds. Existing runtime
+    /// dispatchers that erase `PostDispatchInfo` remain source-compatible and
+    /// deliberately report `actual_weight: None`, causing the guard to fall
+    /// back to the call's declared total weight (never an undercharge).
+    fn dispatch_with_class_origin_post_info(
+        call: Call,
+        class: ProposalClass,
+    ) -> DispatchResultWithPostInfo {
+        Self::dispatch_with_class_origin(call, class)?;
+        Ok(PostDispatchInfo::default())
+    }
     /// The sole internal-Root dispatch: exactly the committed
     /// `system.authorize_upgrade(hash)` call (I-10).
     fn dispatch_authorize_upgrade(code_hash: H256) -> DispatchResult;
+    fn dispatch_authorize_upgrade_post_info(code_hash: H256) -> DispatchResultWithPostInfo {
+        Self::dispatch_authorize_upgrade(code_hash)?;
+        Ok(PostDispatchInfo::default())
+    }
     /// Dispatch permissionless `system.apply_authorized_upgrade(code)` with a
     /// non-Root origin (Signed or None). Root is forbidden on this seam; the
     /// apply/direct+stateless-filter wording tension is retained as D-3.
@@ -196,10 +214,12 @@ pub trait BatchDispatcher<Call> {
 pub trait BenchmarkHelper<RuntimeOrigin> {
     fn ratify_origin() -> RuntimeOrigin;
     fn prime_ratify(pid: ProposalId, referendum_index: u32);
-    fn prime_execute(pid: ProposalId);
+    fn prime_execute(pid: ProposalId, calls: u32);
     fn prime_failed(pid: ProposalId);
-    fn prime_pending_upgrade(code: &[u8]);
+    fn prime_pending_upgrade(bytes: u32) -> Vec<u8>;
     fn prime_stale(pid: ProposalId);
+    fn prime_keeper_rebate() {}
+    fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
 
 #[frame_support::pallet]
@@ -208,7 +228,10 @@ pub mod pallet {
     use alloc::vec::Vec;
     use core::marker::PhantomData;
     use frame_support::{
-        dispatch::{DispatchClass, GetDispatchInfo},
+        dispatch::{
+            DispatchClass, DispatchErrorWithPostInfo, DispatchResultWithPostInfo, GetDispatchInfo,
+            Pays, PostDispatchInfo,
+        },
         pallet_prelude::*,
         storage::with_storage_layer,
         traits::EnsureOrigin,
@@ -542,15 +565,34 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// Permissionless 09 §1.2 execution crank.
         #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::execute(MAX_CALLS_BOUND))]
-        pub fn execute(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
-            let who = ensure_signed(origin)?;
-            let result = with_storage_layer(|| Self::do_execute(pid));
-            if result.is_ok() && !Queue::<T>::contains_key(pid) {
-                // B5 recalibrates this weight for the rebate sink's treasury writes.
-                T::KeeperRebate::rebate(&who, CrankClass::General);
+        #[pallet::weight(Pallet::<T>::execute_precharge())]
+        pub fn execute(origin: OriginFor<T>, pid: ProposalId) -> DispatchResultWithPostInfo {
+            let checks_only = T::WeightInfo::execute(MAX_CALLS_BOUND);
+            let who = ensure_signed(origin)
+                .map_err(|error| Self::execute_error_with_weight(error.into(), checks_only))?;
+            match with_storage_layer(|| Self::do_execute(pid)) {
+                Ok(charge) => {
+                    // B9 keeper rebate: the crank advanced state (a successful
+                    // execute always consumes the queue entry). Fail-soft — the
+                    // rebate can never affect the crank result (08 §6.3).
+                    if !Queue::<T>::contains_key(pid) {
+                        T::KeeperRebate::rebate(&who, CrankClass::General);
+                    }
+                    let actual = Self::execute_actual_weight(charge);
+                    debug_assert!(actual.all_lte(Self::execute_precharge()));
+                    Ok(PostDispatchInfo {
+                        actual_weight: Some(actual),
+                        pays_fee: Pays::Yes,
+                    })
+                }
+                Err(failure) => {
+                    let actual = failure
+                        .post_dispatch_charge
+                        .map(Self::execute_actual_weight)
+                        .unwrap_or(checks_only);
+                    Err(Self::execute_error_with_weight(failure.error, actual))
+                }
             }
-            result
         }
 
         /// Permissionless second phase of the authorized-upgrade flow.
@@ -688,11 +730,47 @@ pub mod pallet {
     struct BatchFailure {
         index: u8,
         error: DispatchError,
+        consumed_inner: Weight,
     }
 
     impl From<DispatchError> for BatchFailure {
         fn from(error: DispatchError) -> Self {
-            Self { index: 0, error }
+            Self {
+                index: 0,
+                error,
+                consumed_inner: Weight::zero(),
+            }
+        }
+    }
+
+    struct BatchDispatch {
+        outcome: DispatchOutcomeCode,
+        consumed_inner: Weight,
+    }
+
+    #[derive(Clone, Copy)]
+    struct ExecuteCharge {
+        actual_calls: u32,
+        consumed_inner: Weight,
+    }
+
+    struct ExecuteFailure {
+        error: DispatchError,
+        post_dispatch_charge: Option<ExecuteCharge>,
+    }
+
+    impl From<DispatchError> for ExecuteFailure {
+        fn from(error: DispatchError) -> Self {
+            Self {
+                error,
+                post_dispatch_charge: None,
+            }
+        }
+    }
+
+    impl<T: Config> From<Error<T>> for ExecuteFailure {
+        fn from(error: Error<T>) -> Self {
+            DispatchError::from(error).into()
         }
     }
 
@@ -718,8 +796,8 @@ pub mod pallet {
                     T::Preimages::len(item.payload_hash) == Some(item.payload_len),
                     Error::<T>::BadPreimage
                 );
-                let bytes =
-                    T::Preimages::fetch(item.payload_hash).ok_or(Error::<T>::BadPreimage)?;
+                let bytes = T::Preimages::fetch(item.payload_hash, item.payload_len)
+                    .ok_or(Error::<T>::BadPreimage)?;
                 let actual_len =
                     u32::try_from(bytes.len()).map_err(|_| Error::<T>::PayloadTooLarge)?;
                 ensure!(actual_len == item.payload_len, Error::<T>::BadPreimage);
@@ -880,7 +958,7 @@ pub mod pallet {
             Self::persist(state)
         }
 
-        fn do_execute(pid: ProposalId) -> DispatchResult {
+        fn do_execute(pid: ProposalId) -> Result<ExecuteCharge, ExecuteFailure> {
             let now = Self::now();
             let queued = Queue::<T>::get(pid).ok_or(Error::<T>::NotFound)?;
 
@@ -900,7 +978,8 @@ pub mod pallet {
                 T::Preimages::len(queued.payload_hash).ok_or(Error::<T>::BadPreimage)?;
             ensure!(noted_len == queued.payload_len, Error::<T>::BadPreimage);
             ensure!(noted_len <= MAX_PAYLOAD_BYTES, Error::<T>::PayloadTooLarge);
-            let bytes = T::Preimages::fetch(queued.payload_hash).ok_or(Error::<T>::BadPreimage)?;
+            let bytes = T::Preimages::fetch(queued.payload_hash, queued.payload_len)
+                .ok_or(Error::<T>::BadPreimage)?;
             let encoded_len =
                 u32::try_from(bytes.len()).map_err(|_| Error::<T>::PayloadTooLarge)?;
             ensure!(encoded_len == queued.payload_len, Error::<T>::BadPreimage);
@@ -1143,52 +1222,95 @@ pub mod pallet {
             };
 
             // Every check is complete. Only now may real dispatch occur.
-            let outcome = Self::dispatch_batch(calls.into_inner(), queued.class);
+            let dispatch = Self::dispatch_batch(calls.into_inner(), queued.class);
+            let outcome = dispatch.outcome;
+            let charge = ExecuteCharge {
+                actual_calls: nested_calls,
+                consumed_inner: dispatch.consumed_inner,
+            };
 
-            let mut state = Self::load()?;
-            let mut epoch = EpochAdapter::<T>(PhantomData);
-            state
-                .complete_prevalidated(GuardOrigin::Signed, &mut epoch, pid, outcome, now, upgrade)
-                .map_err(Self::map_core_error)?;
+            // Dispatch has consumed weight even if a later callback/storage
+            // operation fails and the outer storage layer rolls state back.
+            // Preserve that charge on every post-dispatch error so the refund
+            // can never drop to checks-only after real inner execution.
+            let post_dispatch: DispatchResult = (|| {
+                let mut state = Self::load()?;
+                let mut epoch = EpochAdapter::<T>(PhantomData);
+                state
+                    .complete_prevalidated(
+                        GuardOrigin::Signed,
+                        &mut epoch,
+                        pid,
+                        outcome,
+                        now,
+                        upgrade,
+                    )
+                    .map_err(Self::map_core_error)?;
 
-            if outcome == DispatchOutcomeCode::Ok {
-                if let Some(upgrade) = upgrade {
-                    T::ReleaseChannel::on_upgrade_authorized(upgrade.target_spec_version, now)?;
-                    if let Some(history) = next_spacing_history {
-                        UpgradeSpacingHistory::<T>::put(history);
+                if outcome == DispatchOutcomeCode::Ok {
+                    if let Some(upgrade) = upgrade {
+                        T::ReleaseChannel::on_upgrade_authorized(upgrade.target_spec_version, now)?;
+                        if let Some(history) = next_spacing_history {
+                            UpgradeSpacingHistory::<T>::put(history);
+                        }
+                        LastUpgradeAuthorized::<T>::put(now);
+                        PendingUpgradeCheckpoint::<T>::put((
+                            upgrade.block_hash,
+                            upgrade.state_root,
+                        ));
                     }
-                    LastUpgradeAuthorized::<T>::put(now);
-                    PendingUpgradeCheckpoint::<T>::put((upgrade.block_hash, upgrade.state_root));
+                    T::Preimages::unpin(queued.payload_hash)?;
+                    Self::cleanup_terminal(pid);
                 }
-                T::Preimages::unpin(queued.payload_hash)?;
-                Self::cleanup_terminal(pid);
-            }
-            Self::persist(state)
+                Self::persist(state)
+            })();
+            post_dispatch.map_err(|error| ExecuteFailure {
+                error,
+                post_dispatch_charge: Some(charge),
+            })?;
+            Ok(charge)
         }
 
-        fn dispatch_batch(calls: Vec<T::RuntimeCall>, class: ProposalClass) -> DispatchOutcomeCode {
-            let result: Result<(), BatchFailure> = with_storage_layer(|| {
+        fn dispatch_batch(calls: Vec<T::RuntimeCall>, class: ProposalClass) -> BatchDispatch {
+            let result: Result<Weight, BatchFailure> = with_storage_layer(|| {
+                let mut consumed_inner = Weight::zero();
                 for (index, call) in calls.into_iter().enumerate() {
+                    let declared = call.get_dispatch_info().total_weight();
                     let dispatch = if let Some(hash) = T::Dispatcher::authorize_upgrade_hash(&call)
                     {
-                        T::Dispatcher::dispatch_authorize_upgrade(hash)
+                        T::Dispatcher::dispatch_authorize_upgrade_post_info(hash)
                     } else {
-                        T::Dispatcher::dispatch_with_class_origin(call, class)
+                        T::Dispatcher::dispatch_with_class_origin_post_info(call, class)
                     };
-                    if let Err(error) = dispatch {
-                        return Err(BatchFailure {
-                            index: index.saturated_into::<u8>(),
-                            error,
-                        });
+                    match dispatch {
+                        Ok(post_info) => {
+                            consumed_inner = consumed_inner
+                                .saturating_add(post_info.actual_weight.unwrap_or(declared));
+                        }
+                        Err(error) => {
+                            consumed_inner = consumed_inner
+                                .saturating_add(error.post_info.actual_weight.unwrap_or(declared));
+                            return Err(BatchFailure {
+                                index: index.saturated_into::<u8>(),
+                                error: error.error,
+                                consumed_inner,
+                            });
+                        }
                     }
                 }
-                Ok(())
+                Ok(consumed_inner)
             });
             match result {
-                Ok(()) => DispatchOutcomeCode::Ok,
-                Err(failure) => DispatchOutcomeCode::Failed {
-                    call_index: failure.index,
-                    error: Self::dispatch_error_code(&failure.error),
+                Ok(consumed_inner) => BatchDispatch {
+                    outcome: DispatchOutcomeCode::Ok,
+                    consumed_inner,
+                },
+                Err(failure) => BatchDispatch {
+                    outcome: DispatchOutcomeCode::Failed {
+                        call_index: failure.index,
+                        error: Self::dispatch_error_code(&failure.error),
+                    },
+                    consumed_inner: failure.consumed_inner,
                 },
             }
         }
@@ -1353,6 +1475,29 @@ pub mod pallet {
             max_block
                 .saturating_mul(futarchy_primitives::kernel::PROP_MAX_WEIGHT_NUM)
                 .saturating_div(futarchy_primitives::kernel::PROP_MAX_WEIGHT_DEN)
+        }
+
+        pub(crate) fn execute_precharge() -> Weight {
+            T::WeightInfo::execute(MAX_CALLS_BOUND).saturating_add(Self::payload_weight_ceiling(
+                T::BlockWeights::get().max_block,
+            ))
+        }
+
+        fn execute_actual_weight(charge: ExecuteCharge) -> Weight {
+            T::WeightInfo::execute(charge.actual_calls).saturating_add(charge.consumed_inner)
+        }
+
+        fn execute_error_with_weight(
+            error: DispatchError,
+            actual_weight: Weight,
+        ) -> DispatchErrorWithPostInfo {
+            DispatchErrorWithPostInfo {
+                post_info: PostDispatchInfo {
+                    actual_weight: Some(actual_weight),
+                    pays_fee: Pays::Yes,
+                },
+                error,
+            }
         }
 
         fn hash_bytes(bytes: &[u8]) -> H256 {

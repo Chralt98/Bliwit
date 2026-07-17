@@ -30,7 +30,7 @@ pub use weights::WeightInfo;
 pub mod weights;
 
 #[cfg(feature = "runtime-benchmarks")]
-mod benchmarking;
+pub mod benchmarking;
 #[cfg(test)]
 mod mock;
 #[cfg(test)]
@@ -122,6 +122,13 @@ pub enum SettleTarget {
 #[cfg(feature = "runtime-benchmarks")]
 pub trait BenchmarkHelper<RuntimeOrigin> {
     fn metric_governance_origin() -> RuntimeOrigin;
+    /// Advance the configured clock so `epoch` is finalized before a keeper
+    /// crank. Runtime implementations inject the real epoch storage state.
+    fn prime_finalized_epoch(epoch: EpochId);
+    /// Populate every component the active benchmark MetricSpec reads.
+    fn prime_metric_inputs(count: u16);
+    fn prime_keeper_rebate() {}
+    fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
 
 #[frame_support::pallet]
@@ -540,7 +547,7 @@ pub mod pallet {
 
         /// Seed a checked core state for tests and worst-case benchmarks.
         #[cfg(any(test, feature = "runtime-benchmarks"))]
-        pub(crate) fn seed(state: &WelfareState) -> DispatchResult {
+        pub fn seed(state: &WelfareState) -> DispatchResult {
             let mut state = state.clone();
             state.events.clear();
             let pre = Self::load();

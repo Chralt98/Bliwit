@@ -189,10 +189,14 @@ impl pallet_conditional_ledger::Config for Test {
     type PalletId = LedgerPalletId;
     type KeeperRebate = ();
     type WeightInfo = ();
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = ();
 }
 
 impl pallet_market::Config for Test {
     type WeightInfo = ();
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = ();
     type Fee = Fee;
     type ObsInterval = ObsInterval;
     type Kappa1e9 = Kappa1e9;

@@ -488,6 +488,13 @@ fn submit_and_withdraw_cover_happy_and_shape_error_paths() {
             Epoch::submit(RuntimeOrigin::signed(keeper()), bad),
             Error::<Test>::BadProposalShape
         );
+
+        let mut oversized = proposal(2, keeper(), ProposalState::Submitted, 0, 1);
+        oversized.payload_len = futarchy_primitives::kernel::MAX_BYTES.saturating_add(1);
+        assert_noop!(
+            Epoch::submit(RuntimeOrigin::signed(keeper()), oversized),
+            Error::<Test>::BadProposalShape
+        );
     });
 }
 
@@ -660,6 +667,14 @@ fn stalled_epoch_latches_and_force_rejects_every_affected_proposal() {
             RuntimeOrigin::signed(keeper()),
             tick_batch(vec![1, 2]),
         ));
+        let first_hash = Proposals::<Test>::get(1)
+            .expect("first qualified")
+            .payload_hash;
+        let second_hash = Proposals::<Test>::get(2)
+            .expect("second qualified")
+            .payload_hash;
+        assert_eq!(preimage_request_count(first_hash), 1);
+        assert_eq!(preimage_request_count(second_hash), 1);
         let stale = phase_block(0, phase_offsets::SEED_NUM)
             .saturating_add(epoch_core::STALE_EPOCH_BOUND)
             .saturating_add(1);
@@ -675,6 +690,10 @@ fn stalled_epoch_latches_and_force_rejects_every_affected_proposal() {
         ));
         assert!(!Proposals::<Test>::contains_key(1));
         assert!(!Proposals::<Test>::contains_key(2));
+        assert_eq!(preimage_request_count(first_hash), 0);
+        assert_eq!(preimage_request_count(second_hash), 0);
+        assert!(!QualificationPins::<Test>::contains_key(1));
+        assert!(!QualificationPins::<Test>::contains_key(2));
         assert_eq!(StaleEpochCutoff::<Test>::get(), None);
         let force_events = System::events()
             .iter()
@@ -929,6 +948,11 @@ fn void_cohort_voids_every_vault_and_marks_the_cohort_void() {
             status: CohortStatus::Measuring { until_epoch: 2 },
         });
         assert_ok!(Epoch::seed(state));
+        for pid in 1..=2 {
+            let hash = [pid as u8; 32];
+            assert_ok!(<TestPreimage as PreimageAccess>::request(hash));
+            QualificationPins::<Test>::insert(pid, hash);
+        }
         assert_ok!(Epoch::void_cohort(
             RuntimeOrigin::signed(void_authority()),
             0,
@@ -946,6 +970,10 @@ fn void_cohort_voids_every_vault_and_marks_the_cohort_void() {
             vec![SeamCall::Void(1), SeamCall::Void(2)]
         );
         assert_eq!(last_epoch_event(), Some(Event::CohortVoided { epoch: 0 }));
+        for pid in 1..=2 {
+            assert_eq!(preimage_request_count([pid as u8; 32]), 0);
+            assert!(!QualificationPins::<Test>::contains_key(pid));
+        }
     });
 }
 
@@ -1499,6 +1527,112 @@ fn tick_drives_qualify_and_seed_with_bounded_idempotent_items() {
 }
 
 #[test]
+fn qualification_pins_preimage_and_unnote_is_impossible_until_t9_handoff() {
+    new_test_ext().execute_with(|| {
+        let hash = [1; 32];
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(keeper()),
+            proposal(1, keeper(), ProposalState::Submitted, 0, 1),
+        ));
+        set_block(phase_block(0, phase_offsets::QUALIFY_NUM));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        assert_eq!(QualificationPins::<Test>::get(1), Some(hash));
+        assert_eq!(preimage_request_count(hash), 1);
+        assert!(!try_unnote_preimage(hash));
+        assert_eq!(<TestPreimage as PreimageAccess>::len(hash), Some(32));
+
+        set_block(phase_block(0, phase_offsets::SEED_NUM));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        assert_eq!(preimage_request_count(hash), 1);
+
+        let decide_at = phase_block(0, phase_offsets::SEED_NUM);
+        Proposals::<Test>::mutate(1, |proposal| {
+            proposal.as_mut().expect("trading proposal").decide_at = decide_at;
+        });
+        ProposalSchedules::<Test>::mutate(1, |schedule| {
+            schedule
+                .as_mut()
+                .expect("frozen proposal schedule")
+                .decide_at = decide_at;
+        });
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+        assert_eq!(
+            Proposals::<Test>::get(1).map(|proposal| proposal.state),
+            Some(ProposalState::Queued)
+        );
+        assert_eq!(QualificationPins::<Test>::get(1), None);
+        assert_eq!(preimage_request_count(hash), 0);
+        assert!(GuardStateModel::get().pinned_preimages.contains(&(1, hash)));
+    });
+}
+
+#[test]
+fn qualification_pin_failure_rolls_back_and_remains_keeper_retriable() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(keeper()),
+            proposal(1, keeper(), ProposalState::Submitted, 0, 1),
+        ));
+        PreimageRequestFails::set(true);
+        set_block(phase_block(0, phase_offsets::QUALIFY_NUM));
+        assert_noop!(
+            Epoch::tick(RuntimeOrigin::signed(keeper()), tick_batch(vec![1])),
+            Error::<Test>::BadDecisionInput
+        );
+        assert_eq!(
+            IntakeProposals::<Test>::get(1).map(|proposal| proposal.state),
+            Some(ProposalState::Submitted)
+        );
+        assert_eq!(QualificationPins::<Test>::get(1), None);
+        assert_eq!(preimage_request_count([1; 32]), 0);
+
+        PreimageRequestFails::set(false);
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        assert_eq!(QualificationPins::<Test>::get(1), Some([1; 32]));
+    });
+}
+
+#[test]
+fn prequeue_decision_rejection_releases_qualification_pin() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(keeper()),
+            proposal(1, keeper(), ProposalState::Submitted, 0, 1),
+        ));
+        set_block(phase_block(0, phase_offsets::QUALIFY_NUM));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        set_block(phase_block(0, phase_offsets::SEED_NUM));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1]),
+        ));
+        QueueTimeCheck::set(false);
+        let decide_at = Proposals::<Test>::get(1)
+            .expect("trading proposal")
+            .decide_at;
+        set_block(decide_at);
+        assert_ok!(Epoch::decide(RuntimeOrigin::signed(keeper()), 1));
+        assert_eq!(preimage_request_count([1; 32]), 0);
+        assert_eq!(QualificationPins::<Test>::get(1), None);
+        assert!(!SeamCalls::get()
+            .iter()
+            .any(|call| matches!(call, SeamCall::Enqueue { .. })));
+    });
+}
+
+#[test]
 fn keeper_rebate_is_exactly_once_for_useful_tick_and_zero_for_noop_or_error() {
     new_test_ext().execute_with(|| {
         assert_ok!(Epoch::submit(
@@ -1557,6 +1691,33 @@ fn tick_cancels_failed_static_checks_and_slashes_intake() {
                 reason: RejectReason::ConstitutionViolation,
                 amount: 10,
             })
+        );
+    });
+}
+
+#[test]
+fn tick_rejects_a_legacy_oversized_record_before_qualification() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(keeper()),
+            proposal(1, keeper(), ProposalState::Submitted, 0, 1),
+        ));
+        let oversized = futarchy_primitives::kernel::MAX_BYTES.saturating_add(1);
+        IntakeProposals::<Test>::mutate(1, |proposal| {
+            proposal.as_mut().expect("submitted proposal").payload_len = oversized;
+        });
+        // Even a matching length report cannot make a legacy oversized record
+        // admissible: qualification applies the kernel cap before static checks.
+        PreimageLen::set(Some(oversized));
+        set_block(phase_block(0, phase_offsets::QUALIFY_NUM));
+
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(keeper()),
+            tick_batch(vec![1])
+        ));
+        assert_eq!(
+            IntakeProposals::<Test>::get(1).map(|proposal| proposal.state),
+            Some(ProposalState::Cancelled)
         );
     });
 }
@@ -2144,9 +2305,12 @@ fn settlement_is_cursor_resumable_and_welfare_is_the_only_settlement_seam() {
             0,
             CohortStatus::Measuring { until_epoch: 2 },
         )));
+        assert_ok!(<TestPreimage as PreimageAccess>::request([1; 32]));
+        QualificationPins::<Test>::insert(1, [1; 32]);
         set_block(phase_block(3, phase_offsets::HOUSEKEEPING_NUM));
         RecordKeeperRebates::set(true);
         assert_ok!(Epoch::settle_cohort(RuntimeOrigin::signed(keeper()), 0, 1));
+        assert_eq!(preimage_request_count([1; 32]), 1);
         assert_eq!(
             Cohorts::<Test>::get(0).map(|c| c.status),
             Some(CohortStatus::Settling { cursor: 1 })
@@ -2173,6 +2337,8 @@ fn settlement_is_cursor_resumable_and_welfare_is_the_only_settlement_seam() {
         );
         assert!(!Cohorts::<Test>::contains_key(0));
         assert!(!Proposals::<Test>::contains_key(1));
+        assert_eq!(preimage_request_count([1; 32]), 0);
+        assert!(!QualificationPins::<Test>::contains_key(1));
         assert_eq!(RecentCohortSummaries::<Test>::get().len(), 1);
         assert_eq!(
             last_epoch_event(),
