@@ -195,9 +195,12 @@ The data layer types carry the reserve-health trigger from [07-oracle-and-disput
 ```ts
 export interface NavView {
   navNum: bigint;                      // components per 08 §NAV definition
+  spendableNavNum: bigint;             // 0 while reserve health is degraded
+  meterUtilizationBps: number;         // rolling-meter utilization
+  classFloors: readonly [bigint, bigint, bigint, bigint]; // Param/Treasury/Code/Meta
   components: NavComponentView[];
   reserveHealth: {
-    flagged: boolean;                  // C_onchain reserve-health trigger R
+    flagged: boolean;                  // 02 §4 haircut_flag ≡ 08 §1.2 reserve_impaired
     haircut1e9: bigint | null;         // active NAV haircut, if flagged
     pbReserveActive: boolean;          // PB-RESERVE split-inflow halt in force
   };

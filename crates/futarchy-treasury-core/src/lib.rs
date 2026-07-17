@@ -172,7 +172,7 @@ pub enum AssetKind {
 
 /// Internal NAV computation (08 §1.2): the treasury's own solvency view. Named
 /// distinctly from the frozen 02 §4 `NavView` runtime-API type (in
-/// `futarchy-primitives`, a 10-field account decomposition) which the B2
+/// `futarchy-primitives`, a 13-field account decomposition) which the B2
 /// `FutarchyApi` builds from these components plus the line balances (rule 5).
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct NavComponents {

@@ -66,9 +66,9 @@ pub use guardian_core::{
 use futarchy_primitives::{AccountId as CoreAccountId, EpochId, ProposalId};
 
 /// Pallet-owned storage bounds (13 §4 has no guardian rows yet; per 13 rule 1
-/// these per-pallet storage-bound arguments live with the owning pallet, to be
-/// frozen alongside the attestor rows at the B2 `02 §7` amendment — PLAN SQ-2).
-/// Each matches the corresponding internal cap in `guardian_core`.
+/// these per-pallet storage-bound arguments live with the owning pallet). The
+/// v4 02 §7.5 amendment freezes the attestor storage only; guardian bounds remain
+/// owned here. Each matches the corresponding internal cap in `guardian_core`.
 ///
 /// `PendingActions`: the core admits `< 64` live proposed actions.
 pub const MAX_PENDING_ACTIONS: u32 = 64;

@@ -643,7 +643,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
         VERSION.transaction_version,
         futarchy_primitives::INTEGRATION_CONTRACT_VERSION
     );
-    assert_eq!(VERSION.transaction_version, 3);
+    assert_eq!(VERSION.transaction_version, 4);
     assert_eq!(
         USDC_LOCATION,
         [

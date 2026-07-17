@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 3;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 4;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -737,6 +737,9 @@ pub struct NavView {
     pub stream_remainders: Balance,
     pub obligations: Balance,
     pub haircut_flag: bool,
+    pub spendable_nav: Balance,
+    pub meter_utilization_bps: u32,
+    pub class_floors: [Balance; 4],
 }
 
 #[derive(
@@ -746,7 +749,8 @@ pub struct CohortSummary {
     pub epoch: EpochId,
     pub s_1e9: FixedU64,
     pub baseline_twap_1e9: FixedU64,
-    pub proposals: BoundedVec<(ProposalId, ProposalClass, DecisionOutcome), 5>,
+    pub proposals:
+        BoundedVec<(ProposalId, ProposalClass, DecisionOutcome), { bounds::MAX_COHORT_PROPOSALS }>,
     pub voided: bool,
     pub settled_at: BlockNumber,
 }
@@ -779,7 +783,7 @@ pub mod bounds {
     pub const MAX_PARAM_KEYS: u32 = 64;
     pub const RECENT_COHORT_SUMMARIES: u32 = 32;
     pub const MAX_OPEN_ORACLE_ROUNDS: u32 = 192;
-    pub const MAX_COHORT_PROPOSALS: u32 = 5;
+    pub const MAX_COHORT_PROPOSALS: u32 = 12;
     pub const MAX_NON_TERMINAL_COHORTS: u32 = 4;
     pub const MAX_RESOURCES_PER_PROPOSAL: u32 = 8;
     /// Generic bounded-meter registry capacity (13 §4).
@@ -970,10 +974,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_version_is_v3() {
-        // Bumped 2 → 3 for the oracle per-version triple-key reconciliation (A5;
-        // 02 §7.2/§13). A change to §2–§12 of the frozen contract bumps this.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 3);
+    fn contract_version_is_v4() {
+        // Bumped 3 → 4 for the pre-genesis B2 integration-contract amendment
+        // batch (02 §13). A change to §2–§12 of the frozen contract bumps this.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 4);
     }
 
     #[test]
@@ -1122,6 +1126,77 @@ mod tests {
             _ => panic!("OracleRoundView must encode as a SCALE composite type"),
         };
         assert_eq!(names, CONTRACT_FIELDS);
+    }
+
+    #[test]
+    fn nav_view_v4_fields_and_scale_layout_match_contract_02_section_4() {
+        use scale_info::TypeDef;
+
+        const CONTRACT_FIELDS: [&str; 13] = [
+            "total",
+            "main",
+            "pol",
+            "insurance",
+            "keeper",
+            "oracle",
+            "rewards",
+            "stream_remainders",
+            "obligations",
+            "haircut_flag",
+            "spendable_nav",
+            "meter_utilization_bps",
+            "class_floors",
+        ];
+        let type_info = NavView::type_info();
+        let names: alloc::vec::Vec<&str> = match &type_info.type_def {
+            TypeDef::Composite(composite) => composite
+                .fields
+                .iter()
+                .filter_map(|field| field.name)
+                .collect(),
+            _ => panic!("NavView must encode as a SCALE composite type"),
+        };
+        assert_eq!(names, CONTRACT_FIELDS);
+
+        let view = NavView {
+            total: 1,
+            main: 2,
+            pol: 3,
+            insurance: 4,
+            keeper: 5,
+            oracle: 6,
+            rewards: 7,
+            stream_remainders: 8,
+            obligations: 9,
+            haircut_flag: true,
+            spendable_nav: 0,
+            meter_utilization_bps: 7_500,
+            class_floors: [10, 20, 30, 40],
+        };
+        let encoded = view.encode();
+        assert_eq!(NavView::decode(&mut &encoded[..]).unwrap(), view);
+        assert_eq!(NavView::max_encoded_len(), 229);
+    }
+
+    #[test]
+    fn cohort_summary_v4_bound_and_scale_layout_match_contract_02_section_4() {
+        assert_eq!(bounds::MAX_COHORT_PROPOSALS, 12);
+        let proposals = (0..bounds::MAX_COHORT_PROPOSALS)
+            .map(|pid| (u64::from(pid), ProposalClass::Param, DecisionOutcome::Adopt))
+            .collect::<alloc::vec::Vec<_>>()
+            .try_into()
+            .unwrap();
+        let summary = CohortSummary {
+            epoch: 7,
+            s_1e9: FixedU64(500_000_000),
+            baseline_twap_1e9: FixedU64(490_000_000),
+            proposals,
+            voided: false,
+            settled_at: 42,
+        };
+        let encoded = summary.encode();
+        assert_eq!(CohortSummary::decode(&mut &encoded[..]).unwrap(), summary);
+        assert_eq!(CohortSummary::max_encoded_len(), 158);
     }
 
     #[test]

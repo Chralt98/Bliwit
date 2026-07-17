@@ -183,8 +183,9 @@ resolves deterministic disputes mechanically. Evidence is content-addressed
 ## 9. Treasury (08)
 
 - **NAV** = liquid USDC + stream remainders owed in − obligations; VIT holdings and in-flight
-  XCM marked 0 (conservative). `nav()` exposes `nav`, `spendable_nav`, `reserve_impaired`,
-  `meter_utilization` + per-class floors (distance-to-floor rendering; arming below floor
+  XCM marked 0 (conservative). `nav()` exposes `total`, `spendable_nav`, `haircut_flag`
+  (exactly `reserve_impaired`), `meter_utilization_bps` + `class_floors` in
+  Param/Treasury/Code/Meta order (distance-to-floor rendering; arming below floor
   fails loudly with `NavFloorUnmet`).
 - Sub-accounts / budget lines: `MAIN`, `POL` (≤ 0.75% NAV/epoch), `POL_BASELINE`, `KEEPER`
   (12k USDC/epoch), `ORACLE`, `REWARDS`, `INSURANCE`, `ops.*` (bootnodes, RPC/archive,

@@ -50,7 +50,7 @@ VIT holdings: marked 0. In-flight XCM: marked 0 until arrival (conservative).
 3. playbook `PB-RESERVE` becomes admissible: halts `split` inflows ([03](03-conditional-ledger.md));
 4. event `NavHaircutFlagged { epoch, flag }` is emitted on every flag transition. The FE MUST surface the flag on every NAV render ([10](10-frontend-architecture.md), [11](11-frontend-workflows.md)).
 
-`nav()` is a committed `FutarchyApi` view returning `{ nav, spendable_nav, reserve_impaired, meter_utilization }` ([02](02-integration-contract.md)); FE-15 renders it ([11](11-frontend-workflows.md)).
+`nav()` is the committed [02 §4](02-integration-contract.md) `NavView`: `total` is the NAV above; `spendable_nav` is zero under the reserve-health flag; `meter_utilization_bps` is the rolling-meter utilization; `haircut_flag` is exactly `reserve_impaired`; and `class_floors` carries the §4.1 arming floors in Param/Treasury/Code/Meta order. The remaining fields decompose the treasury accounts, stream remainders and obligations. FE-15 renders the complete view ([11](11-frontend-workflows.md)).
 
 ### 1.3 Outflow controls, streams, meters (carried forward)
 

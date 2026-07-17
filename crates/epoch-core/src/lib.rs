@@ -7,7 +7,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 use futarchy_primitives::phase_offsets;
 use futarchy_primitives::{
-    Branch, CohortSummary, DecisionOutcome, EpochId, EpochPhase, EpochStatusView, FixedU64,
+    bounds, Branch, CohortSummary, DecisionOutcome, EpochId, EpochPhase, EpochStatusView, FixedU64,
     MetricSpecVersion, ProposalClass, ProposalId, ProposalState, RejectReason, H256,
 };
 // Single-homed in `futarchy-primitives` (02 §2; 05 §1.2 frozen layout); re-exported
@@ -1707,9 +1707,14 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
     ) -> Result<(), Error> {
         let mut proposals = futarchy_primitives::BoundedVec::<
             (ProposalId, ProposalClass, DecisionOutcome),
-            5,
+            { bounds::MAX_COHORT_PROPOSALS },
         >::new();
-        for p in self.proposals.iter().filter(|p| p.epoch == epoch).take(5) {
+        for p in self
+            .proposals
+            .iter()
+            .filter(|p| p.epoch == epoch)
+            .take(bounds::MAX_COHORT_PROPOSALS as usize)
+        {
             proposals
                 .try_push((
                     p.id,
@@ -2389,5 +2394,22 @@ mod tests {
             s.decide_engine(1, &input, &strict),
             Ok(DecisionOutcome::Reject(RejectReason::HurdleNotMet))
         );
+    }
+
+    #[test]
+    fn cohort_summary_preserves_the_twelve_slot_hard_max() {
+        let mut state = EpochState::<[u8; 32]>::new();
+        for pid in 1..=u64::from(bounds::MAX_COHORT_PROPOSALS) {
+            let mut proposal = prop(pid, ProposalState::Settled);
+            proposal.decision = Some(DecisionOutcome::Adopt);
+            state.proposals.push(proposal);
+        }
+
+        state
+            .push_summary(0, FixedU64(500_000_000), FixedU64(500_000_000), 1)
+            .unwrap();
+
+        assert_eq!(state.recent[0].proposals.len(), MAX_ACTIVE_PER_EPOCH);
+        assert_eq!(state.recent[0].proposals.len(), 12);
     }
 }
