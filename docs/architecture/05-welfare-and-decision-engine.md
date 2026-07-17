@@ -86,8 +86,36 @@ pub enum RejectReason {
 | `RateLimited` | `decide()` step 10 (constitutional meters/spacing) | T10 |
 | `NotRatified` | execution guard: ratification referendum concluded **Failed**, or grace end reached unratified ([doc 06](./06-governance-and-guardians.md) mechanics, [doc 09](./09-execution-upgrades-and-rollout.md) dispatch check) | T16 |
 | `StaleQueue` | execution guard: version-constraint mismatch; meter contention past grace | T16 |
-| `VetoUpheldByReview` | guardian review flow: the mandatory retrospective review of a `delay_once` concludes with an upheld-veto verdict before the rerun opens ([doc 06](./06-governance-and-guardians.md)) | T24 |
+| `VetoUpheldByReview` | guardian review flow: the mandatory retrospective review of a `delay_once` concludes with an upheld-veto verdict before the rerun opens — the `ratify`-track referendum enacts `guardian.uphold_veto(action_id)`, the single producing site ([doc 06](./06-governance-and-guardians.md) §5.4) | T24 |
 | `PayloadReverted` | execution-failure recording: carried in `ExecutionFailed { reason }` and in `ExecutionRecord.result` at T18; copied into the cohort's `DecisionRecord` when T22 fires | T18 (annotation), T22 |
+
+### 1.4 Canonical resource-domain keys (B1b; resolves the SQ-172/SQ-183 screening gap)
+
+`Proposal.resources` (§1.2) declares the payload's resource-domain footprint; screening verifies the declaration mechanically (§2.1 T4/T5) and the execution guard re-derives its own surfaces at dispatch ([doc 09](./09-execution-upgrades-and-rollout.md) §1.2(8)/(11), I-11). The canonical payload → footprint mapping is fixed here; the frontend composes declarations with the same rule ([doc 02](./02-integration-contract.md) carries the `Proposal` type by inclusion; this section owns the key encoding).
+
+**Leaf set.** Decode the committed payload under the [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(11) bounds and recurse exclusively through `utility.batch_all` (≤ `MAX_NESTED` = 4 levels, ≤ 16 calls total, [13](./13-parameters.md) §2). Payloads dispatch under a single class origin, and the best-effort batch variants (`utility.batch`, `utility.force_batch`) are rejected by the class-origin dispatcher (SQ-96) — so no other call-carrying wrapper is payload-admissible: any other wrapper, and any leaf outside the family table below, makes the batch **unclassifiable** (T4, §1.1).
+
+**Key encoding.** A resource key is 8 bytes: `key[0]` is the domain-family tag; `key[1..8]` is the first 7 bytes of `blake2_256(discriminator)` for keyed families and `[0u8; 7]` for singleton families.
+
+| Tag | Family | Payload leaves | Discriminator |
+|---|---|---|---|
+| `0x01` | Parameter record | `constitution.set_param(key, _)`, `constitution.amend_registry(key, …)` | the 16-byte `ParamKey` |
+| `0x02` | Capability record | `constitution.set_capability(record)` | SCALE(`record.class`) ++ SCALE(`record.capability`) |
+| `0x03` | Runtime code | `system.authorize_upgrade(_)` | — (singleton) |
+| `0x04` | Market template | `market.set_template(…)`\* | — (singleton) |
+| `0x05` | Oracle config | `oracle.set_config(…)`\* | — (singleton) |
+| `0x06` | Registry config | `registry.set_config(…)`\* | SCALE(instance discriminant: `u8`; incident = 0, milestone = 1) |
+| `0x07` | Treasury beneficiary | `futarchy_treasury.spend(_, dest, _)`, `futarchy_treasury.open_stream(_, recipient, …)` | SCALE(`AccountId`) of the beneficiary |
+| `0x08` | Treasury stream | `futarchy_treasury.cancel_stream(id)` | SCALE(`id: u64`) |
+| `0x09` | Budget line | `futarchy_treasury.fund_budget_line(line, _)` | SCALE(`line`) |
+
+\* Enumerated by the [doc 06](./06-governance-and-guardians.md) §3.2 matrix; a runtime whose live call surface does not (yet) include a listed call simply never produces that family. The table is exhaustive over the belief-payload-admissible surface: a leaf outside it has no key and the batch is unclassifiable (T4) — which structurally enforces the [doc 06](./06-governance-and-guardians.md) §1 / I-8 values-scope exclusion (values-scope calls appear in no row).
+
+**Footprint and the screening rule.** `footprint(payload)` = the deduplicated set of leaf keys. If `|footprint| > 8`, the batch is unclassifiable (the [13](./13-parameters.md) §4 lock bound). "Domain mismatch" in T4 means **set inequality**: the declared `resources` MUST equal `footprint(payload)` as a set (order- and duplicate-insensitive). Set inequality in either direction is a **false resource declaration** carrying T4's 100%-slash disposition — under-declaration understates the footprint; over-declaration squats locks the payload never touches ([doc 06](./06-governance-and-guardians.md) §4 rule 5 prices both). Canonical presentation (recommended for composers, not consensus-enforced): ascending bytewise, no duplicates. Class derivation stays the §1.1 mechanical rule over the [doc 06](./06-governance-and-guardians.md) §3.2 matrix (for family `0x01`, `set_param`'s class follows the registered key's class; the `amend_registry` scope contest is SQ-150 and deliberately not resolved here); a batch admitting no single class origin — or an empty batch — is class-less → T4 with the §2.1 refund-vs-slash taxonomy.
+
+**Collision domain.** Distinct families never collide (tag byte). Within a family, keys collide iff their truncated 56-bit `blake2_256` digests collide. A collision can only **over-lock** (a spurious T6 conflict/rollover): class admission and values-scope exclusion are decided on leaves before any key is computed, so no collision can admit an inadmissible call or forge a class — a liveness cost, never a safety cost. Targeted second-preimage grief costs ~2⁵⁶ hash evaluations with a bond at risk; accepted. A CI test asserts zero collisions across the concrete key universe (all registered `ParamKey`s × both `0x01` leaves, the enumerable discriminators, and the singletons).
+
+**Lock persistence to dispatch.** Locks acquired at T5 are released only at terminal transitions, and every terminal transition of a queued proposal cancels its queue entry atomically (§2.1, [doc 09](./09-execution-upgrades-and-rollout.md) §1.1) — so [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(8)'s "locks still held" is structural on the epoch side; the guard's step-8 meter locks and step-11 call-domain re-derivation (I-11) re-check the mechanically derived surfaces at dispatch time.
 
 ---
 
@@ -122,7 +150,7 @@ Changes vs. the superseded table (B-12): **T21/T22/T23 added**, **T13 restructur
 | **T21** | **Rejected(r) / Expired → Measuring** | automatic, same block as entering Rejected/Expired | — | fires iff markets were deployed and the vault is open (not `Voided`): vault `resolve(Reject)`; the REJECT branch trades through measurement and settles — **the most common lifecycle path** | — | `MeasurementStarted(cohort)` |
 | **T22** | **FailedExecuted → Measuring** | `tick` | keeper | 72 h retry window exhausted; vault `resolve(Accept)` — measured as **executed-with-failure** (the adopted world, including the failure's consequences, is what W measures); `DecisionRecord` carries `PayloadReverted` | — | `MeasurementStarted(cohort)` |
 | **T23** | **FailedExecuted → Executed** | `execution_guard.execute` (retry) | Signed (keeper) | within the 72 h retry window; full dispatch re-validation repeats | slash from T18 not reversed | `Executed { record }` (then T17) |
-| **T24** | **Suspended → Rejected(VetoUpheldByReview)** | guardian review flow: retrospective `ratify`-track review of the delay concludes with an upheld-veto verdict ([doc 06](./06-governance-and-guardians.md)) | values enactment (via guardian pallet) | before the rerun opens; consumes the guardian's delay allowance permanently | bond refunded; then T21 fires | `ProposalRejected(VetoUpheldByReview)` |
+| **T24** | **Suspended → Rejected(VetoUpheldByReview)** | guardian review flow: the retrospective `ratify`-track review of the delay enacts `guardian.uphold_veto(action_id)` ([doc 06](./06-governance-and-guardians.md) §5.4) | values enactment (via guardian pallet) | before the rerun opens; consumes the guardian's delay allowance permanently | bond refunded; then T21 fires | `ProposalRejected(VetoUpheldByReview)` |
 
 Rules carried forward unchanged: idempotency (every keeper call re-invoked in the same state is a no-op returning `Ok` with a `NoOp` event or a benign error; no transition is repeatable with side effects); **no rejection, timeout, veto, or expiry path enqueues execution** (I-15, checked by state-machine model checking, [doc 15](./15-invariants-and-testing.md)).
 
