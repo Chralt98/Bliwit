@@ -1025,21 +1025,18 @@ fn liquid_position(kind: BookKind) -> Option<PositionId> {
 /// fee to the fees account, so the book keeps `cost`; the unbranched Baseline
 /// wrapper retains the whole `cost + fee` complete pair in the book (04 §6.1), so
 /// its inventory grows by the fee-inclusive total.
+///
+/// Sells need no kind split: the 04 §6.1 payout-sized merge converts exactly
+/// `net + fee == proceeds` of paired legs into USDC on every kind (Decision/Gate
+/// pay the fees account and the seller out of the liquid branch-USDC leg;
+/// Baseline re-splits `net` into the seller's pairs and holds the withheld fee
+/// as USDC custody outside the tracked legs) while the seller's returned
+/// `amount` joins book inventory — every sell drains the tracked inventory by
+/// the gross `proceeds`.
 fn inventory_inflow_on_buy(kind: BookKind, cost: Balance) -> Balance {
     match kind {
         BookKind::Baseline { .. } => cost + fee_up(cost, FEE_BPS).expect("fee in range"),
         _ => cost,
-    }
-}
-
-/// Inventory the book parts with on a sell. Decision/Gate recycle the seller's
-/// `proceeds` of branch-USDC; the Baseline wrapper merges the seller's `amount`
-/// leg and re-splits the net payout, so its net inventory change per sell is the
-/// position `amount` (the fee stays in book inventory).
-fn inventory_outflow_on_sell(kind: BookKind, proceeds: Balance, amount: Balance) -> Balance {
-    match kind {
-        BookKind::Baseline { .. } => amount,
-        _ => proceeds,
     }
 }
 
@@ -1347,7 +1344,7 @@ fn assert_round_trip(kind: BookKind, b: Balance, selector: u16) {
     let cash =
         i128::try_from(buy_cost).expect("range") - i128::try_from(sell_proceeds).expect("range");
     let inventory = i128::try_from(inventory_inflow_on_buy(kind, buy_cost)).expect("range")
-        - i128::try_from(inventory_outflow_on_sell(kind, sell_proceeds, amount)).expect("range");
+        - i128::try_from(sell_proceeds).expect("range");
     assert_book_state(&book, &ledger, headroom, cash, inventory);
 }
 
@@ -1410,8 +1407,7 @@ pub fn assert_lmsr_case(case: &TradeCase) {
                 ) {
                     let proceeds = traded_cost(&events);
                     net_revenue -= i128::try_from(proceeds).expect("range");
-                    inventory -= i128::try_from(inventory_outflow_on_sell(kind, proceeds, amount))
-                        .expect("range");
+                    inventory -= i128::try_from(proceeds).expect("range");
                 }
             }
         }

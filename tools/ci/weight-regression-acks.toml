@@ -8,6 +8,3 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
-runtime/bleavit-runtime/src/weights/pallet_epoch.rs tick: bounded XCM-traffic catch-up now clears at most two 256-day prefixes on every tick
-runtime/bleavit-runtime/src/weights/pallet_epoch.rs settle_cohort: terminal welfare prune now writes snapshot, gate, sampled-day, and two bounded XCM-traffic prefixes
-runtime/bleavit-runtime/src/weights/pallet_futarchy_treasury.rs fund_budget_line: ForeignAssets custody transfer now writes MAIN and Keeper/Oracle pot asset accounts
