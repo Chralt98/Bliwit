@@ -31,7 +31,7 @@ jobs:
       - name: Run release-blocking supply-chain gates
         run: tools/ci/supply-chain-gates.sh --summary-out release-work/supply-chain-summary.json
       - name: Preserve supply-chain disclosure for the release bundle
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bleavit-supply-chain-${{ github.run_id }}
           if-no-files-found: error
@@ -116,7 +116,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bleavit-supply-chain-${{ github.run_id }}
           path: release-work
@@ -188,7 +188,7 @@ jobs:
             --supply-chain-summary "$RELEASE_WORK/supply-chain-summary.json" \
             "${assemble_args[@]}"
       - name: Upload immutable bundle for publication or dry-run inspection
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bleavit-release-${{ github.run_id }}
           if-no-files-found: error
@@ -199,7 +199,7 @@ jobs:
             release-work/readiness-report.md
       - name: Preserve environment run logs and report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bleavit-env-evidence-${{ github.run_id }}
           if-no-files-found: ignore
@@ -215,7 +215,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: bleavit-release-${{ github.run_id }}
           path: release-work
