@@ -11,15 +11,16 @@ use frame_support::{
         fungible::Inspect as FungibleInspect,
         fungibles::{Inspect as FungiblesInspect, Mutate as FungiblesMutate},
         tokens::ConversionToAssetBalance,
-        Contains, EnsureOrigin, Get, Hooks, PalletInfo, PalletsInfoAccess, StorePreimage,
+        ConstU32, Contains, EnsureOrigin, Get, Hooks, PalletInfo, PalletsInfoAccess, StorePreimage,
         VestingSchedule,
     },
     weights::Weight,
+    BoundedVec,
 };
 use futarchy_primitives::{chain_identity, currency, kernel, ProposalClass};
 use origins_core::Origin as ClassOrigin;
 use pallet_guardian::WeightInfo as GuardianWeightInfo;
-use parity_scale_codec::Encode;
+use parity_scale_codec::{Compact, Decode, Encode};
 use sp_core::H256;
 use sp_genesis_builder::PresetId;
 use sp_inherents::InherentData;
@@ -999,6 +1000,88 @@ fn vesting_force_calls_are_nobody_and_public_calls_remain_public() {
 }
 
 #[test]
+fn vesting_schedule_bound_rejects_the_ninth_schedule() {
+    // limit-coverage: Vesting schedules per account
+    development_ext().execute_with(|| {
+        let source = Sr25519Keyring::Alice.to_account_id();
+        let target = account(99);
+        let schedule = pallet_vesting::VestingInfo::new(currency::VIT, 1, 100);
+        for _ in 0..8 {
+            assert_ok!(Vesting::vested_transfer(
+                RuntimeOrigin::signed(source.clone()),
+                MultiAddress::Id(target.clone()),
+                schedule,
+            ));
+        }
+        assert_noop!(
+            Vesting::vested_transfer(
+                RuntimeOrigin::signed(source),
+                MultiAddress::Id(target),
+                schedule,
+            ),
+            pallet_vesting::Error::<Runtime>::AtMaxVestingSchedules
+        );
+    });
+}
+
+#[test]
+fn oracle_proof_bound_is_enforced_by_real_runtime_extrinsic_admission() {
+    // limit-coverage: orc.max_proof_bytes
+    let bound = pallet_oracle::MAX_PROOF_BYTES_BOUND;
+    let proof = BoundedVec::<u8, ConstU32<{ pallet_oracle::MAX_PROOF_BYTES_BOUND }>>::try_from(
+        vec![0; bound as usize],
+    )
+    .expect("the at-bound proof constructs");
+    let call = RuntimeCall::Oracle(pallet_oracle::Call::recompute_proof {
+        component: 1,
+        epoch: 1,
+        spec_version: 1,
+        proof,
+    });
+    let call_bytes = call.encode();
+    let call_len = call_bytes.len();
+    let encoded_at_bound = UncheckedExtrinsic::new_bare(call).encode();
+    let mut at_bound_input = encoded_at_bound.as_slice();
+    let decoded_at_bound = UncheckedExtrinsic::decode(&mut at_bound_input);
+    assert!(decoded_at_bound.is_ok());
+    assert!(at_bound_input.is_empty());
+
+    // Derive the real bare-extrinsic preamble from the valid runtime type, then
+    // replace only its call bytes with a proof whose declared/actual length is
+    // bound+1. This exercises UncheckedExtrinsic::decode, not just pallet Call.
+    let encoded_bound_len = Compact(bound).encode();
+    let proof_start = call_bytes.len().saturating_sub(bound as usize);
+    let length_start = proof_start.saturating_sub(encoded_bound_len.len());
+    assert_eq!(
+        &call_bytes[length_start..proof_start],
+        encoded_bound_len.as_slice()
+    );
+    let mut oversized_call = call_bytes;
+    oversized_call.splice(
+        length_start..proof_start,
+        Compact(bound.saturating_add(1)).encode(),
+    );
+    oversized_call.push(0);
+
+    let mut inner_at_bound = encoded_at_bound.as_slice();
+    let declared_inner = Compact::<u32>::decode(&mut inner_at_bound)
+        .expect("valid bare extrinsic has a compact length")
+        .0 as usize;
+    assert_eq!(declared_inner, inner_at_bound.len());
+    let preamble_len = inner_at_bound.len().saturating_sub(call_len);
+    let mut oversized_inner = inner_at_bound[..preamble_len].to_vec();
+    oversized_inner.extend(oversized_call);
+    let mut encoded_oversized =
+        Compact(u32::try_from(oversized_inner.len()).expect("test extrinsic length fits u32"))
+            .encode();
+    encoded_oversized.extend(oversized_inner);
+
+    let error = UncheckedExtrinsic::decode(&mut encoded_oversized.as_slice())
+        .expect_err("a bound+1 proof must fail real runtime extrinsic admission");
+    assert!(error.to_string().contains("BoundedVec exceeds its limit"));
+}
+
+#[test]
 fn metadata_generates_and_runtime_constants_are_visible() {
     development_ext().execute_with(|| {
         let encoded = Runtime::metadata().encode();
@@ -1052,6 +1135,7 @@ fn d13_system_calls_are_denied_bare_and_through_every_closed_wrapper() {
 
 #[test]
 fn nesting_budget_accepts_the_limit_and_fails_closed_beyond_it() {
+    // limit-coverage: MAX_NESTED
     let mut at_limit = remark();
     for _ in 0..kernel::MAX_NESTED_LEVELS {
         at_limit = RuntimeCall::Utility(pallet_utility::Call::batch {
@@ -1068,6 +1152,15 @@ fn nesting_budget_accepts_the_limit_and_fails_closed_beyond_it() {
         calls: (0..=kernel::MAX_NESTED_CALLS).map(|_| remark()).collect(),
     });
     assert!(!RuntimeBaseCallFilter::contains(&oversized));
+
+    development_ext().execute_with(|| {
+        for call in [beyond, oversized] {
+            assert_noop!(
+                call.dispatch(RuntimeOrigin::signed(account(70))),
+                frame_system::Error::<Runtime>::CallFiltered
+            );
+        }
+    });
 }
 
 #[test]

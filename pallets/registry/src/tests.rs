@@ -78,6 +78,7 @@ fn file_rejects_closed_window_bad_class_and_spec_mismatch() {
 
 #[test]
 fn file_enforces_epoch_and_live_epoch_caps() {
+    // limit-coverage: reg.max_filings_epoch, Registry filings (Incident/Milestone)
     new_test_ext().execute_with(|| {
         for i in 0..MAX_FILINGS_PER_EPOCH {
             assert_ok!(IncidentRegistry::file(

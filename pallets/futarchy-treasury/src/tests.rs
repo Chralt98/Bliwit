@@ -140,6 +140,7 @@ fn fund_budget_line_moves_main_into_the_line() {
 
 #[test]
 fn spend_enforces_stream_threshold_cap_and_line_balance() {
+    // limit-coverage: trs.stream_thr
     funded_ext().execute_with(|| {
         // > 1% NAV (250k) must stream, not spend.
         assert_noop!(
@@ -272,6 +273,7 @@ fn streams_are_mandatory_claimable_and_cancellable() {
 
 #[test]
 fn issuance_is_line_scoped_and_capped_at_two_percent() {
+    // limit-coverage: iss.inflation
     funded_ext().execute_with(|| {
         assert_noop!(
             Treasury::issue_vit(to(), 1, BudgetLine::Pol),
@@ -388,6 +390,7 @@ fn payout_failure_drops_line_meter_and_events() {
 
 #[test]
 fn threshold_events_map_and_zero_pay_exhaustion_flag_persists_once() {
+    // limit-coverage: keeper.budget
     funded_ext().execute_with(|| {
         assert_ok!(Treasury::fund_budget_line(
             to(),
@@ -833,6 +836,7 @@ fn nav_floor_gate_is_loud() {
 
 #[test]
 fn rolling_30d_meter_binds_spending() {
+    // limit-coverage: trs.cap_30d, trs.cap_180d
     // NAV 25M ⇒ trailing-30d ceiling = 10% = 2.5M. Pre-load the meter to just
     // under it so a within-threshold, within-per-proposal-cap spend still trips.
     funded_ext().execute_with(|| {
@@ -852,12 +856,25 @@ fn rolling_30d_meter_binds_spending() {
             50_000 * USDC
         ));
     });
+
+    funded_ext().execute_with(|| {
+        let mut t = crate::Pallet::<Test>::treasury();
+        let nav = t.nav().nav;
+        t.meter_180d.buckets[0] =
+            nav * u128::from(futarchy_treasury_core::TRS_CAP_180D_BPS) / 10_000;
+        crate::Pallet::<Test>::seed(&t);
+        assert_noop!(
+            Treasury::spend(to(), BudgetLine::OpsCollators, acc(1), USDC),
+            Error::<Test>::MeterExhausted
+        );
+    });
 }
 
 // ---- rule 4: caps are read from Params, not hardcoded -----------------------
 
 #[test]
 fn caps_track_params_not_a_hardcode() {
+    // limit-coverage: trs.cap_proposal
     funded_ext().execute_with(|| {
         // A 300k grant is a valid stream at defaults (> 1% NAV threshold, ≤ 5%
         // NAV cap). Tighten the per-proposal cap to 0.2% via Params ⇒ the same
@@ -913,6 +930,7 @@ fn caps_track_params_not_a_hardcode() {
 
 #[test]
 fn stream_bound_is_enforced() {
+    // limit-coverage: Treasury Streams
     funded_ext().execute_with(|| {
         // Seed the stream table to its 13 §4 bound.
         let mut t = crate::Pallet::<Test>::treasury();
@@ -1005,6 +1023,14 @@ fn nav_nets_pol_and_pending_obligations() {
             crate::Pallet::<Test>::set_pol_commitments(vec![
                 1;
                 futarchy_treasury_core::MAX_POL_COMMITMENTS
+                    + 1
+            ]),
+            Error::<Test>::TooManyObligations
+        );
+        assert_noop!(
+            crate::Pallet::<Test>::set_pending_outflows(vec![
+                1;
+                futarchy_treasury_core::MAX_PENDING_OUTFLOWS
                     + 1
             ]),
             Error::<Test>::TooManyObligations

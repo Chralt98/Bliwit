@@ -22,6 +22,7 @@ use oracle_core::{
     ORC_EXT_WINDOW_BLOCKS, ORC_REPORTER_STAKE, ORC_ROUNDS, ORC_WINDOW_BLOCKS, RES_PROBE_INTERVAL,
     RES_PROBE_TIMEOUT, WT_STAKE,
 };
+use parity_scale_codec::{Compact, Decode, Encode};
 use sp_runtime::DispatchError;
 
 // ------------------------------------------------------------- fixtures ----
@@ -261,6 +262,7 @@ fn register_watchtower_duplicate_is_already_registered() {
 
 #[test]
 fn register_watchtower_fills_to_bound_then_rejects() {
+    // limit-coverage: wt.max
     // 07 §4 `wt.max = 16` seats: the 16 fill, the 17th is rejected.
     new_test_ext().execute_with(|| {
         for n in 1..=16u8 {
@@ -273,6 +275,29 @@ fn register_watchtower_fills_to_bound_then_rejects() {
         );
         assert_eq!(Watchtowers::<Test>::count(), 16);
         assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn live_round_bound_rejects_the_129th_game() {
+    // limit-coverage: Oracle games (live rounds)
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        assert_ok!(do_report(1, E, reported_value(), h(9)));
+        let template = Rounds::<Test>::get((C, E, V)).expect("first round exists");
+        let mut epoch = 100u32;
+        while Rounds::<Test>::iter().count() < oracle_core::MAX_ROUNDS {
+            let mut round = template;
+            round.epoch = epoch;
+            Rounds::<Test>::insert((C, epoch, V), round);
+            epoch = epoch.saturating_add(1);
+        }
+
+        assert_noop!(
+            do_report(1, epoch, reported_value(), h(10)),
+            Error::<Test>::RoundLimit
+        );
+        assert_eq!(Rounds::<Test>::iter().count(), oracle_core::MAX_ROUNDS);
     });
 }
 
@@ -499,6 +524,7 @@ fn challenge_happy_path_supersedes_quorum_and_escalates_with_doubled_bond() {
 
 #[test]
 fn challenge_window_is_half_open_at_the_deadline() {
+    // limit-coverage: orc.window
     // Codex F24 / 07 §5.2: the challenge window is `[open, deadline)` — a
     // challenge at `deadline - 1` is the last valid block, and one at the
     // `deadline` block (which the close crank treats as mature) is `WindowClosed`,
@@ -627,6 +653,7 @@ fn crank_quorum_and_no_challenge_settles_unchallenged() {
 
 #[test]
 fn crank_no_quorum_extends_once_then_settles_neutral() {
+    // limit-coverage: orc.ext_window
     // 07 §4/§10: no quorum and no challenge ⇒ one 48 h (`orc.ext_window`)
     // extension, then — still no quorum — the neutral path, carrying the last
     // valid value (0.5 with no history, 05 §10) with the epoch flagged.
@@ -1012,16 +1039,22 @@ fn recompute_proof_off_grid_committed_payload_is_bad_proof() {
 
 #[test]
 fn recompute_proof_arg_bound_rejects_oversized_payload() {
-    // 07 §9: `orc.max_proof_bytes = 256 KiB` is enforced by the SCALE-decoded
-    // `BoundedVec` argument itself — a payload one byte over the bound cannot be
-    // constructed into the call, so `ProofTooLarge` is unreachable by design.
-    new_test_ext().execute_with(|| {
-        let oversized = vec![0u8; crate::MAX_PROOF_BYTES_BOUND as usize + 1];
-        assert!(ProofArg::try_from(oversized).is_err());
-        // The boundary value (exactly the bound) is constructible.
-        let at_bound = vec![0u8; crate::MAX_PROOF_BYTES_BOUND as usize];
-        assert!(ProofArg::try_from(at_bound).is_ok());
-    });
+    // 07 §9: the `BoundedVec` call argument refuses a raw SCALE payload whose
+    // declared proof length is exactly one byte over the bound. This happens at
+    // call admission, before dispatch; weakening the argument to an unbounded
+    // Vec just to make `ProofTooLarge` reachable would be unsafe.
+    let mut encoded_call = vec![4u8]; // `recompute_proof` call index.
+    encoded_call.extend(C.encode());
+    encoded_call.extend(E.encode());
+    encoded_call.extend(V.encode());
+    encoded_call.extend(Compact(crate::MAX_PROOF_BYTES_BOUND + 1).encode());
+
+    let error = crate::Call::<Test>::decode(&mut encoded_call.as_slice())
+        .expect_err("a max+1 proof must fail SCALE call admission");
+    assert_eq!(
+        error.to_string(),
+        "Could not decode `Call::recompute_proof::proof`:\n\tBoundedVec exceeds its limit\n"
+    );
 }
 
 // =========================================================================
@@ -1631,6 +1664,7 @@ mod probe_dispatch_seam {
 
 #[test]
 fn reserve_probe_before_interval_is_too_early() {
+    // limit-coverage: res.probe_int
     new_test_ext().execute_with(|| {
         // Block 1 < `res.probe_interval` (14,400): no probe may be sent yet.
         assert_noop!(
@@ -2397,6 +2431,7 @@ fn adjudicate_on_a_fresh_round_is_window_open() {
 
 #[test]
 fn note_settle_deadline_neutralizes_contested_round_and_blocks_late_verdict() {
+    // limit-coverage: OracleSettleDeadline(m)
     // 07 §11 rule 1: any `(component, m)` not challenge-closed by its
     // `OracleSettleDeadline` settles NEUTRALLY. Once neutral-settled and removed,
     // a late terminal verdict finds no round and cannot overwrite the money (I-18

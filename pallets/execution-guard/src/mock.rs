@@ -193,6 +193,15 @@ pub mod pallet_test_dispatch {
             let _ = (kind, leaf);
             Ok(())
         }
+
+        /// A Normal-class call whose declared weight is guaranteed to exceed
+        /// the guard's 25%-of-block payload ceiling.
+        #[pallet::call_index(3)]
+        #[pallet::weight(Weight::MAX)]
+        pub fn heavy(origin: OriginFor<T>) -> DispatchResult {
+            T::FutarchyOrigin::ensure_origin(origin)?;
+            Ok(())
+        }
     }
 }
 
@@ -449,7 +458,8 @@ impl pallet_origins::SafetyClassifier for MockClassifier {
         use pallet_origins::{BoxedCall, FilterCall};
         match call {
             RuntimeCall::TestDispatch(pallet_test_dispatch::Call::set_value { .. })
-            | RuntimeCall::TestDispatch(pallet_test_dispatch::Call::fail_after_write { .. }) => {
+            | RuntimeCall::TestDispatch(pallet_test_dispatch::Call::fail_after_write { .. })
+            | RuntimeCall::TestDispatch(pallet_test_dispatch::Call::heavy {}) => {
                 FilterCall::Leaf(pallet_origins::CallDomain::Param)
             }
             RuntimeCall::TestDispatch(pallet_test_dispatch::Call::wrapped { kind, leaf }) => {
@@ -941,6 +951,10 @@ pub fn param_call(value: u32) -> RuntimeCall {
 
 pub fn failing_call(value: u32) -> RuntimeCall {
     RuntimeCall::TestDispatch(pallet_test_dispatch::Call::fail_after_write { value })
+}
+
+pub fn heavy_call() -> RuntimeCall {
+    RuntimeCall::TestDispatch(pallet_test_dispatch::Call::heavy {})
 }
 
 pub fn wrapped_call(kind: WrapperKind, leaf: CallDomain) -> RuntimeCall {

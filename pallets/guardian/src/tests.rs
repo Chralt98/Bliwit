@@ -156,6 +156,35 @@ fn ratify_action_is_values_origin_only() {
 
 #[test]
 fn ledger_freeze_requires_drift_and_one_renewal() {
+    // limit-coverage: pb-ledger-freeze.duration, pb-ledger-freeze.renewal
+    new_test_ext().execute_with(|| {
+        // The playbook's absolute expiry is bounded to 14 days from dispatch.
+        set_triggers(guardian_core::TriggerState {
+            ledger_drift: true,
+            ..guardian_core::TriggerState::none()
+        });
+        let now = u32::try_from(System::block_number()).expect("mock block fits u32");
+        let expiry = now
+            .saturating_add(guardian_core::HOLD_MAX_BLOCKS)
+            .saturating_add(1);
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::ActivatePlaybook {
+                id: PlaybookId::LedgerFreeze,
+                trigger: PlaybookTrigger::LedgerDrift,
+                expiry,
+            },
+            hash(1)
+        ));
+        for n in 2..=4u8 {
+            assert_ok!(Guardian::approve_action(RuntimeOrigin::signed(acct(n)), 0));
+        }
+        assert_noop!(
+            Guardian::approve_action(RuntimeOrigin::signed(acct(5)), 0),
+            Error::<Test>::DurationTooLong
+        );
+    });
+
     new_test_ext().execute_with(|| {
         // No drift trigger ⇒ activation refused at the dispatching approval.
         set_triggers(guardian_core::TriggerState::none());

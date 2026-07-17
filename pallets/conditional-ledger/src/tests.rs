@@ -9,7 +9,10 @@
 
 use crate::{mock::*, DepositsHeld, Error, Event, Positions, VaultTerminalAt, Vaults};
 use conditional_ledger_core::{position as pos, LedgerOrigin, LedgerState};
-use frame_support::{assert_noop, assert_ok, traits::fungibles::Inspect};
+use frame_support::{
+    assert_noop, assert_ok,
+    traits::fungibles::{Inspect, Mutate},
+};
 use frame_system::RawOrigin;
 use futarchy_primitives::{
     keeper::CrankClass, kernel, Branch, FixedU64, GateType, MetricSpecVersion, PositionKind,
@@ -422,6 +425,7 @@ fn split_requires_signed() {
 
 #[test]
 fn position_cap_enforced_for_non_protocol_atomic() {
+    // limit-coverage: MaxPositionsPerAccount
     new_test_ext().execute_with(|| {
         // 32 vaults × split = 64 positions for ALICE = the cap.
         for pid in 0..32u64 {
@@ -457,6 +461,7 @@ fn protocol_accounts_exempt_from_cap_and_deposit() {
 
 #[test]
 fn sweep_dust_reaps_after_archive_delay_and_sweeps_residue() {
+    // limit-coverage: ledger.archive
     new_test_ext().execute_with(|| {
         create(1);
         // ALICE splits, then transfers her whole Reject leg away so an unpaired
@@ -569,6 +574,41 @@ fn proposal_sweep_rebates_partial_progress_and_zero_residue_full_reap() {
                 (ALICE, CrankClass::General),
             ]
         );
+    });
+}
+
+#[test]
+fn reap_batch_leaves_the_101st_position_for_the_next_dispatch() {
+    // limit-coverage: ReapBatch
+    new_test_ext().execute_with(|| {
+        create(1);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 10 * UNIT));
+        let accept = pos(1, Branch::Accept, PositionKind::BranchUsdc);
+        for who in 10..109 {
+            assert_ok!(<Assets as Mutate<AccountId>>::mint_into(
+                USDC,
+                &who,
+                kernel::POSITION_DEPOSIT_USDC + kernel::MIN_SPLIT_USDC,
+            ));
+            assert_ok!(Ledger::transfer(
+                signed(ALICE),
+                accept,
+                who,
+                kernel::MIN_SPLIT_USDC,
+            ));
+        }
+        assert_eq!(Positions::<Test>::iter().count(), 101);
+        assert_ok!(Ledger::void(signed(RESOLVER), 1));
+        System::set_block_number(1 + ArchiveDelay::get() + 1);
+
+        assert_ok!(Ledger::sweep_dust(signed(ALICE), 1));
+        let remaining_after_first_reap = Positions::<Test>::iter().count();
+        assert_eq!(remaining_after_first_reap, 1);
+        assert!(Vaults::<Test>::contains_key(1));
+
+        assert_ok!(Ledger::sweep_dust(signed(ALICE), 1));
+        assert!(!Vaults::<Test>::contains_key(1));
+        try_state();
     });
 }
 
@@ -727,6 +767,7 @@ fn ops_on_unknown_vault_error() {
 
 #[test]
 fn split_below_min_rejects() {
+    // limit-coverage: ledger.min_split
     new_test_ext().execute_with(|| {
         create(1);
         assert_noop!(

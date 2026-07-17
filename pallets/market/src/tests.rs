@@ -444,6 +444,7 @@ fn baseline_fees_are_withheld_on_buy_and_sell() {
 
 #[test]
 fn slippage_phase_and_trade_bounds_are_enforced() {
+    // limit-coverage: MinTrade, MaxTrade
     new_test_ext().execute_with(|| {
         create_decision();
         seed(MARKET_ID);
@@ -495,6 +496,7 @@ fn slippage_phase_and_trade_bounds_are_enforced() {
 
 #[test]
 fn v6_domain_edge_is_rejected_without_mutation() {
+    // limit-coverage: lmsr-domain-bound
     new_test_ext().execute_with(|| {
         create_decision();
         seed(MARKET_ID);
@@ -517,6 +519,43 @@ fn v6_domain_edge_is_rejected_without_mutation() {
         );
         assert_eq!(Markets::<Test>::get(MARKET_ID), Some(before));
         assert_try_state();
+    });
+}
+
+#[test]
+fn live_market_bound_rejects_the_197th_book() {
+    // limit-coverage: MaxLiveMarkets
+    new_test_ext().execute_with(|| {
+        create_decision();
+        let template = Markets::<Test>::get(MARKET_ID).expect("created market exists");
+        let mut id = 0u64;
+        while Markets::<Test>::count() < futarchy_primitives::bounds::MAX_LIVE_MARKETS {
+            if !Markets::<Test>::contains_key(id) {
+                let mut book = template;
+                book.id = id;
+                Markets::<Test>::insert(id, book);
+            }
+            id = id.saturating_add(1);
+        }
+
+        assert_noop!(
+            Market::create_market(
+                signed(MARKET_ADMIN),
+                10_000,
+                BookKind::Decision {
+                    proposal: 10_000,
+                    branch: Branch::Accept,
+                },
+                BOOK,
+                FEES,
+                B,
+            ),
+            E::TooManyMarkets
+        );
+        assert_eq!(
+            Markets::<Test>::count(),
+            futarchy_primitives::bounds::MAX_LIVE_MARKETS
+        );
     });
 }
 
@@ -788,6 +827,7 @@ fn reap_of_trading_book_is_rejected_not_reapable() {
 
 #[test]
 fn crank_observe_records_on_grid_then_noops_within_interval() {
+    // limit-coverage: mkt.obs_interval
     new_test_ext().execute_with(|| {
         create_decision();
         seed(MARKET_ID);
@@ -819,6 +859,28 @@ fn crank_observe_records_on_grid_then_noops_within_interval() {
         assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
         assert_eq!(Markets::<Test>::get(MARKET_ID), Some(before));
         assert_eq!(observed(&market_events()), 1);
+        assert_try_state();
+    });
+}
+
+#[test]
+fn crank_observe_caps_a_one_interval_price_jump_at_kappa() {
+    // limit-coverage: mkt.kappa
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        Markets::<Test>::mutate(MARKET_ID, |maybe_book| {
+            let book = maybe_book.as_mut().expect("book exists");
+            book.q_long = 48 * book.b;
+            book.last_quote_1e9 = futarchy_primitives::FixedU64(999_000_000);
+        });
+
+        System::set_block_number(ObsInterval::get());
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        let book = Markets::<Test>::get(MARKET_ID).expect("book exists");
+        let one_interval_cap =
+            500_000_000 + 500_000_000u64.saturating_mul(Kappa1e9::get()) / 1_000_000_000;
+        assert_eq!(book.last_observation_1e9.0, one_interval_cap);
         assert_try_state();
     });
 }
