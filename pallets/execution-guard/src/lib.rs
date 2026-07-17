@@ -50,7 +50,7 @@ use futarchy_primitives::{
 };
 
 pub use execution_guard_core::{
-    domain_allowed, AttestationView as CoreAttestationView, CallDomain,
+    domain_allowed, requires_ratification, AttestationView as CoreAttestationView, CallDomain,
     EpochHandoff as CoreEpochHandoff, Error as CoreError, Event as CoreEvent, ExecutionGuard,
     GuardOrigin, GuardianView as CoreGuardianView, PendingUpgrade, QueuedExecution,
     UpgradeAuthorization, DESCRIPTOR_LEAD_TIME, MAX_CALLS, MAX_DECLARED_DOMAINS,

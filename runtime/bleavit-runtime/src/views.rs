@@ -1,17 +1,143 @@
-//! Read-only assembly for the seven B2 `FutarchyApi` views that do not depend
-//! on the not-yet-wired epoch pallet. The `impl FutarchyApi for Runtime` block
-//! deliberately remains deferred until all eleven methods are available.
+//! Read-only assembly for the contract-v4 `FutarchyApi` surface (02 §3-§4).
 
 use alloc::vec::Vec;
 
 use frame_support::traits::{fungibles::Inspect, Get};
 use futarchy_primitives::{
-    bounds, AccountId as ViewAccountId, Balance, BoundedVec, Branch, FixedU64, MarketId, NavView,
-    OracleRoundView, ParamKey, ParamView, PositionView, ProposalClass, QueuedExecutionView,
-    QuoteView, TradeSide, VaultState, WelfareView,
+    bounds, AccountId as ViewAccountId, Balance, BoundedVec, Branch, CohortSummaryView,
+    DecisionStatsView, EpochStatusView, FixedU64, MarketId, NavView, OracleRoundView, ParamKey,
+    ParamView, PositionView, ProposalClass, ProposalId, ProposalSummaryView, QueuedExecutionView,
+    QuoteView, RatificationStatus, TradeSide, VaultState, WelfareView,
 };
 
 use crate::{AccountId, ForeignAssets, Runtime, USDC_ASSET_ID};
+
+/// Assemble `FutarchyApi::epoch_status` per 02 §3/§4. `epoch_state()`
+/// hydrates the clock and all three machine/provider flags through the B1b
+/// runtime Config before epoch-core computes the next exact phase boundary.
+pub fn epoch_status() -> EpochStatusView {
+    pallet_epoch::Pallet::<Runtime>::epoch_state().status_view()
+}
+
+/// Assemble `FutarchyApi::proposal_summaries` per 02 §3/§4/§7.1.
+/// `Proposals` is bounded by `MaxLiveProposals`; explicit id sorting removes
+/// storage-hasher iteration order from the API contract.
+///
+/// Ratification mirrors the execution guard's own projection byte-for-byte
+/// (`execution_guard_core::Guard::view`, the source of `execution_queue`'s
+/// field) so the two API surfaces can never contradict each other for one
+/// proposal: `Ratifications` is written only by the `RatifyOrigin`-gated
+/// `ratify` call, so a present record is `Passed`; a class that needs no
+/// values ratification is `NotRequired`; and a class that requires it with no
+/// record on chain is the guard's fail-closed `Failed { referendum: 0 }` — the
+/// 06 §2.2 R-1 execute precondition is unmet, and G-1 forbids rendering that
+/// as `NotRequired` (which would read as "no ratification needed").
+pub fn proposal_summaries() -> BoundedVec<ProposalSummaryView, { bounds::MAX_PROPOSAL_SUMMARIES }> {
+    let mut proposals = pallet_epoch::Proposals::<Runtime>::iter_values().collect::<Vec<_>>();
+    proposals.sort_unstable_by_key(|proposal| proposal.id);
+    let mut out = BoundedVec::new();
+    for proposal in proposals {
+        let (decision_market, gate_markets) = proposal.markets.map_or((None, None), |markets| {
+            (Some((markets.accept, markets.reject)), markets.gates)
+        });
+        let ratification = match pallet_execution_guard::Ratifications::<Runtime>::get(proposal.id)
+        {
+            Some(record) => RatificationStatus::Passed {
+                referendum: record.referendum_index,
+            },
+            None if !pallet_execution_guard::requires_ratification(proposal.class) => {
+                RatificationStatus::NotRequired
+            }
+            None => RatificationStatus::Failed { referendum: 0 },
+        };
+        if out
+            .try_push(ProposalSummaryView {
+                id: proposal.id,
+                class: proposal.class,
+                state: proposal.state,
+                proposer: proposal.proposer.into(),
+                epoch: proposal.epoch,
+                payload_hash: proposal.payload_hash,
+                ask: proposal.ask,
+                decision_market,
+                gate_markets,
+                decide_at: proposal.decide_at,
+                maturity: proposal.maturity,
+                ratification,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+    out
+}
+
+/// Assemble `FutarchyApi::decision_stats` from the exact snapshot shared with
+/// `pallet_epoch::decide` (02 §3/§4; 05 §5.2-§5.6; 08 §5.2-§5.3).
+/// Any unavailable read returns `None`; the view never exposes the crank's
+/// internal fail-closed zero sentinels as observed market data.
+pub fn decision_stats(pid: ProposalId) -> Option<DecisionStatsView> {
+    let snapshot = pallet_epoch::Pallet::<Runtime>::decision_input_snapshot(pid)?;
+    if !snapshot.backing_complete {
+        return None;
+    }
+    let proposal = &snapshot.proposal;
+    let input = &snapshot.inputs;
+    let (baseline_full, _) = pallet_epoch::effective_baseline_twaps(input)?;
+    let market_stats = crate::configs::decision_market_stats_for_view(proposal, &snapshot.params)?;
+
+    // 05 §5.4: the same exported epoch-core helpers used by decide() own
+    // saturating Baseline-σ arithmetic and close-spot convergence.
+    let r_eff = pallet_epoch::effective_reject_1e9(
+        input.reject_full,
+        baseline_full,
+        snapshot.params.class_sigma(proposal.class),
+    );
+    let converged = pallet_epoch::decision_converged(input, snapshot.params.delta_max);
+
+    // D-4 (05 §5.6; 08 §5.2): measured_depth already combines the two
+    // decision books' rounded-down POL+contest depth. `None` published flow is
+    // the normative L/2 fallback, not missing backing.
+    let attack_cost_hat = pallet_epoch::attack_cost_hat(
+        input.measured_depth,
+        input.published_flow_per_day,
+        snapshot.params.decision_window,
+    )
+    .ok()?;
+    let in_cap_prize = input.in_cap_prize?;
+
+    Some(DecisionStatsView {
+        pid,
+        twap_accept_1e9: input.accept_full,
+        twap_reject_1e9: input.reject_full,
+        // 05 §5.3 carry is the effective Baseline decide() compares, so the
+        // public statistic cannot display a different, invalid live book.
+        twap_baseline_1e9: baseline_full,
+        r_eff_1e9: FixedU64(r_eff),
+        trailing_accept_1e9: input.accept_trailing,
+        trailing_reject_1e9: input.reject_trailing,
+        coverage_pct: market_stats.coverage_pct,
+        traded_volume: market_stats.traded_volume,
+        v_min_required: market_stats.v_min_required,
+        converged,
+        gate_twaps_1e9: input.gate_twaps,
+        attack_cost_hat,
+        in_cap_prize,
+    })
+}
+
+/// Assemble `FutarchyApi::recent_cohorts` per 02 §4/§7.1. The stored
+/// `CohortSummary` is the view type, including FIFO ring order.
+pub fn recent_cohorts() -> BoundedVec<CohortSummaryView, { bounds::RECENT_COHORT_SUMMARIES }> {
+    let mut out = BoundedVec::new();
+    for summary in pallet_epoch::RecentCohortSummaries::<Runtime>::get() {
+        if out.try_push(summary).is_err() {
+            break;
+        }
+    }
+    out
+}
 
 fn quote_sentinel(max_trade: Balance) -> QuoteView {
     QuoteView {

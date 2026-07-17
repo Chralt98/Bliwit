@@ -62,6 +62,83 @@ impl_runtime_apis! {
         }
     }
 
+    impl futarchy_runtime_api::FutarchyApi<Block> for Runtime {
+        fn epoch_status() -> futarchy_primitives::EpochStatusView {
+            crate::views::epoch_status()
+        }
+
+        fn proposal_summaries() -> futarchy_primitives::BoundedVec<
+            futarchy_primitives::ProposalSummaryView,
+            { futarchy_primitives::bounds::MAX_PROPOSAL_SUMMARIES },
+        > {
+            crate::views::proposal_summaries()
+        }
+
+        fn quote(
+            market: futarchy_primitives::MarketId,
+            side: futarchy_primitives::TradeSide,
+            amount: futarchy_primitives::Balance,
+        ) -> futarchy_primitives::QuoteView {
+            crate::views::quote(market, side, amount)
+        }
+
+        fn decision_stats(
+            pid: futarchy_primitives::ProposalId,
+        ) -> Option<futarchy_primitives::DecisionStatsView> {
+            crate::views::decision_stats(pid)
+        }
+
+        fn account_positions(
+            who: futarchy_primitives::AccountId,
+        ) -> futarchy_primitives::BoundedVec<
+            futarchy_primitives::PositionView,
+            { futarchy_primitives::bounds::MAX_ACCOUNT_POSITIONS },
+        > {
+            crate::views::account_positions(who)
+        }
+
+        fn execution_queue() -> futarchy_primitives::BoundedVec<
+            futarchy_primitives::QueuedExecutionView,
+            { futarchy_runtime_api::MAX_QUEUED_EXECUTIONS },
+        > {
+            crate::views::execution_queue()
+        }
+
+        fn welfare_current() -> futarchy_primitives::WelfareView {
+            crate::views::welfare_current()
+        }
+
+        fn params(
+            keys: futarchy_primitives::BoundedVec<
+                futarchy_primitives::ParamKey,
+                { futarchy_primitives::bounds::MAX_PARAM_KEYS },
+            >,
+        ) -> futarchy_primitives::BoundedVec<
+            futarchy_primitives::ParamView,
+            { futarchy_primitives::bounds::MAX_PARAM_KEYS },
+        > {
+            crate::views::params(keys)
+        }
+
+        fn nav() -> futarchy_primitives::NavView {
+            crate::views::nav()
+        }
+
+        fn recent_cohorts() -> futarchy_primitives::BoundedVec<
+            futarchy_primitives::CohortSummaryView,
+            { futarchy_primitives::bounds::RECENT_COHORT_SUMMARIES },
+        > {
+            crate::views::recent_cohorts()
+        }
+
+        fn open_oracle_rounds() -> futarchy_primitives::BoundedVec<
+            futarchy_primitives::OracleRoundView,
+            { futarchy_primitives::bounds::MAX_OPEN_ORACLE_ROUNDS },
+        > {
+            crate::views::open_oracle_rounds()
+        }
+    }
+
     impl sp_block_builder::BlockBuilder<Block> for Runtime {
         fn apply_extrinsic(extrinsic: <Block as BlockT>::Extrinsic) -> ApplyExtrinsicResult {
             Executive::apply_extrinsic(extrinsic)

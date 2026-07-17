@@ -18,7 +18,7 @@ use frame_support::{
 };
 use futarchy_primitives::{
     chain_identity, currency, kernel, DecisionOutcome, MarketSet, Proposal, ProposalClass,
-    ProposalState, RejectReason, RuntimeVersionConstraint,
+    ProposalState, RatificationStatus, RejectReason, RuntimeVersionConstraint,
 };
 use origins_core::Origin as ClassOrigin;
 use pallet_guardian::WeightInfo as GuardianWeightInfo;
@@ -1823,6 +1823,64 @@ fn code_queue_admits_before_ratification_and_binds_a_later_pass_before_execute()
 }
 
 #[test]
+fn ratification_views_agree_and_never_understate_an_unratified_code_upgrade() {
+    // Regression (B2): `proposal_summaries` mapped an absent `Ratifications`
+    // record to `NotRequired` for every class, so a CODE upgrade awaiting its
+    // values referendum rendered as "no ratification needed" while
+    // `execution_queue` — reading the guard's own projection — rendered the
+    // same proposal as unratified. 06 §2.2 R-1 makes a passed referendum an
+    // execute precondition for these classes, so G-1 requires the fail-closed
+    // spelling, and the two API surfaces must never contradict each other.
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 5_993;
+        const RATIFY_REF: u32 = 93;
+        let candidate = b"b2-ratification-view-agreement".to_vec();
+        if enqueue_attested_code_upgrade_pending_ratification(PID, &candidate).is_none() {
+            assert!(false, "unratified CODE queue fixture must be constructible");
+            return;
+        }
+        assert!(!pallet_execution_guard::Ratifications::<Runtime>::contains_key(PID));
+
+        let summary_status = |pid| {
+            crate::views::proposal_summaries()
+                .into_iter()
+                .find(|view| view.id == pid)
+                .map(|view| view.ratification)
+        };
+        let queue_status = |pid| {
+            crate::views::execution_queue()
+                .into_iter()
+                .find(|view| view.pid == pid)
+                .map(|view| view.ratification)
+        };
+
+        // A CODE class requires ratification (06 §2.2); with no record on chain
+        // the summary must not claim otherwise, and must equal the guard view.
+        assert_eq!(
+            summary_status(PID),
+            Some(RatificationStatus::Failed { referendum: 0 }),
+        );
+        assert_eq!(summary_status(PID), queue_status(PID));
+
+        assert_ok!(ExecutionGuard::ratify(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            PID,
+            RATIFY_REF,
+        ));
+
+        // `Ratifications` is written only by the RatifyOrigin-gated call, so a
+        // present record is a passed referendum on both surfaces.
+        assert_eq!(
+            summary_status(PID),
+            Some(RatificationStatus::Passed {
+                referendum: RATIFY_REF
+            }),
+        );
+        assert_eq!(summary_status(PID), queue_status(PID));
+    });
+}
+
+#[test]
 fn never_ratified_code_fails_at_execute_not_at_queue_admission() {
     upgrade_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 5_992;
@@ -3350,6 +3408,45 @@ fn real_epoch_decide_adopt_enqueues_before_epoch_persistence_without_stale_reads
             pallet_conditional_ledger::core_ledger::VaultInfo::open(1),
         );
 
+        // B2 no-drift lock: the public view and the crank consume the same
+        // pallet-epoch DecisionInputSnapshot assembly. Pin every observable
+        // TWAP before the crank and retain the real decide/enqueue assertion.
+        let snapshot = match Epoch::decision_input_snapshot(PID) {
+            Some(snapshot) => snapshot,
+            None => {
+                assert!(false, "complete decision snapshot must be readable");
+                return;
+            }
+        };
+        let stats = match crate::views::decision_stats(PID) {
+            Some(stats) => stats,
+            None => {
+                assert!(false, "complete decision statistics must be exposed");
+                return;
+            }
+        };
+        assert!(snapshot.backing_complete);
+        assert_eq!(stats.twap_accept_1e9, snapshot.inputs.accept_full);
+        assert_eq!(stats.twap_reject_1e9, snapshot.inputs.reject_full);
+        assert_eq!(stats.trailing_accept_1e9, snapshot.inputs.accept_trailing);
+        assert_eq!(stats.trailing_reject_1e9, snapshot.inputs.reject_trailing);
+        assert_eq!(stats.twap_baseline_1e9, snapshot.inputs.baseline_full);
+        assert_eq!(stats.gate_twaps_1e9, snapshot.inputs.gate_twaps);
+        assert_eq!(stats.coverage_pct, 100);
+        assert_eq!(stats.traded_volume, contest);
+        assert_eq!(stats.v_min_required, contest);
+        assert_eq!(stats.in_cap_prize, 0);
+        assert!(stats.converged);
+        assert_eq!(
+            stats.attack_cost_hat,
+            pallet_epoch::attack_cost_hat(
+                snapshot.inputs.measured_depth,
+                snapshot.inputs.published_flow_per_day,
+                snapshot.params.decision_window,
+            )
+            .expect("fixture depth arithmetic is bounded")
+        );
+
         assert_ok!(Epoch::decide(RuntimeOrigin::signed(account(69)), PID));
         assert_eq!(
             pallet_epoch::Proposals::<Runtime>::get(PID).map(|proposal| proposal.state),
@@ -4238,6 +4335,11 @@ fn void_cohort_releases_a_retained_rerun_pin_and_guard_records() {
                     *decision == DecisionOutcome::Reject(RejectReason::ProcessHold)
                 })
         }));
+        assert_eq!(
+            crate::views::recent_cohorts().as_slice(),
+            pallet_epoch::RecentCohortSummaries::<Runtime>::get().as_slice(),
+            "02 §4/§7.1 stored cohort form is the runtime API view form"
+        );
         assert_guard_ownership_cleared(PID, H256::from(queued.payload_hash));
         assert_guard_ownership_cleared(QUEUED_PID, H256::from(same_epoch_queued.payload_hash));
     });
@@ -7322,5 +7424,527 @@ fn view_open_oracle_rounds_sorts_triple_keys_and_marks_prior_escalation() {
         assert_eq!(rows[2].value_1e9, FixedU64(300));
         assert_eq!(rows[2].acked_by_watchtowers, 2);
         assert_eq!(rows[2].evidence_hash, [1; 32]);
+    });
+}
+
+#[test]
+fn view_epoch_status_uses_loaded_clock_and_live_b1b_providers() {
+    development_ext().execute_with(|| {
+        assert_eq!(
+            crate::views::epoch_status(),
+            Epoch::epoch_state().status_view()
+        );
+
+        assert_ok!(Constitution::note_dead_man_engaged(true));
+        assert_ok!(Constitution::note_ledger_frozen(true));
+        let armed = crate::views::epoch_status();
+        assert!(armed.dead_man_armed);
+        assert!(armed.ledger_frozen);
+        assert_eq!(armed.phase_flags, Constitution::phase_flags());
+        assert_ne!(
+            armed.phase_flags & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED,
+            0
+        );
+        assert_ne!(
+            armed.phase_flags & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN,
+            0
+        );
+
+        assert_ok!(Constitution::note_dead_man_engaged(false));
+        assert_ok!(Constitution::note_ledger_frozen(false));
+        System::set_block_number(current_qualify_block());
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(account(69)),
+            Default::default()
+        ));
+        let advanced = crate::views::epoch_status();
+        assert_eq!(advanced, Epoch::epoch_state().status_view());
+        assert_eq!(advanced.phase, futarchy_primitives::EpochPhase::Qualify);
+        assert_eq!(advanced.phase_start_block, current_qualify_block());
+        assert!(advanced.next_boundary > advanced.phase_start_block);
+        assert!(!advanced.dead_man_armed);
+        assert!(!advanced.ledger_frozen);
+    });
+}
+
+#[test]
+fn view_proposal_summaries_sorts_and_joins_passed_ratification() {
+    development_ext().execute_with(|| {
+        assert!(crate::views::proposal_summaries().is_empty());
+        let version = match pallet_execution_guard::CurrentSpecName::<Runtime>::get() {
+            Some(version) => version,
+            None => {
+                assert!(false, "guard genesis must bind a runtime version");
+                return;
+            }
+        };
+        for (pid, class) in [
+            (4, ProposalClass::Code),
+            (3, ProposalClass::Treasury),
+            (2, ProposalClass::Param),
+            (1, ProposalClass::Code),
+        ] {
+            assert_ok!(seed_queued_epoch_proposal(
+                pid,
+                class,
+                H256::repeat_byte(pid as u8),
+                1,
+                50 + pid as u32,
+                80 + pid as u32,
+                version.clone(),
+            ));
+        }
+        let ratified = match pallet_epoch::Proposals::<Runtime>::get(1) {
+            Some(proposal) => proposal,
+            None => {
+                assert!(false, "seeded CODE proposal must exist");
+                return;
+            }
+        };
+        assert_ok!(ExecutionGuard::ratify(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            1,
+            77,
+        ));
+        pallet_epoch::Proposals::<Runtime>::mutate(2, |proposal| {
+            if let Some(proposal) = proposal {
+                proposal.markets = None;
+                proposal.maturity = None;
+            }
+        });
+
+        let view = crate::views::proposal_summaries();
+        assert_eq!(
+            view.iter().map(|proposal| proposal.id).collect::<Vec<_>>(),
+            vec![1, 2, 3, 4]
+        );
+        let code = &view.as_slice()[0];
+        assert_eq!(code.class, ProposalClass::Code);
+        assert_eq!(code.state, ProposalState::Queued);
+        assert_eq!(code.proposer, [70; 32]);
+        assert_eq!(code.epoch, ratified.epoch);
+        assert_eq!(code.payload_hash, ratified.payload_hash);
+        assert_eq!(code.ask, ratified.ask);
+        assert_eq!(code.decision_market, Some((11, 12)));
+        assert_eq!(code.gate_markets, Some([13, 14, 15, 16]));
+        assert_eq!(code.decide_at, ratified.decide_at);
+        assert_eq!(code.maturity, ratified.maturity);
+        assert_eq!(
+            code.ratification,
+            futarchy_primitives::RatificationStatus::Passed { referendum: 77 }
+        );
+        assert_eq!(view.as_slice()[1].decision_market, None);
+        assert_eq!(view.as_slice()[1].gate_markets, None);
+        assert_eq!(view.as_slice()[1].maturity, None);
+        // Ratification is class-discriminated, never a blanket `NotRequired`:
+        // PARAM/TREASURY need no values referendum (06 §2.2), but the seeded
+        // CODE proposal at id 4 has no `Ratifications` record, so it carries
+        // the guard's fail-closed spelling — the same value `execution_queue`
+        // reports for it.
+        assert_eq!(
+            view.as_slice()[1].ratification,
+            RatificationStatus::NotRequired
+        );
+        assert_eq!(
+            view.as_slice()[2].ratification,
+            RatificationStatus::NotRequired
+        );
+        assert_eq!(view.as_slice()[3].class, ProposalClass::Code);
+        assert_eq!(
+            view.as_slice()[3].ratification,
+            RatificationStatus::Failed { referendum: 0 }
+        );
+    });
+}
+
+#[test]
+fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 8_090;
+        let params =
+            <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+        let index = crate::configs::proposal_class_index(ProposalClass::Treasury);
+        let prize = params.v_min[index];
+        let effective_floor = prize.saturating_mul(2);
+        let end = params.decision_window;
+        let epoch = pallet_epoch::EpochOf::<Runtime>::get()
+            .index
+            .saturating_add(1);
+        let carried_baseline = futarchy_primitives::FixedU64(620_000_000);
+        let markets = MarketSet {
+            accept: 89_001,
+            reject: 89_002,
+            gates: Some([89_003, 89_004, 89_005, 89_006]),
+            baseline: 89_007,
+        };
+        let gates = match markets.gates {
+            Some(gates) => gates,
+            None => {
+                assert!(false, "Treasury >1%-NAV fixture must carry gate books");
+                return;
+            }
+        };
+        let decision_b = crate::configs::class_pol_floor(ProposalClass::Treasury);
+        let gate_b = crate::configs::balance_param(b"pol.b_gate");
+        let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
+        let gate_contest = params.gate_v_min[index];
+        let gate_quotes = [
+            futarchy_primitives::FixedU64(410_000_000),
+            futarchy_primitives::FixedU64(420_000_000),
+            futarchy_primitives::FixedU64(430_000_000),
+            futarchy_primitives::FixedU64(440_000_000),
+        ];
+        for result in [
+            seed_decision_grade_market(
+                markets.accept,
+                pallet_market::core_market::BookKind::Decision {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Accept,
+                },
+                futarchy_primitives::FixedU64(700_000_000),
+                end,
+                (params.decision_window, params.trailing_window),
+                decision_b,
+                effective_floor,
+            ),
+            seed_decision_grade_market(
+                markets.reject,
+                pallet_market::core_market::BookKind::Decision {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Reject,
+                },
+                futarchy_primitives::FixedU64(400_000_000),
+                end,
+                (params.decision_window, params.trailing_window),
+                decision_b,
+                effective_floor,
+            ),
+            seed_decision_grade_market(
+                gates[0],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Accept,
+                    gate: futarchy_primitives::GateType::Survival,
+                },
+                gate_quotes[0],
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                gates[1],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Reject,
+                    gate: futarchy_primitives::GateType::Survival,
+                },
+                gate_quotes[1],
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                gates[2],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Accept,
+                    gate: futarchy_primitives::GateType::Security,
+                },
+                gate_quotes[2],
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                gates[3],
+                pallet_market::core_market::BookKind::Gate {
+                    proposal: PID,
+                    branch: futarchy_primitives::Branch::Reject,
+                    gate: futarchy_primitives::GateType::Security,
+                },
+                gate_quotes[3],
+                end,
+                (params.decision_window, params.trailing_window),
+                gate_b,
+                gate_contest,
+            ),
+            seed_decision_grade_market(
+                markets.baseline,
+                pallet_market::core_market::BookKind::Baseline { epoch },
+                futarchy_primitives::FixedU64(650_000_000),
+                end,
+                (params.decision_window, params.trailing_window),
+                baseline_b,
+                effective_floor,
+            ),
+        ] {
+            assert_ok!(result);
+        }
+        // Leave the live Baseline unregistered so the shared decision helper
+        // must use the previous settled cohort's 05 §5.3 carry value.
+        pallet_epoch::RecentCohortSummaries::<Runtime>::mutate(|recent| {
+            assert!(recent
+                .try_push(futarchy_primitives::CohortSummary {
+                    epoch: epoch.saturating_sub(1),
+                    s_1e9: futarchy_primitives::FixedU64(0),
+                    baseline_twap_1e9: carried_baseline,
+                    proposals: futarchy_primitives::BoundedVec::new(),
+                    voided: false,
+                    settled_at: 0,
+                })
+                .is_ok());
+        });
+
+        let spend = RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::spend {
+            line: pallet_futarchy_treasury::BudgetLine::Pol,
+            dest: account(149),
+            amount: prize,
+        });
+        let (payload_hash, payload_len) = match note_runtime_batch(vec![spend]) {
+            Some(payload) => payload,
+            None => {
+                assert!(false, "bounded Treasury payload must be noted");
+                return;
+            }
+        };
+        <Preimage as QueryPreimage>::request(&payload_hash);
+        let version_constraint = match pallet_execution_guard::CurrentSpecName::<Runtime>::get() {
+            Some(version) => version,
+            None => {
+                assert!(false, "guard genesis must bind a runtime version");
+                return;
+            }
+        };
+        // prize is 4% of spendable NAV: it remains in-cap while legitimately
+        // requiring the 05 §5.1 Treasury gate quartet.
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = prize.saturating_mul(25);
+        });
+        let proposal = Proposal {
+            id: PID,
+            proposer: account(70),
+            class: ProposalClass::Treasury,
+            state: ProposalState::Trading,
+            epoch,
+            submitted_at: 0,
+            payload_hash: payload_hash.0,
+            payload_len,
+            ask: prize,
+            bond: Balance::MAX,
+            resources: Default::default(),
+            metric_spec: 1,
+            decide_at: end,
+            rerun: false,
+            extended: false,
+            delayed_once: false,
+            markets: Some(markets),
+            maturity: None,
+            grace_end: None,
+            version_constraint: Some(version_constraint),
+            decision: None,
+        };
+        pallet_epoch::Proposals::<Runtime>::insert(PID, proposal);
+        pallet_epoch::NextProposalId::<Runtime>::mutate(|next| {
+            *next = (*next).max(PID.saturating_add(1));
+        });
+
+        let interval = u32::try_from(crate::configs::MarketObsInterval::get()).unwrap_or_default();
+        assert_ne!(interval, 0);
+        let expected_observations = params.decision_window / interval;
+        let reject_observations = expected_observations.saturating_sub(1);
+        let accept_volume = effective_floor.saturating_mul(3);
+        let reject_volume = effective_floor.saturating_mul(2);
+        let tune_window = |market: futarchy_primitives::MarketId,
+                           observations: u32,
+                           volume: Balance,
+                           close_spot: futarchy_primitives::FixedU64| {
+            pallet_market::DecisionWindows::<Runtime>::mutate(market, |windows| {
+                if let Some(record) = windows.iter_mut().find(|record| record.end == end) {
+                    record.observations = observations;
+                    record.contest_notional_blocks =
+                        volume.saturating_mul(Balance::from(params.decision_window));
+                    record.close_spot = Some(close_spot);
+                    true
+                } else {
+                    false
+                }
+            })
+        };
+        assert!(tune_window(
+            markets.accept,
+            expected_observations,
+            accept_volume,
+            futarchy_primitives::FixedU64(900_000_000),
+        ));
+        assert!(tune_window(
+            markets.reject,
+            reject_observations,
+            reject_volume,
+            futarchy_primitives::FixedU64(400_000_000),
+        ));
+
+        let stats = match crate::views::decision_stats(PID) {
+            Some(stats) => stats,
+            None => {
+                assert!(false, "complete in-cap Treasury statistics must be exposed");
+                return;
+            }
+        };
+        let snapshot = match Epoch::decision_input_snapshot(PID) {
+            Some(snapshot) => snapshot,
+            None => {
+                assert!(false, "complete decision snapshot must be readable");
+                return;
+            }
+        };
+        assert_eq!(stats.gate_twaps_1e9, Some(gate_quotes));
+        assert_eq!(stats.twap_baseline_1e9, carried_baseline);
+        assert_ne!(stats.twap_baseline_1e9, snapshot.inputs.baseline_full);
+        assert_eq!(stats.traded_volume, reject_volume);
+        assert_eq!(stats.v_min_required, effective_floor);
+        assert_eq!(stats.in_cap_prize, prize);
+        let expected_coverage =
+            u8::try_from(reject_observations.saturating_mul(100) / expected_observations)
+                .unwrap_or_default();
+        assert_eq!(stats.coverage_pct, expected_coverage);
+        assert!(!stats.converged);
+        assert_eq!(
+            stats.r_eff_1e9.0,
+            pallet_epoch::effective_reject_1e9(
+                snapshot.inputs.reject_full,
+                carried_baseline,
+                snapshot.params.class_sigma(ProposalClass::Treasury),
+            )
+        );
+        assert!(stats.r_eff_1e9.0 > stats.twap_reject_1e9.0);
+    });
+}
+
+#[test]
+fn view_decision_stats_returns_none_for_unknown_or_incomplete_backing() {
+    development_ext().execute_with(|| {
+        assert_eq!(crate::views::decision_stats(999_999), None);
+        let version = match pallet_execution_guard::CurrentSpecName::<Runtime>::get() {
+            Some(version) => version,
+            None => {
+                assert!(false, "guard genesis must bind a runtime version");
+                return;
+            }
+        };
+        assert_ok!(seed_queued_epoch_proposal(
+            91,
+            ProposalClass::Treasury,
+            H256::repeat_byte(91),
+            1,
+            10,
+            20,
+            version.clone(),
+        ));
+        // Market ids exist in the Proposal but no exact registered books,
+        // windows, spots, or measured depth do: never fabricate a view.
+        assert_eq!(crate::views::decision_stats(91), None);
+        pallet_epoch::Proposals::<Runtime>::mutate(91, |proposal| {
+            if let Some(proposal) = proposal {
+                proposal.markets = None;
+            }
+        });
+        assert_eq!(crate::views::decision_stats(91), None);
+        pallet_epoch::Proposals::<Runtime>::remove(91);
+        pallet_epoch::ProposalSchedules::<Runtime>::remove(91);
+        pallet_conditional_ledger::Vaults::<Runtime>::remove(91);
+
+        // Isolate the values/prize seam: every decision and gate book read is
+        // complete, but SQ-141 leaves CODE InCapPrize unavailable. G-1 returns
+        // None instead of exposing an otherwise plausible partial statistic.
+        let params =
+            <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+        System::set_block_number(params.decision_window);
+        assert_ok!(seed_queued_epoch_proposal(
+            92,
+            ProposalClass::Code,
+            H256::repeat_byte(92),
+            1,
+            params.decision_window.saturating_add(10),
+            params.decision_window.saturating_add(20),
+            version,
+        ));
+        assert_ok!(seed_code_decision_markets(
+            92,
+            params.decision_window,
+            futarchy_primitives::FixedU64(700_000_000),
+            futarchy_primitives::FixedU64(500_000_000),
+        ));
+        let snapshot = match Epoch::decision_input_snapshot(92) {
+            Some(snapshot) => snapshot,
+            None => {
+                assert!(false, "fully seeded CODE snapshot must be assembled");
+                return;
+            }
+        };
+        assert!(snapshot.inputs.measured_depth > 0);
+        assert!(snapshot.inputs.gate_twaps.is_some());
+        assert_eq!(snapshot.inputs.in_cap_prize, None);
+        assert!(!snapshot.backing_complete);
+        assert_eq!(crate::views::decision_stats(92), None);
+    });
+}
+
+#[test]
+fn futarchy_api_trait_delegates_all_eleven_runtime_views() {
+    use futarchy_runtime_api::runtime_decl_for_futarchy_api::FutarchyApi as RuntimeFutarchyApi;
+
+    development_ext().execute_with(|| {
+        type ApiRuntime = Runtime;
+        let side = futarchy_primitives::TradeSide::BuyLong;
+        let account = [0; 32];
+        let keys = futarchy_primitives::BoundedVec::new();
+
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::epoch_status(),
+            crate::views::epoch_status()
+        );
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::proposal_summaries(),
+            crate::views::proposal_summaries()
+        );
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::quote(0, side, 1),
+            crate::views::quote(0, side, 1)
+        );
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::decision_stats(0),
+            crate::views::decision_stats(0)
+        );
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::account_positions(account),
+            crate::views::account_positions(account)
+        );
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::execution_queue(),
+            crate::views::execution_queue()
+        );
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::welfare_current(),
+            crate::views::welfare_current()
+        );
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::params(keys.clone()),
+            crate::views::params(keys)
+        );
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::nav(),
+            crate::views::nav()
+        );
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::recent_cohorts(),
+            crate::views::recent_cohorts()
+        );
+        assert_eq!(
+            <ApiRuntime as RuntimeFutarchyApi<crate::Block>>::open_oracle_rounds(),
+            crate::views::open_oracle_rounds()
+        );
     });
 }

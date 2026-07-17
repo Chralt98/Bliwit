@@ -9,6 +9,7 @@ build = "build.rs"
 [dependencies]
 # --- Local protocol crates.
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
+futarchy-runtime-api = { path = "../../runtime-api", default-features = false }
 origins-core = { path = "../../crates/origins-core", default-features = false }
 pallet-constitution = { path = "../../pallets/constitution", default-features = false }
 pallet-conditional-ledger = { path = "../../pallets/conditional-ledger", default-features = false }
@@ -120,6 +121,7 @@ std = [
   "frame-system/std",
   "frame-try-runtime?/std",
   "futarchy-primitives/std",
+  "futarchy-runtime-api/std",
   "origins-core/std",
   "pallet-asset-tx-payment/std",
   "pallet-assets/std",

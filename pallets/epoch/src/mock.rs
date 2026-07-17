@@ -401,8 +401,8 @@ impl MarketAccess<AccountId32> for TestMarket {
             && !UngradedMarkets::get().contains(&market)
     }
 
-    fn measured_depth(_pid: ProposalId) -> Balance {
-        MeasuredDepth::get()
+    fn measured_depth(_pid: ProposalId) -> Option<Balance> {
+        Some(MeasuredDepth::get())
     }
 
     fn published_flow_per_day(_pid: ProposalId) -> Option<Balance> {

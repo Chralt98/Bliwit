@@ -1617,9 +1617,10 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
                 DecisionOutcome::Reject(RejectReason::NotDecisionGrade)
             });
         }
-        let (baseline_full, baseline_trailing) = if i.baseline_grade_ok {
-            (i.baseline_full, i.baseline_trailing)
-        } else if let Some(carried) = i.previous_settled_baseline_twap {
+        if !i.baseline_grade_ok {
+            let Some(_carried) = i.previous_settled_baseline_twap else {
+                return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
+            };
             let (consecutive, advances_tracker) = match self.baseline_carry {
                 Some((epoch, count)) if proposal_epoch > epoch => (
                     if epoch.saturating_add(1) == proposal_epoch {
@@ -1645,26 +1646,22 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             if has_gate_markets && consecutive >= 2 {
                 return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
             }
-            (carried, carried)
-        } else {
+        }
+        let Some((baseline_full, baseline_trailing)) = effective_baseline_twaps(i) else {
             return Ok(DecisionOutcome::Reject(RejectReason::NotDecisionGrade));
         };
         let delta = params
             .class_delta(class)
             .saturating_add(if rerun { ONE_PP } else { 0 });
-        let r_eff = i
-            .reject_full
-            .0
-            .max(baseline_full.0.saturating_sub(params.class_sigma(class)));
+        let r_eff = effective_reject_1e9(i.reject_full, baseline_full, params.class_sigma(class));
         let full = i.accept_full.0 >= r_eff.saturating_add(delta);
-        let tail_eff = i.reject_trailing.0.max(
-            baseline_trailing
-                .0
-                .saturating_sub(params.class_sigma(class)),
+        let tail_eff = effective_reject_1e9(
+            i.reject_trailing,
+            baseline_trailing,
+            params.class_sigma(class),
         );
         let tail = i.accept_trailing.0 >= tail_eff.saturating_add(delta);
-        let conv = i.accept_spot.0.abs_diff(i.accept_full.0) <= params.delta_max.0
-            && i.reject_spot.0.abs_diff(i.reject_full.0) <= params.delta_max.0;
+        let conv = decision_converged(i, params.delta_max);
         if !(full && tail && conv) {
             return Ok(match (full != tail, extended, conv) {
                 (true, false, _) => DecisionOutcome::Extend,
@@ -2030,7 +2027,34 @@ fn is_force_rejectable_state(state: ProposalState) -> bool {
             | ProposalState::Rejected(_)
     )
 }
-fn attack_cost_hat(
+/// Effective Baseline inputs used by the decision hurdle (05 §5.3). A
+/// decision-grade live Baseline wins; otherwise the previous settled Baseline
+/// is carried into both full and trailing comparisons.
+pub fn effective_baseline_twaps(i: &DecisionInputs) -> Option<(FixedU64, FixedU64)> {
+    if i.baseline_grade_ok {
+        Some((i.baseline_full, i.baseline_trailing))
+    } else {
+        i.previous_settled_baseline_twap
+            .map(|carried| (carried, carried))
+    }
+}
+
+/// Exact 05 §5.4 effective reject hurdle. Kept public so read-only runtime
+/// projections cannot drift from the decision engine's saturating arithmetic.
+pub fn effective_reject_1e9(reject: FixedU64, baseline: FixedU64, sigma_1e9: u64) -> u64 {
+    reject.0.max(baseline.0.saturating_sub(sigma_1e9))
+}
+
+/// Exact close-spot convergence predicate used by decide() (05 §5.2/§5.4).
+pub fn decision_converged(i: &DecisionInputs, delta_max: FixedU64) -> bool {
+    i.accept_spot.0.abs_diff(i.accept_full.0) <= delta_max.0
+        && i.reject_spot.0.abs_diff(i.reject_full.0) <= delta_max.0
+}
+
+/// D-4 measured-depth attack-cost estimate, rounded down throughout (05 §5.6;
+/// 08 §5.2). This is public so `FutarchyApi::decision_stats` and decide()
+/// execute the same checked arithmetic.
+pub fn attack_cost_hat(
     depth: Balance,
     flow: Option<Balance>,
     decision_window: BlockNumber,
