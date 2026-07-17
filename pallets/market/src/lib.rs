@@ -46,7 +46,7 @@ pub mod pallet {
     use futarchy_primitives::{
         bounds,
         keeper::{CrankClass, KeeperRebateSink},
-        Balance, BlockNumber, Branch, EpochId, FixedU64, GateType, MarketId, MarketKind,
+        kernel, Balance, BlockNumber, Branch, EpochId, FixedU64, GateType, MarketId, MarketKind,
         PositionId, ProposalId, ScalarSide, TradeSide,
     };
     use market_core::{BookKind, MarketBook, MarketParams, MarketPhase, TwapWindow};
@@ -394,6 +394,34 @@ pub mod pallet {
         }
     }
 
+    #[pallet::extra_constants]
+    impl<T: Config> Pallet<T> {
+        #[pallet::constant_name(MinTrade)]
+        fn min_trade() -> Balance {
+            kernel::MIN_TRADE_USDC
+        }
+
+        #[pallet::constant_name(MaxTradeRatio)]
+        fn max_trade_ratio() -> (u32, u32) {
+            kernel::MAX_TRADE_RATIO
+        }
+
+        #[pallet::constant_name(MaxLiveMarkets)]
+        fn max_live_markets() -> u32 {
+            bounds::MAX_LIVE_MARKETS
+        }
+
+        #[pallet::constant_name(GatePMaxCeiling)]
+        fn gate_p_max_ceiling() -> FixedU64 {
+            FixedU64(kernel::GATE_P_MAX_CEILING_1E9)
+        }
+
+        #[pallet::constant_name(GateEpsFloor)]
+        fn gate_eps_floor() -> FixedU64 {
+            kernel::GATE_EPS_FLOOR
+        }
+    }
+
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         /// No block hooks: observations are keeper-cranked (04 §7).
@@ -417,7 +445,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
-            Self::ensure_registered_window_open(market)?;
+            Self::ensure_trade_admissible(market, &book)?;
             let before = book.clone();
             Self::seal_due_windows(market, &before, Self::now_u64(), false)?;
             Self::accrue_contest(market, &before, Self::now_u64());
@@ -453,7 +481,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
-            Self::ensure_registered_window_open(market)?;
+            Self::ensure_trade_admissible(market, &book)?;
             let before = book.clone();
             Self::seal_due_windows(market, &before, Self::now_u64(), false)?;
             Self::accrue_contest(market, &before, Self::now_u64());
@@ -486,13 +514,9 @@ pub mod pallet {
             let mut book = Markets::<T>::get(market).ok_or(Error::<T>::UnknownMarket)?;
             // The accumulator is sealed at Close (04 §2): a permissionless keeper must
             // not record observations on a Closed/Settled book (it would mutate the
-            // frozen TWAP). buy/sell already gate on `ensure_trading`; this closes the
-            // standalone crank path.
-            ensure!(
-                matches!(book.phase, MarketPhase::Trading | MarketPhase::Extended),
-                Error::<T>::NotTrading
-            );
-            Self::ensure_registered_window_open(market)?;
+            // frozen TWAP). The shared trade preflight closes the standalone
+            // crank path too.
+            Self::ensure_trade_admissible(market, &book)?;
             let before = book.clone();
             Self::seal_due_windows(market, &before, Self::now_u64(), false)?;
             Self::accrue_contest(market, &before, Self::now_u64());
@@ -1255,7 +1279,14 @@ pub mod pallet {
             Ok(())
         }
 
-        fn ensure_registered_window_open(id: MarketId) -> DispatchResult {
+        /// Read-only trade-admission preflight shared by dispatch and runtime
+        /// views (02 §3; 04 §6.4). Registered decision-window expiry is a
+        /// trading precondition even when a keeper has not moved the stored
+        /// phase out of `Trading`; the core owns the phase predicate.
+        pub fn ensure_trade_admissible(
+            id: MarketId,
+            book: &MarketBook<T::AccountId>,
+        ) -> DispatchResult {
             let windows = DecisionWindows::<T>::get(id);
             if let Some(latest_end) = windows.iter().map(|window| window.end).max() {
                 ensure!(
@@ -1263,6 +1294,7 @@ pub mod pallet {
                     Error::<T>::NotTrading
                 );
             }
+            market_core::ensure_trade_phase(book.phase).map_err(Error::<T>::from)?;
             Ok(())
         }
 

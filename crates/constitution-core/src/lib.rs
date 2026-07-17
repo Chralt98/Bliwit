@@ -157,6 +157,9 @@ pub struct ParamRecord {
     pub max_delta: Option<MaxDelta>,
     pub cooldown_epochs: u32,
     pub last_changed_epoch: u32,
+    /// Para-block at which `value` last changed. Genesis rows use zero; this
+    /// is the source of `ParamView.last_change` (02 §4, 13 reading rule 2).
+    pub last_change_block: BlockNumber,
     pub class: ParamClass,
     /// 13 rule 7: bounds carry a kernel floor/ceiling and are genesis-fixed —
     /// `amend_registry` cannot move them.
@@ -164,7 +167,57 @@ pub struct ParamRecord {
 }
 
 impl ParamRecord {
-    pub fn checked_update(&self, next: ParamValue, epoch: u32) -> Result<Self, Error> {
+    /// Conservative absolute step represented by this record's current
+    /// max-delta rule in both directions. 02 §4 exposes only one scalar and
+    /// does not define which side of an asymmetric rule it means; that lossy
+    /// projection remains an open spec question. R-7 therefore requires the
+    /// smaller allowance, so a frontend `abs(next - value) <= max_delta`
+    /// check can never render a move as admissible when [`Self::checked_update`]
+    /// rejects it.
+    pub fn max_delta_allowance(&self) -> Result<u128, Error> {
+        match self.max_delta {
+            None => Ok(0),
+            Some(MaxDelta::Absolute(bound)) => {
+                ensure!(bound.same_kind(self.value), Error::WrongType);
+                Ok(bound.as_u128())
+            }
+            Some(MaxDelta::Percent(percent)) => {
+                let value = self.value.as_u128();
+                let scaled = match value.checked_mul(u128::from(percent)) {
+                    Some(scaled) => scaled,
+                    None => u128::MAX,
+                };
+                // Unlike Factor, checked_update applies this same absolute,
+                // rounded-down allowance to increases and decreases, so the
+                // Percent rule itself has no directional asymmetry to project.
+                Ok(scaled / 100)
+            }
+            Some(MaxDelta::Factor(factor)) => {
+                let factor = u128::from(factor);
+                ensure!(factor >= 1, Error::MetaBoundViolation);
+                let value = self.value.as_u128();
+                let upper = match value.checked_mul(factor) {
+                    Some(upper) => upper,
+                    None => u128::MAX,
+                };
+                let upward = upper.checked_sub(value).map_or(0, |allowance| allowance);
+                let lower_floor = value / factor;
+                let lower = match lower_floor.checked_add(u128::from(value % factor != 0)) {
+                    Some(lower) => lower,
+                    None => value,
+                };
+                let downward = value.checked_sub(lower).map_or(0, |allowance| allowance);
+                Ok(upward.min(downward))
+            }
+        }
+    }
+
+    pub fn checked_update(
+        &self,
+        next: ParamValue,
+        epoch: u32,
+        block: BlockNumber,
+    ) -> Result<Self, Error> {
         ensure!(self.value.same_kind(next), Error::WrongType);
         ensure!(
             self.min.same_kind(next) && self.max.same_kind(next),
@@ -183,15 +236,10 @@ impl ParamRecord {
                 let delta = self.value.as_u128().abs_diff(next.as_u128());
                 ensure!(delta <= bound.as_u128(), Error::DeltaTooLarge);
             }
-            Some(MaxDelta::Percent(percent)) => {
+            Some(MaxDelta::Percent(_)) => {
                 // Allowance is recomputed from the current value on every
                 // decision; flooring keeps the limit conservative.
-                let allowed = self
-                    .value
-                    .as_u128()
-                    .saturating_mul(u128::from(percent))
-                    .checked_div(100)
-                    .unwrap_or(0);
+                let allowed = self.max_delta_allowance()?;
                 let delta = self.value.as_u128().abs_diff(next.as_u128());
                 ensure!(delta <= allowed, Error::DeltaTooLarge);
             }
@@ -209,6 +257,7 @@ impl ParamRecord {
         Ok(Self {
             value: next,
             last_changed_epoch: epoch,
+            last_change_block: block,
             ..*self
         })
     }
@@ -520,13 +569,19 @@ impl ConstitutionState {
         }
     }
 
-    pub fn set_param(&mut self, key: ParamKey, next: ParamValue, epoch: u32) -> Result<(), Error> {
+    pub fn set_param(
+        &mut self,
+        key: ParamKey,
+        next: ParamValue,
+        epoch: u32,
+        block: BlockNumber,
+    ) -> Result<(), Error> {
         let index = self
             .params
             .iter()
             .position(|r| r.key == key)
             .ok_or(Error::UnknownParam)?;
-        let updated = self.params[index].checked_update(next, epoch)?;
+        let updated = self.params[index].checked_update(next, epoch, block)?;
         if let Some(pair) = gate_v_min_pair(key) {
             let paired = self
                 .params
@@ -558,6 +613,7 @@ impl ConstitutionState {
         key: ParamKey,
         next: ParamValue,
         epoch: u32,
+        block: BlockNumber,
     ) -> Result<(), Error> {
         let class = self
             .params
@@ -566,7 +622,7 @@ impl ConstitutionState {
             .ok_or(Error::UnknownParam)?
             .class;
         ensure!(origin.can_set_param(class), Error::BadOrigin);
-        self.set_param(key, next, epoch)
+        self.set_param(key, next, epoch, block)
     }
 
     pub fn set_capability(&mut self, capability: CapabilityRecord) -> Result<(), Error> {
@@ -855,6 +911,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             max_delta,
             cooldown_epochs,
             last_changed_epoch: 0,
+            last_change_block: 0,
             class,
             kernel_bounded,
         }
@@ -863,7 +920,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"epoch.length",
             ParamValue::U32(302_400),
-            ParamValue::U32(201_600),
+            ParamValue::U32(kernel::MIN_EPOCH_LENGTH_BLOCKS),
             ParamValue::U32(604_800),
             Some(MaxDelta::Percent(10)),
             2,
@@ -923,7 +980,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.window",
             ParamValue::U32(43_200),
-            ParamValue::U32(14_400),
+            ParamValue::U32(kernel::DECISION_WINDOW_FLOOR_BLOCKS),
             ParamValue::U32(86_400),
             Some(MaxDelta::Percent(20)),
             2,
@@ -973,7 +1030,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"gate.eps",
             ParamValue::Fixed(FixedU64(20_000_000)),
-            ParamValue::Fixed(FixedU64(5_000_000)),
+            ParamValue::Fixed(kernel::GATE_EPS_FLOOR),
             ParamValue::Fixed(FixedU64(50_000_000)),
             None,
             2,
@@ -1003,7 +1060,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"exec.grace",
             ParamValue::U32(201_600),
-            ParamValue::U32(100_800),
+            ParamValue::U32(kernel::EXECUTION_GRACE_FLOOR_BLOCKS),
             ParamValue::U32(432_000),
             None,
             2,
@@ -1023,7 +1080,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.delta.param",
             ParamValue::Fixed(FixedU64(15_000_000)),
-            ParamValue::Fixed(FixedU64(5_000_000)),
+            ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),
             2,
@@ -1033,7 +1090,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.delta.trs",
             ParamValue::Fixed(FixedU64(25_000_000)),
-            ParamValue::Fixed(FixedU64(5_000_000)),
+            ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),
             2,
@@ -1043,7 +1100,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.delta.code",
             ParamValue::Fixed(FixedU64(40_000_000)),
-            ParamValue::Fixed(FixedU64(5_000_000)),
+            ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),
             2,
@@ -1053,7 +1110,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.delta.meta",
             ParamValue::Fixed(FixedU64(60_000_000)),
-            ParamValue::Fixed(FixedU64(5_000_000)),
+            ParamValue::Fixed(kernel::DECISION_DELTA_FLOOR),
             ParamValue::Fixed(FixedU64(100_000_000)),
             Some(MaxDelta::Absolute(ParamValue::Fixed(FixedU64(5_000_000)))),
             2,
@@ -1063,7 +1120,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.sigma.param",
             ParamValue::Fixed(FixedU64(3_000_000)),
-            ParamValue::Fixed(FixedU64(0)),
+            ParamValue::Fixed(kernel::DECISION_SIGMA_FLOOR),
             ParamValue::Fixed(FixedU64(50_000_000)),
             None,
             2,
@@ -1073,7 +1130,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.sigma.trs",
             ParamValue::Fixed(FixedU64(5_000_000)),
-            ParamValue::Fixed(FixedU64(0)),
+            ParamValue::Fixed(kernel::DECISION_SIGMA_FLOOR),
             ParamValue::Fixed(FixedU64(50_000_000)),
             None,
             2,
@@ -1083,7 +1140,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.sigma.code",
             ParamValue::Fixed(FixedU64(8_000_000)),
-            ParamValue::Fixed(FixedU64(0)),
+            ParamValue::Fixed(kernel::DECISION_SIGMA_FLOOR),
             ParamValue::Fixed(FixedU64(50_000_000)),
             None,
             2,
@@ -1093,7 +1150,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"dec.sigma.meta",
             ParamValue::Fixed(FixedU64(10_000_000)),
-            ParamValue::Fixed(FixedU64(0)),
+            ParamValue::Fixed(kernel::DECISION_SIGMA_FLOOR),
             ParamValue::Fixed(FixedU64(50_000_000)),
             None,
             2,
@@ -1223,7 +1280,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"exec.lock.param",
             ParamValue::U32(28_800),
-            ParamValue::U32(14_400),
+            ParamValue::U32(kernel::EXECUTION_TIMELOCK_FLOOR_BLOCKS),
             ParamValue::U32(432_000),
             Some(MaxDelta::Factor(2)),
             2,
@@ -1233,7 +1290,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"exec.lock.trs",
             ParamValue::U32(43_200),
-            ParamValue::U32(14_400),
+            ParamValue::U32(kernel::EXECUTION_TIMELOCK_FLOOR_BLOCKS),
             ParamValue::U32(432_000),
             Some(MaxDelta::Factor(2)),
             2,
@@ -1243,7 +1300,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"exec.lock.code",
             ParamValue::U32(100_800),
-            ParamValue::U32(14_400),
+            ParamValue::U32(kernel::EXECUTION_TIMELOCK_FLOOR_BLOCKS),
             ParamValue::U32(432_000),
             Some(MaxDelta::Factor(2)),
             2,
@@ -1253,7 +1310,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"exec.lock.meta",
             ParamValue::U32(201_600),
-            ParamValue::U32(14_400),
+            ParamValue::U32(kernel::EXECUTION_TIMELOCK_FLOOR_BLOCKS),
             ParamValue::U32(432_000),
             Some(MaxDelta::Factor(2)),
             2,
@@ -1824,6 +1881,7 @@ pub mod benchmarking {
             key16(b"mkt.obs_interval"),
             ParamValue::U32(12),
             1,
+            1,
         )
     }
 
@@ -1838,6 +1896,38 @@ pub mod benchmarking {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn param_record_fields_match_contract_02_section_7_3() {
+        use scale_info::TypeDef;
+        // 02 §7.3 freezes `Params: map ParamKey -> ParamRecord` as a surface the
+        // frontend reads directly, and the release manifest freezes this value's
+        // rendered SCALE layout. Adding `last_change_block` (contract v4, so
+        // `ParamView.last_change` can be a real block number) silently changed
+        // that layout and only the release gate would have caught it. Lock the
+        // field names and SCALE order so the surface cannot drift unnoticed
+        // again: a change here MUST be a deliberate contract revision that also
+        // re-freezes `storage.constitution.params` in the surface manifest.
+        const CONTRACT_FIELDS: [&str; 9] = [
+            "key",
+            "value",
+            "min",
+            "max",
+            "max_delta",
+            "cooldown_epochs",
+            "last_changed_epoch",
+            "last_change_block",
+            "class",
+        ];
+        let type_info = ParamRecord::type_info();
+        let names: Vec<&str> = match &type_info.type_def {
+            TypeDef::Composite(c) => c.fields.iter().filter_map(|f| f.name).collect(),
+            _ => panic!("ParamRecord must encode as a SCALE composite type"),
+        };
+        assert_eq!(&names[..CONTRACT_FIELDS.len()], &CONTRACT_FIELDS);
+        // `kernel_bounded` (13 rule 7) trails the contract-visible prefix.
+        assert_eq!(names.last(), Some(&"kernel_bounded"));
+    }
 
     fn release_channel() -> ReleaseChannel {
         let mut bytes = [0u8; RELEASE_CHANNEL_LEN];
@@ -1862,19 +1952,20 @@ mod tests {
     fn param_update_enforces_bounds_delta_and_cooldown() {
         let mut rec = genesis_params()[0];
         assert_eq!(
-            rec.checked_update(ParamValue::U32(200_000), 3),
+            rec.checked_update(ParamValue::U32(200_000), 3, 30),
             Err(Error::BelowMin)
         );
         assert_eq!(
-            rec.checked_update(ParamValue::U32(400_000), 3),
+            rec.checked_update(ParamValue::U32(400_000), 3, 30),
             Err(Error::DeltaTooLarge)
         );
         assert_eq!(
-            rec.checked_update(ParamValue::U32(310_000), 1),
+            rec.checked_update(ParamValue::U32(310_000), 1, 10),
             Err(Error::CooldownActive)
         );
-        rec = rec.checked_update(ParamValue::U32(310_000), 2).unwrap();
+        rec = rec.checked_update(ParamValue::U32(310_000), 2, 20).unwrap();
         assert_eq!(rec.value, ParamValue::U32(310_000));
+        assert_eq!(rec.last_change_block, 20);
     }
 
     #[test]
@@ -1883,18 +1974,22 @@ mod tests {
         // would let a lowered value be raised by more than 10% per decision.
         let mut rec = genesis_params()[0];
         assert_eq!(rec.max_delta, Some(MaxDelta::Percent(10)));
-        rec = rec.checked_update(ParamValue::U32(275_000), 2).unwrap();
-        rec = rec.checked_update(ParamValue::U32(250_000), 4).unwrap();
-        rec = rec.checked_update(ParamValue::U32(226_000), 6).unwrap();
-        rec = rec.checked_update(ParamValue::U32(204_000), 8).unwrap();
-        rec = rec.checked_update(ParamValue::U32(201_600), 10).unwrap();
+        rec = rec.checked_update(ParamValue::U32(275_000), 2, 20).unwrap();
+        rec = rec.checked_update(ParamValue::U32(250_000), 4, 40).unwrap();
+        rec = rec.checked_update(ParamValue::U32(226_000), 6, 60).unwrap();
+        rec = rec.checked_update(ParamValue::U32(204_000), 8, 80).unwrap();
+        rec = rec
+            .checked_update(ParamValue::U32(201_600), 10, 100)
+            .unwrap();
         // At 201,600 the 10% allowance is 20,160 — a 30,240 raise (15%) that
         // the old absolute bound accepted must now fail.
         assert_eq!(
-            rec.checked_update(ParamValue::U32(231_840), 12),
+            rec.checked_update(ParamValue::U32(231_840), 12, 120),
             Err(Error::DeltaTooLarge)
         );
-        rec = rec.checked_update(ParamValue::U32(221_760), 12).unwrap();
+        rec = rec
+            .checked_update(ParamValue::U32(221_760), 12, 120)
+            .unwrap();
         assert_eq!(rec.value, ParamValue::U32(221_760));
     }
 
@@ -1907,20 +2002,75 @@ mod tests {
             .unwrap();
         assert_eq!(rec.max_delta, Some(MaxDelta::Factor(2)));
         assert_eq!(
-            rec.checked_update(ParamValue::Balance(24_000_000_001), 1),
+            rec.checked_update(ParamValue::Balance(24_000_000_001), 1, 10),
             Err(Error::DeltaTooLarge)
         );
         rec = rec
-            .checked_update(ParamValue::Balance(24_000_000_000), 1)
+            .checked_update(ParamValue::Balance(24_000_000_000), 1, 10)
             .unwrap();
         assert_eq!(
-            rec.checked_update(ParamValue::Balance(11_999_999_999), 2),
+            rec.checked_update(ParamValue::Balance(11_999_999_999), 2, 20),
             Err(Error::DeltaTooLarge)
         );
         rec = rec
-            .checked_update(ParamValue::Balance(12_000_000_000), 2)
+            .checked_update(ParamValue::Balance(12_000_000_000), 2, 20)
             .unwrap();
         assert_eq!(rec.value, ParamValue::Balance(12_000_000_000));
+    }
+
+    #[test]
+    fn max_delta_allowance_matches_every_admission_rule() {
+        let mut record = genesis_params()[0];
+        assert_eq!(record.max_delta_allowance(), Ok(30_240));
+
+        record.max_delta = Some(MaxDelta::Absolute(ParamValue::U32(17)));
+        assert_eq!(record.max_delta_allowance(), Ok(17));
+
+        record.max_delta = None;
+        assert_eq!(record.max_delta_allowance(), Ok(0));
+
+        record.value = ParamValue::Balance(5);
+        record.min = ParamValue::Balance(0);
+        record.max = ParamValue::Balance(u128::MAX);
+        record.max_delta = Some(MaxDelta::Factor(2));
+        // checked_update admits [ceil(5 / 2), 5 * 2] = [3, 10], so the
+        // 02 §4 scalar is conservatively the smaller directional allowance
+        // under R-7; which side this lossy projection denotes remains an open
+        // contract question.
+        assert_eq!(record.max_delta_allowance(), Ok(2));
+
+        record.value = ParamValue::Balance(u128::MAX - 1);
+        // Saturation leaves one unit upward, which is the conservative side.
+        assert_eq!(record.max_delta_allowance(), Ok(1));
+
+        record.max_delta = Some(MaxDelta::Factor(0));
+        assert_eq!(record.max_delta_allowance(), Err(Error::MetaBoundViolation));
+    }
+
+    #[test]
+    fn factor_allowance_projects_the_smaller_exec_lock_direction() {
+        // 02 §4 exposes only one scalar although 13 §1's exec.lock.* factor
+        // rule is directional. R-7 requires the projection not to advertise a
+        // move `checked_update` can reject; the encoding remains an open spec
+        // question, so derive both sides from the canonical record itself.
+        let record = genesis_params()
+            .into_iter()
+            .find(|record| record.key == key16(b"exec.lock.code"))
+            .expect("the canonical exec.lock.code record exists");
+        let value = record.value.as_u128();
+        assert!(matches!(record.max_delta, Some(MaxDelta::Factor(_))));
+        let factor = match record.max_delta {
+            Some(MaxDelta::Factor(factor)) => u128::from(factor),
+            _ => 1,
+        };
+        assert!(factor >= 1);
+        let lower = value / factor + u128::from(value % factor != 0);
+        let downward = value.saturating_sub(lower);
+        let upward = value.saturating_mul(factor).saturating_sub(value);
+
+        assert_eq!(record.max_delta_allowance(), Ok(downward.min(upward)));
+        assert_eq!(record.max_delta_allowance(), Ok(downward));
+        assert!(downward < upward);
     }
 
     #[test]
@@ -1995,7 +2145,8 @@ mod tests {
                 ConstitutionOrigin::Signed,
                 key16(b"mkt.obs_interval"),
                 ParamValue::U32(12),
-                1
+                1,
+                10
             ),
             Err(Error::BadOrigin)
         );
@@ -2006,7 +2157,8 @@ mod tests {
                 ConstitutionOrigin::Root,
                 key16(b"mkt.obs_interval"),
                 ParamValue::U32(12),
-                1
+                1,
+                10
             ),
             Err(Error::BadOrigin)
         );
@@ -2015,7 +2167,8 @@ mod tests {
                 ConstitutionOrigin::FutarchyTreasury,
                 key16(b"mkt.obs_interval"),
                 ParamValue::U32(12),
-                1
+                1,
+                10
             ),
             Err(Error::BadOrigin)
         );
@@ -2024,7 +2177,8 @@ mod tests {
                 ConstitutionOrigin::FutarchyParam,
                 key16(b"missing"),
                 ParamValue::U32(12),
-                1
+                1,
+                10
             ),
             Err(Error::UnknownParam)
         );
@@ -2034,6 +2188,7 @@ mod tests {
                 key16(b"mkt.obs_interval"),
                 ParamValue::U32(12),
                 1,
+                10,
             )
             .unwrap();
         assert_eq!(
@@ -2134,7 +2289,8 @@ mod tests {
                 ConstitutionOrigin::ConstitutionalValues,
                 key16(b"epoch.horizon_k"),
                 ParamValue::U8(3),
-                4
+                4,
+                40
             ),
             Err(Error::BadOrigin)
         );
@@ -2144,6 +2300,7 @@ mod tests {
                 key16(b"epoch.horizon_k"),
                 ParamValue::U8(3),
                 4,
+                40,
             )
             .unwrap();
     }

@@ -50,7 +50,7 @@ class WorkflowContractTests(unittest.TestCase):
     def test_tag_gates_run_all_tooling_suites(self) -> None:
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         gates = workflow[workflow.index("  gates:"):workflow.index("  artifacts:")]
-        self.assertIn("actions/setup-node@v4", gates)
+        self.assertIn("actions/setup-node@v7", gates)
         self.assertIn("node-version: '22'", gates)
         for suite in (
             "tools/deploy/tests",
@@ -86,7 +86,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertLess(generate, prewarm)
         self.assertLess(prewarm, produce)
         self.assertLess(produce, assemble)
-        self.assertIn("actions/setup-node@v4", workflow)
+        self.assertIn("actions/setup-node@v7", workflow)
         self.assertIn("node-version: '22'", workflow)
         self.assertIn("pyyaml==6.0.2 websockets==15.0.1", workflow)
         producer = workflow[produce:assemble]

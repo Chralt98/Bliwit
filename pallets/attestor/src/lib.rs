@@ -46,16 +46,17 @@ pub use attestor_core::{
 
 use futarchy_primitives::AccountId as CoreAccountId;
 
-/// Maximum elected attestors. `13 §4` has no attestor storage-bound row yet;
-/// the exact value is pallet-owned until the B2 `02 §7` amendment freezes the
-/// frontend shape (PLAN SQ-2/SQ-26). The membership floor/quorum remain the
-/// kernel constants `ATT_MIN_MEMBERS` / `ATT_QUORUM`.
+/// Maximum elected attestors. `13 §4` has no attestor storage-bound row; the
+/// pallet-owned value and its `Members` storage shape are frozen in 02 §7.5
+/// (contract v4). The membership floor/quorum remain the kernel constants
+/// `ATT_MIN_MEMBERS` / `ATT_QUORUM`.
 pub const MAX_ATTESTORS: u32 = 16;
 
 /// Maximum flat attestation records retained by this pallet. The frame-free
 /// core intentionally keeps the vector unbounded; this cap makes runtime state
-/// bounded, and overflow is rejected without writes (G-1). A map reaped by
-/// settled proposal is a follow-up once the B2 `02 §7` shape is frozen.
+/// bounded, and overflow is rejected without writes (G-1). A future map reaped
+/// by settled proposal would change the 02 §7.5 contract shape and must follow
+/// its versioning/migration discipline.
 pub const MAX_ATTESTATIONS: u32 = 256;
 
 /// Maps authority roles to concrete origins for the v2 benchmark harness.
@@ -115,9 +116,9 @@ pub mod pallet {
     pub type Members<T: Config> =
         StorageValue<_, BoundedVec<AttestorInfo, ConstU32<MAX_ATTESTORS>>, ValueQuery>;
 
-    /// Flat bounded attestation ledger mirroring the core's `Vec<Attestation>`.
-    /// A settled-proposal-reaped map is follow-up work after B2 freezes the
-    /// contract shape; exceeding this cap is a rejected no-op (G-1).
+    /// Flat bounded attestation ledger mirroring the core's `Vec<Attestation>`;
+    /// this exact shipped value shape is frozen in 02 §7.5. Exceeding the cap is
+    /// a rejected no-op (G-1).
     #[pallet::storage]
     pub type Attestations<T: Config> =
         StorageValue<_, BoundedVec<Attestation, ConstU32<MAX_ATTESTATIONS>>, ValueQuery>;
@@ -474,9 +475,8 @@ pub mod pallet {
             }
         }
 
-        /// FE projection for 06 §8 `attestor.AttestationsFor`. This remains a
-        /// read helper over the flat ledger until B2 freezes the `02 §7` map
-        /// shape (PLAN SQ-2/SQ-26).
+        /// FE projection for 06 §8 `attestor.AttestationsFor`, derived from the
+        /// flat `Attestations` value frozen in 02 §7.5.
         pub fn attestations_for(pid: futarchy_primitives::ProposalId) -> Vec<Attestation> {
             Attestations::<T>::get()
                 .into_iter()
@@ -484,8 +484,8 @@ pub mod pallet {
                 .collect()
         }
 
-        /// FE projection for 06 §8 `attestor.OpenChallenges`. This remains a
-        /// read helper until B2 freezes the `02 §7` map shape (PLAN SQ-2).
+        /// FE projection for 06 §8 `attestor.OpenChallenges`, derived from the
+        /// flat `Attestations` value frozen in 02 §7.5.
         pub fn open_challenges() -> Vec<Attestation> {
             Attestations::<T>::get()
                 .into_iter()

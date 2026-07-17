@@ -506,7 +506,7 @@ fn slippage_phase_and_trade_bounds_are_enforced() {
                 signed(ALICE),
                 MARKET_ID,
                 ScalarSide::Long,
-                B / 4 + 1,
+                market_core::max_trade_amount(B).saturating_add(1),
                 Balance::MAX,
             ),
             E::AmountTooLarge

@@ -181,6 +181,7 @@ proptest! {
             max_delta,
             cooldown_epochs: cooldown,
             last_changed_epoch: last_changed,
+            last_change_block: 0,
             class: ParamClass::Param,
             kernel_bounded: false,
         };
@@ -200,7 +201,10 @@ proptest! {
             let before = state.clone();
             let previous = before.params[property_index];
             let expected = update_allowed(&previous, next, epoch);
-            let result = state.set_param(key, next, epoch);
+            // v4: `set_param` stamps `last_change_block`; a deterministic
+            // block derived from the epoch keeps the property run reproducible.
+            let block = epoch.saturating_mul(10).saturating_add(1);
+            let result = state.set_param(key, next, epoch, block);
             prop_assert_eq!(
                 result.is_ok(),
                 expected,
@@ -226,6 +230,9 @@ proptest! {
                     "max-delta interval bypass"
                 );
                 prop_assert_eq!(stored.last_changed_epoch, epoch);
+                // 02 §4's `ParamView.last_change` is sourced from this field, so
+                // an accepted update must stamp it (02 §7.3, contract v4).
+                prop_assert_eq!(stored.last_change_block, block);
             }
             prop_assert_eq!(state.try_state(), Ok(()));
         }
@@ -241,6 +248,7 @@ fn interval_row(current: u32, min: u32, max: u32, delta: MaxDelta) -> ParamRecor
         max_delta: Some(delta),
         cooldown_epochs: 0,
         last_changed_epoch: 0,
+        last_change_block: 0,
         class: ParamClass::Param,
         kernel_bounded: false,
     }
@@ -255,7 +263,7 @@ fn assert_interval_table(record: ParamRecord, cases: &[(u32, bool)]) {
             "oracle table candidate {candidate}"
         );
         assert_eq!(
-            record.checked_update(next, 0).is_ok(),
+            record.checked_update(next, 0, 0).is_ok(),
             *expected,
             "implementation table candidate {candidate}"
         );

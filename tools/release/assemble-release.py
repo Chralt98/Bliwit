@@ -161,6 +161,28 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def load_manifest_release_blockers(path: Path) -> list[dict[str, str]]:
+    """Load explicit readiness blockers that apply even when every surface records."""
+    manifest = load_json(path)
+    rows = manifest.get("release_blockers", [])
+    if not isinstance(rows, list):
+        raise ValueError("surface manifest release_blockers must be an array")
+    blockers: list[dict[str, str]] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"surface manifest release_blockers[{index}] must be an object")
+        blocker: dict[str, str] = {}
+        for field in ("id", "owner", "reason"):
+            value = row.get(field)
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"surface manifest release_blockers[{index}].{field} must be a non-empty string"
+                )
+            blocker[field] = value
+        blockers.append(blocker)
+    return blockers
+
+
 def decode_hex(value: Any, label: str) -> bytes:
     if not isinstance(value, str) or not value.startswith("0x"):
         raise ValueError(f"{label} must be a 0x-prefixed hex string")
@@ -555,6 +577,19 @@ def main() -> int:
     gaps: list[dict[str, str]] = []
     corruptions: list[dict[str, str]] = []
     candidates: list[Candidate] = []
+
+    # Per-surface `blocked_by` explains a missing recording; it cannot gate a
+    # surface that records successfully. These manifest-level rows fail closed
+    # for known cross-surface compliance gaps (15 §5).
+    try:
+        for blocker in load_manifest_release_blockers(args.surface_manifest):
+            add_gap(gaps, blocker["id"], blocker["owner"], blocker["reason"])
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        add_corruption(
+            corruptions,
+            "surface_manifest.readiness",
+            f"cannot load release blockers: {error}",
+        )
 
     runtime_names = ("runtime.wasm", "metadata.scale", "runtime-info.json", "build-info.json")
     for name in runtime_names:

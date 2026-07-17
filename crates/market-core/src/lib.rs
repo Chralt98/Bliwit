@@ -11,8 +11,8 @@ use futarchy_fixed::{
     FixedError, FixedU64x64, LmsrSide, LN_2,
 };
 use futarchy_primitives::{
-    Balance, BlockNumber, Branch, EpochId, FixedU64, GateType, MarketId, PositionId, PositionKind,
-    ProposalId, ScalarSide, TradeSide,
+    kernel, Balance, BlockNumber, Branch, EpochId, FixedU64, GateType, MarketId, PositionId,
+    PositionKind, ProposalId, QuoteView, ScalarSide, TradeSide,
 };
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
@@ -624,6 +624,85 @@ impl<AccountId: Clone + Eq> Default for MarketState<AccountId> {
     }
 }
 
+/// Mutation-free 02 §4 / 04 §6 quote using the exact fixed-point and
+/// maker-adverse currency-rounding paths used by [`buy_book`] and
+/// [`sell_book`]. `cost` is the gross buy charge or gross sell proceeds before
+/// fee. Per 02 §4, `within_domain` reports only the post-trade LMSR domain;
+/// 11 §11.5 P-1 makes the independent per-trade bound a separate frontend
+/// precondition, exposed here by `max_trade`. A closed book or an unevaluable
+/// post-state rejects.
+pub fn quote<A>(
+    m: &MarketBook<A>,
+    side: TradeSide,
+    amount: Balance,
+    fee_bps: u128,
+) -> Result<QuoteView, Error> {
+    ensure_trade_phase(m.phase)?;
+    let (post_long, post_short, cost) = match side {
+        TradeSide::BuyLong => {
+            let post_long = add(m.q_long, amount)?;
+            let cost = lmsr_buy_cost(
+                fx(m.q_long)?,
+                fx(m.q_short)?,
+                fx(m.b)?,
+                LmsrSide::Long,
+                fx(amount)?,
+            )
+            .map_err(map_fixed)?;
+            (post_long, m.q_short, fixed_to_base_units_up(cost)?)
+        }
+        TradeSide::BuyShort => {
+            let post_short = add(m.q_short, amount)?;
+            let cost = lmsr_buy_cost(
+                fx(m.q_long)?,
+                fx(m.q_short)?,
+                fx(m.b)?,
+                LmsrSide::Short,
+                fx(amount)?,
+            )
+            .map_err(map_fixed)?;
+            (m.q_long, post_short, fixed_to_base_units_up(cost)?)
+        }
+        TradeSide::SellLong => {
+            let post_long = sub(m.q_long, amount)?;
+            let proceeds = lmsr_sell_proceeds(
+                fx(m.q_long)?,
+                fx(m.q_short)?,
+                fx(m.b)?,
+                LmsrSide::Long,
+                fx(amount)?,
+            )
+            .map_err(map_fixed)?;
+            (post_long, m.q_short, fixed_to_base_units_down(proceeds)?)
+        }
+        TradeSide::SellShort => {
+            let post_short = sub(m.q_short, amount)?;
+            let proceeds = lmsr_sell_proceeds(
+                fx(m.q_long)?,
+                fx(m.q_short)?,
+                fx(m.b)?,
+                LmsrSide::Short,
+                fx(amount)?,
+            )
+            .map_err(map_fixed)?;
+            (m.q_long, post_short, fixed_to_base_units_down(proceeds)?)
+        }
+    };
+    let p_after_1e9 = price_1e9_quantities(post_long, post_short, m.b)?;
+    let max_trade = max_trade_amount(m.b);
+    // 02 §4 freezes this field as the post-trade |q_L-q_S|/b predicate only;
+    // the 11 §11.5 P-1 min/max check remains independently visible through
+    // `max_trade` and the MinTrade metadata constant.
+    let within_domain = quantities_within_domain(post_long, post_short, m.b);
+    Ok(QuoteView {
+        cost,
+        fee: fee_up(cost, fee_bps)?,
+        p_after_1e9,
+        max_trade,
+        within_domain,
+    })
+}
+
 /// Execute one buy against a single book using the supplied ledger adapter.
 #[allow(clippy::too_many_arguments)]
 pub fn buy_book<A: Clone + Eq, L: LedgerOps<A>>(
@@ -636,7 +715,7 @@ pub fn buy_book<A: Clone + Eq, L: LedgerOps<A>>(
     max_cost: Balance,
     block: u64,
 ) -> Result<Vec<Event<A>>, Error> {
-    ensure_trading(m.phase)?;
+    ensure_trade_phase(m.phase)?;
     ensure_trade_bounds(m.b, amount)?;
     let cost_fx = lmsr_buy_cost(
         fx(m.q_long)?,
@@ -731,7 +810,7 @@ pub fn sell_book<A: Clone + Eq, L: LedgerOps<A>>(
     min_proceeds: Balance,
     block: u64,
 ) -> Result<Vec<Event<A>>, Error> {
-    ensure_trading(m.phase)?;
+    ensure_trade_phase(m.phase)?;
     ensure_trade_bounds(m.b, amount)?;
     let proceeds_fx = lmsr_sell_proceeds(
         fx(m.q_long)?,
@@ -1360,7 +1439,10 @@ pub fn pow_1e9_up(base: u64, mut exp: u64) -> u64 {
     result
 }
 fn price_1e9<A>(m: &MarketBook<A>) -> Result<FixedU64, Error> {
-    let p = lmsr_price_long(fx(m.q_long)?, fx(m.q_short)?, fx(m.b)?).map_err(map_fixed)?;
+    price_1e9_quantities(m.q_long, m.q_short, m.b)
+}
+fn price_1e9_quantities(q_long: Balance, q_short: Balance, b: Balance) -> Result<FixedU64, Error> {
+    let p = lmsr_price_long(fx(q_long)?, fx(q_short)?, fx(b)?).map_err(map_fixed)?;
     Ok(FixedU64(
         (p.raw()
             .checked_mul(PRICE_ONE_1E9 as u128)
@@ -1390,16 +1472,40 @@ pub fn fee_up(cost: Balance, fee_bps: u128) -> Result<Balance, Error> {
     let v = cost.checked_mul(fee_bps).ok_or(Error::ArithmeticOverflow)?;
     Ok(v / BPS_DENOM + u128::from(v % BPS_DENOM != 0))
 }
-fn ensure_trading(p: MarketPhase) -> Result<(), Error> {
+fn quantities_within_domain(q_long: Balance, q_short: Balance, b: Balance) -> bool {
+    if b == 0 {
+        return false;
+    }
+    let diff = q_long.abs_diff(q_short);
+    let bound = Balance::from(kernel::LMSR_DOMAIN_BOUND);
+    let quotient = diff / b;
+    quotient < bound || (quotient == bound && diff % b == 0)
+}
+/// Read-only phase half of trade admission (04 §6.4). FRAME wrappers and
+/// runtime views reuse this predicate so a non-trading book can never quote as
+/// executable while `buy`/`sell` reject it.
+pub fn ensure_trade_phase(p: MarketPhase) -> Result<(), Error> {
     ensure!(
         matches!(p, MarketPhase::Trading | MarketPhase::Extended),
         Error::NotTrading
     );
     Ok(())
 }
+/// Maximum amount admitted by one trade for a book with liquidity parameter
+/// `b` (04 §6.2 / 13 §2). An invalid future kernel ratio fails closed to zero.
+pub fn max_trade_amount(b: Balance) -> Balance {
+    let (numerator, denominator) = kernel::MAX_TRADE_RATIO;
+    let Some(scaled) = b.checked_mul(Balance::from(numerator)) else {
+        return 0;
+    };
+    let Some(value) = scaled.checked_div(Balance::from(denominator)) else {
+        return 0;
+    };
+    value
+}
 fn ensure_trade_bounds(b: Balance, a: Balance) -> Result<(), Error> {
     ensure!(a >= MIN_TRADE, Error::AmountTooSmall);
-    ensure!(a <= b / 4, Error::AmountTooLarge);
+    ensure!(a <= max_trade_amount(b), Error::AmountTooLarge);
     Ok(())
 }
 fn lside(s: ScalarSide) -> LmsrSide {
@@ -1511,6 +1617,108 @@ mod tests {
         [n; 32]
     }
     const B: Balance = 10_000_000_000;
+    #[test]
+    fn quote_matches_buy_and_sell_execution_paths_without_mutating() {
+        let mut ledger = LedgerState::new();
+        ledger.create_vault(1, 0).unwrap();
+        let mut markets = MarketState::new();
+        markets
+            .create_market(
+                7,
+                BookKind::Decision {
+                    proposal: 1,
+                    branch: Branch::Accept,
+                },
+                a(9),
+                a(8),
+                B,
+            )
+            .unwrap();
+        markets.seed(&mut ledger, 7, &a(1)).unwrap();
+
+        let before = markets.markets[0];
+        let buy_quote = quote(&before, TradeSide::BuyLong, 1_000_000_000, FEE_BPS).unwrap();
+        let exact_buy = lmsr_buy_cost(
+            fx(before.q_long).unwrap(),
+            fx(before.q_short).unwrap(),
+            fx(before.b).unwrap(),
+            LmsrSide::Long,
+            fx(1_000_000_000).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(buy_quote.cost, fixed_to_base_units_up(exact_buy).unwrap());
+        assert_eq!(markets.markets[0], before, "quote must be mutation-free");
+        markets
+            .buy(
+                &mut ledger,
+                7,
+                &a(2),
+                ScalarSide::Long,
+                1_000_000_000,
+                Balance::MAX,
+                10,
+            )
+            .unwrap();
+        assert_eq!(markets.markets[0].fees_accrued, buy_quote.fee);
+        assert_eq!(markets.markets[0].last_quote_1e9, buy_quote.p_after_1e9);
+        assert!(matches!(
+            markets.events.last(),
+            Some(Event::Traded { cost, .. }) if *cost == buy_quote.cost
+        ));
+
+        let before_sell = markets.markets[0];
+        let sell_quote = quote(&before_sell, TradeSide::SellLong, 1_000_000_000, FEE_BPS).unwrap();
+        let exact_sell = lmsr_sell_proceeds(
+            fx(before_sell.q_long).unwrap(),
+            fx(before_sell.q_short).unwrap(),
+            fx(before_sell.b).unwrap(),
+            LmsrSide::Long,
+            fx(1_000_000_000).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            sell_quote.cost,
+            fixed_to_base_units_down(exact_sell).unwrap()
+        );
+        markets
+            .sell(
+                &mut ledger,
+                7,
+                &a(2),
+                ScalarSide::Long,
+                1_000_000_000,
+                0,
+                20,
+            )
+            .unwrap();
+        assert_eq!(
+            markets.markets[0].fees_accrued.checked_sub(buy_quote.fee),
+            Some(sell_quote.fee)
+        );
+        assert_eq!(markets.markets[0].last_quote_1e9, sell_quote.p_after_1e9);
+        assert!(matches!(
+            markets.events.last(),
+            Some(Event::Traded { cost, .. }) if *cost == sell_quote.cost
+        ));
+    }
+
+    #[test]
+    fn quote_reports_domain_independently_from_trade_bounds_and_rejects_bad_math() {
+        let book = MarketBook::open(1, BookKind::Baseline { epoch: 1 }, a(1), a(2), B);
+        let over_limit =
+            quote(&book, TradeSide::BuyLong, max_trade_amount(B) + 1, FEE_BPS).unwrap();
+        // 02 §4 freezes `within_domain` to the post-trade LMSR predicate;
+        // 11 §11.5 P-1 makes the per-trade maximum a separate FE check.
+        assert!(over_limit.within_domain);
+        assert!(over_limit.cost > 0);
+        assert_eq!(over_limit.max_trade, max_trade_amount(B));
+        assert!(max_trade_amount(B) + 1 > over_limit.max_trade);
+        assert_eq!(
+            quote(&book, TradeSide::SellLong, 1, FEE_BPS),
+            Err(Error::ArithmeticOverflow)
+        );
+    }
+
     #[test]
     fn buy_wrapper_collects_complete_pair_fee_and_records_twap() {
         let mut ledger = LedgerState::new();
@@ -1982,7 +2190,7 @@ mod tests {
                 7,
                 &a(2),
                 ScalarSide::Long,
-                B / 4 + 1,
+                max_trade_amount(B).saturating_add(1),
                 Balance::MAX,
                 10
             ),

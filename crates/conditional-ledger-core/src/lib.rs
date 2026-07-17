@@ -1474,6 +1474,36 @@ pub fn position(proposal: ProposalId, branch: Branch, kind: PositionKind) -> Pos
 pub fn baseline(epoch: EpochId, side: ScalarSide) -> PositionId {
     PositionId::Baseline { epoch, side }
 }
+
+/// Canonical 03 §2.1 instrument order for one proposal vault: Accept then
+/// Reject, with branch-USDC, scalar, Survival-gate, then Security-gate legs.
+pub fn proposal_positions(proposal: ProposalId) -> [PositionId; 14] {
+    core::array::from_fn(|index| {
+        let branch = if index < 7 {
+            Branch::Accept
+        } else {
+            Branch::Reject
+        };
+        let kind = match index % 7 {
+            0 => PositionKind::BranchUsdc,
+            1 => PositionKind::Long,
+            2 => PositionKind::Short,
+            3 => PositionKind::GateYes(GateType::Survival),
+            4 => PositionKind::GateNo(GateType::Survival),
+            5 => PositionKind::GateYes(GateType::Security),
+            _ => PositionKind::GateNo(GateType::Security),
+        };
+        position(proposal, branch, kind)
+    })
+}
+
+/// Canonical 03 §2.1 Baseline instrument order: LONG then SHORT.
+pub fn baseline_positions(epoch: EpochId) -> [PositionId; 2] {
+    [
+        baseline(epoch, ScalarSide::Long),
+        baseline(epoch, ScalarSide::Short),
+    ]
+}
 fn bix(b: Branch) -> usize {
     match b {
         Branch::Accept => 0,
@@ -1556,6 +1586,35 @@ mod tests {
     use super::*;
     fn acct(n: u8) -> [u8; 32] {
         [n; 32]
+    }
+
+    #[test]
+    fn view_instrument_helpers_pin_the_canonical_order() {
+        let proposal = proposal_positions(7);
+        assert_eq!(
+            proposal[0],
+            position(7, Branch::Accept, PositionKind::BranchUsdc)
+        );
+        assert_eq!(proposal[1], position(7, Branch::Accept, PositionKind::Long));
+        assert_eq!(
+            proposal[6],
+            position(7, Branch::Accept, PositionKind::GateNo(GateType::Security))
+        );
+        assert_eq!(
+            proposal[7],
+            position(7, Branch::Reject, PositionKind::BranchUsdc)
+        );
+        assert_eq!(
+            proposal[13],
+            position(7, Branch::Reject, PositionKind::GateNo(GateType::Security))
+        );
+        assert_eq!(
+            baseline_positions(9),
+            [
+                baseline(9, ScalarSide::Long),
+                baseline(9, ScalarSide::Short)
+            ]
+        );
     }
     fn fill_to_cap(s: &mut LedgerState<[u8; 32]>, who: &[u8; 32], splits: u32) {
         // Occupy 2·splits position entries via real splits so counts,

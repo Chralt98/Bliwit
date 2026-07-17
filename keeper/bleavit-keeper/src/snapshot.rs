@@ -1334,6 +1334,7 @@ mod tests {
         max_delta: Option<EncodedMaxDelta>,
         cooldown_epochs: u32,
         last_changed_epoch: u32,
+        last_change_block: u32,
         class: EncodedParamClass,
         kernel_bounded: bool,
     }
@@ -1364,6 +1365,7 @@ mod tests {
             max_delta: Some(EncodedMaxDelta::Absolute(EncodedParamValue::U32(5))),
             cooldown_epochs: 1,
             last_changed_epoch: 3,
+            last_change_block: 42,
             class: EncodedParamClass::Param,
             kernel_bounded: false,
         };

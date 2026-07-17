@@ -400,6 +400,14 @@ pub mod pallet {
         }
     }
 
+    #[pallet::extra_constants]
+    impl<T: Config> Pallet<T> {
+        #[pallet::constant_name(MinTransfer)]
+        fn min_transfer() -> Balance {
+            kernel::MIN_TRANSFER_USDC
+        }
+    }
+
     // --------------------------------------------------------------------- hooks
 
     #[pallet::hooks]

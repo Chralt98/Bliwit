@@ -1267,6 +1267,7 @@ dependencies = [
  "frame-system-rpc-runtime-api",
  "frame-try-runtime",
  "futarchy-primitives",
+ "futarchy-runtime-api",
  "market-core",
  "origins-core",
  "pallet-asset-tx-payment",

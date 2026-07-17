@@ -57,6 +57,7 @@ mod apis;
 mod classifier;
 mod configs;
 mod genesis;
+pub mod views;
 pub mod weights;
 
 #[cfg(test)]
@@ -119,8 +120,8 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     impl_version: 0,
     apis: apis::RUNTIME_API_VERSIONS,
     // `runtime_version` requires a literal; an identity test pins this to the
-    // imported `INTEGRATION_CONTRACT_VERSION` (3).
-    transaction_version: 3,
+    // imported `INTEGRATION_CONTRACT_VERSION` (4).
+    transaction_version: 4,
     system_version: 1,
 };
 

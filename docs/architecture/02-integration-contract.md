@@ -4,7 +4,7 @@
 
 **Boundary.** This document owns everything the chain and the canonical frontend must agree on byte-for-byte: shared SCALE types, the `FutarchyApi` runtime API and its view types, the frozen event schema, the storage items and names the frontend reads directly, chain identity constants, the constants-binding rules, the WSS bootnode chain-spec requirement, the backend-published test-artifact feed, and the `ReleaseChannel` raw storage key. It does **not** own the *semantics* behind these surfaces (ledger rules → [03](03-conditional-ledger.md), market mechanics → [04](04-markets-and-pricing.md), decision engine → [05](05-welfare-and-decision-engine.md), oracle game → [07](07-oracle-and-disputes.md), upgrade path → [09](09-execution-upgrades-and-rollout.md)) — but where a name or layout appears both here and there, **this document's spelling is canonical**. Normative language per RFC 2119.
 
-**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 3**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
+**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 4**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
 
 ---
 
@@ -15,7 +15,7 @@
 | 1 | Shared SCALE primitives (`futarchy-primitives`) | §2 | BE §7, repaired per D-1/D-3/B-2/B-3/B-med |
 | 2 | `FutarchyApi` — 11 runtime-API methods + view types | §3–§4 | FE §30 P-5/P-7, completed |
 | 3 | Frozen event schema (ledger, market, epoch, oracle, guardian, execution, system) | §5–§6 | FE §15.3 + X-11 fixes |
-| 4 | Storage items the frontend reads (incl. `RecentCohortSummaries`, `BaselineMarketOf`, `PhaseFlags`, oracle items) | §7 | X-1c, X-10, X-11b/c |
+| 4 | Storage items the frontend reads (incl. `RecentCohortSummaries`, `BaselineMarketOf`, `PhaseFlags`, oracle and attestor items) | §7 | X-1c, X-10, X-11b/c |
 | 5 | Chain identity constants | §8 | D-17 |
 | 6 | Constants & parameter binding (no FE hardcodes) | §9 | X-11e/h |
 | 7 | WSS bootnode chain-spec requirement | §10 | D-6, X-4 |
@@ -113,7 +113,7 @@ pub enum TradeSide { BuyLong, BuyShort, SellLong, SellShort }
 
 `Proposal` gains the fields the decision engine reads (`ask: Balance`, `decide_at: BlockNumber` — B-med, semantics in [05](05-welfare-and-decision-engine.md)); `ExecutionRecord.result` is typed `DispatchOutcomeCode` as above. The full `Proposal`/`ExecutionRecord` structs and their ≤ 512 B / bound arguments are owned by [05](05-welfare-and-decision-engine.md)/[09](09-execution-upgrades-and-rollout.md); their SCALE layouts are part of this contract by inclusion in `futarchy-primitives`.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 3`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
+The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 4`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
 
 ---
 
@@ -262,19 +262,30 @@ pub struct NavView {
     pub rewards: Balance,
     pub stream_remainders: Balance, // undisbursed outbound streams
     pub obligations: Balance,
-    pub haircut_flag: bool,         // NAV haircut surfaced when reserve_flag set
+    pub haircut_flag: bool,         // 08 §1.2 reserve_impaired; true while reserve health is degraded
+    pub spendable_nav: Balance,     // 08 §1.2 spendable NAV; 0 while haircut_flag is true
+    pub meter_utilization_bps: u32, // 08 §1.3 rolling-meter utilization, in basis points
+    pub class_floors: [Balance; 4], // 08 §4.1; Param, Treasury, Code, Meta declaration order
 }
+
+// The Treasury class slot uses the conservative >1%-ask arming floor
+// (7,393,600 USDC) implemented by 08 §4.1's class-floor check; the lower
+// ≤1%-ask figure remains proposal-specific and is not a second class slot.
 
 /// Stored form == view form (§7.1). FE draft's `DecisionOutcomeCode` is renamed.
 pub struct CohortSummary {
     pub epoch: EpochId,
     pub s_1e9: FixedU64,
     pub baseline_twap_1e9: FixedU64,
-    pub proposals: BoundedVec<(ProposalId, ProposalClass, DecisionOutcome), ConstU32<5>>,
+    pub proposals: BoundedVec<(ProposalId, ProposalClass, DecisionOutcome), ConstU32<12>>,
     pub voided: bool,
     pub settled_at: BlockNumber,
 }
 pub type CohortSummaryView = CohortSummary;
+
+// The 12-entry proposal bound is the hard maximum of the `epoch.slots` key
+// (13 §1), not its launch default. A governance raise can therefore never
+// truncate the D-6 chain-served fallback surface.
 
 pub struct OracleRoundView {
     pub component: MetricId,
@@ -315,7 +326,7 @@ Canonical names below are FINAL; the frontend `CRITICAL_SURFACE` list and local-
 
 | Pallet | Events (canonical) |
 |---|---|
-| `pallet-conditional-ledger` | `Split`, `Merged`, `ScalarSplit`, `ScalarMerged`, `PositionTransferred`, `VaultResolved { pid, branch }`, `Redeemed`, `ScalarSettlementSet { pid, branch, s }` (carries winning branch — B-low), `ScalarRedeemed`, `ScalarPairRedeemed { pid, amount }` (B-5), `GateSettled { pid, branch, gate, outcome }` (B-2), **`VaultVoided { pid }`** (D-1, X-11f), **`VoidRedeemed { pid, kind, amount, payout }`** (D-1), `VaultReaped` |
+| `pallet-conditional-ledger` | `Split`, `Merged`, `ScalarSplit`, `ScalarMerged`, **`GateSplit { pid: ProposalId, branch: Branch, gate: GateType, amount: Balance }`**, **`GateMerged { pid: ProposalId, branch: Branch, gate: GateType, amount: Balance }`**, `PositionTransferred`, **`BaselineSplit { epoch: EpochId, amount: Balance }`**, **`BaselineMerged { epoch: EpochId, amount: Balance }`**, `VaultResolved { pid, branch }`, **`VaultVoided { pid }`** (D-1, X-11f), `ScalarSettlementSet { pid, branch, s }` (carries winning branch — B-low), `GateSettled { pid, branch, gate, outcome }` (B-2), **`BaselineSettled { epoch: EpochId, s: FixedU64 }`**, `Redeemed`, `ScalarRedeemed`, `ScalarPairRedeemed { pid, amount }` (B-5), **`GateRedeemed { pid: ProposalId, gate: GateType, amount: Balance }`**, **`VoidRedeemed { pid, kind, amount, payout }`** (D-1), **`BaselineRedeemed { epoch: EpochId, side: ScalarSide, payout: Balance }`**, `VaultReaped`, **`BaselineVaultReaped { epoch: EpochId, residue: Balance }`** |
 | `pallet-market` | §5 table |
 | `pallet-epoch` | `ProposalSubmitted`, `ProposalWithdrawn`, `ScreeningStarted`, `ProposalCancelled { reason }`, `ProposalQualified`, `ProposalDeferred`, `MarketsOpened`, `DecisionExtended`, `ProposalQueued { payload_hash, maturity }`, `ProposalRejected { reason }`, `ProposalDelayed { justification_hash }`, `RerunScheduled`, `RerunOpened`, `MandateExpired`, `MeasurementStarted { cohort }`, `CohortSettled { epoch, s }`, **`ProposalForceRejected { pid, reason }`** — emitted by transition T20 (emergency/VOID force-reject), which previously emitted nothing and silently corrupted every event-derived archive (X-11f), `IntakeSlashed { pid, reason, amount }` (accompanies every partial intake-bond slash — [06](06-governance-and-guardians.md) §4) |
 | `pallet-execution-guard` | `Executed { pid, record }`, `ExecutionFailed { pid, outcome: DispatchOutcomeCode }`, `Ratified { pid, referendum_index }` (written by `execution_guard.ratify(proposal_id, referendum_index)`, the sole `ratify`-track governance call — [06](06-governance-and-guardians.md) §2.2), `UpgradeAuthorized { code_hash, authorized_at }` (system-event mirror carrying `authorized_at` for the `DescriptorLeadTime` check, D-14) |
@@ -382,7 +393,7 @@ Events:
 
 | Item | Type | Notes |
 |---|---|---|
-| `Params` | `map ParamKey → ParamRecord` | read via `params()`; §9 binding rules |
+| `Params` | `map ParamKey → ParamRecord` | read via `params()`; §9 binding rules. `ParamRecord` carries both `last_changed_epoch` (the cooldown clock, [13](13-parameters.md) rule 7) and `last_change_block` (contract v4) — §4's `ParamView.last_change` is a block number, and epochs do not determine it |
 | **`PhaseFlags`** | `u32` bitset | **The key the frontend binds trading enablement (and the Phases 0–3 "bootstrap governance — sudo active" banner, D-13) to.** Bit assignments: 0 = shadow mode, 1 = PARAM armed, 2 = TREASURY armed, 3 = CODE/META armed, 4 = sudo present, 5 = ledger frozen (PB-LEDGER-FREEZE), 6 = dead-man engaged, 7 = reserve-health flag; bits 8–31 reserved (append-only) |
 | **`ReleaseChannel`** | fixed-layout raw value | §12 — NOT ordinary SCALE-metadata-dependent storage |
 
@@ -394,6 +405,16 @@ Events:
 | `Markets` | `map MarketId → MarketState` | ≤ `MaxLiveMarkets = 196` *(normative value: [13](13-parameters.md))* |
 
 `pallet-conditional-ledger::{Vaults, BaselineVaults, Positions, PositionTotals}` — note the **key order of `Positions` is `(PositionId, AccountId)`** (per-vault drainable, B-med); a per-account storage prefix scan is therefore NOT available, and the frontend MUST use `account_positions()` (the runtime API iterates the bounded live-vault set) or the per-account key index maintained by the ledger ([03](03-conditional-ledger.md)). `pallet-execution-guard::{Queue, Ratifications, ExecutionRecords}` (a `RatificationRecord` is written by the frozen governance call `execution_guard.ratify(proposal_id, referendum_index)`, binding `(pid, payload_hash)` — [06 §2.2](06-governance-and-guardians.md)); `pallet-welfare::{Snapshots, MetricSpecs, GateBreachFlags}`; `pallet-guardian` membership/allowances; `System.Account`, `ForeignAssets.Account(USDC_LOCATION, who)` (NOT `Assets.Account(1337, who)` — X-11a; the USDC identifier is the XCM Location of §8).
+
+### 7.5 `pallet-attestor`
+
+The shipped pallet uses value storage rather than keyed maps. The item names and the full SCALE value shapes below are frozen byte-for-byte; “—” means the storage item has no map key.
+
+| Item | Key type | Value type | Notes |
+|---|---|---|---|
+| `Members` | — | `BoundedVec<AttestorInfo, ConstU32<16>>`, where `AttestorInfo { account: AccountId, bond: Balance, false_count: u8, active: bool }` | Elected bonded member set; value-query default is empty |
+| `Attestations` | — | `BoundedVec<Attestation, ConstU32<256>>`, where `Attestation { id: AttestationId, pid: ProposalId, artifact_hash: H256, statement_hash: H256, attestor: AccountId, submitted_at: BlockNumber, challenge_deadline: BlockNumber, challenge: Option<ChallengeStatus> }` and `ChallengeStatus ∈ { Open { challenger: AccountId, evidence_hash: H256, bond: Balance }, Upheld, Rejected }` | Flat shipped attestation ledger; value-query default is empty |
+| `NextAttestationId` | — | `AttestationId = u32` | Monotone cursor; value-query default is 0 |
 
 ---
 
@@ -410,7 +431,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 3` (runtime constant) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 4` (runtime constant) |
 
 ---
 
@@ -419,31 +440,88 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 Two representations exist, and the frontend MUST bind to them and never hardcode:
 
 1. **Kernel constants (class K)** have *no storage representation*; they are exposed as **pallet constants in the runtime metadata** (the constants API) and are readable without any storage query. They change only via Wasm upgrade, which the frontend already tracks through descriptors.
-2. **Tunables** live in `pallet-constitution::Params` and are read via `params()` (or the raw `Params` map); their kernel floors/ceilings are ALSO metadata constants.
+2. **Tunables** live in `pallet-constitution::Params` and are read via `params()` (or the raw `Params` map). Only hard envelopes of keys in [13](13-parameters.md) reading rule 7's exhaustive kernel-bounded set are also metadata constants; META-amendable registry bounds remain in `Params` and bind through `ParamView.min` / `ParamView.max`.
 
 Enumeration of every value the frontend's precondition tables re-check (defaults/bounds are quoted for readability; *normative values: [13](13-parameters.md)*):
 
 | Value | Representation (FE binding target) | Used by FE precondition row |
 |---|---|---|
-| `MinSplit` kernel floor (0.01 USDC) + live `ledger.min_split` | metadata constant (floor) + `params()` (live) | `ledger.split/merge` |
+| Live `ledger.min_split` (K floor 0.01 USDC) | `params()` (authoritative live record); the already-wired `MinSplit` metadata constant mirrors that live value | `ledger.split/merge` |
 | Per-trade min / max (`mkt.min_trade = 1`, `mkt.max_trade = b/4`) | metadata constants (K) | `market.buy/sell` |
 | `MinTransfer` | metadata constant (K) | `ledger.transfer` |
 | `MaxPositionsPerAccount = 64` (protocol accounts exempt) | metadata constant | `ledger.transfer` (recipient bound), position views |
 | Positions entry deposit (0.1 USDC) | metadata constant | `ledger.split`, `transfer` fee headroom |
-| `IntakeQueue = 64` bound; intake rate limit ≤ 4 entries/epoch/account | metadata constants | `epoch.submit` |
+| `IntakeQueue = 64` bound | metadata constant | `epoch.submit` queue-cap check |
+| `intake.max_per_account` live rate limit (launch default 4; META-amendable bounds [2, 8]) | `params()` — bind `ParamView.value`, `.min`, and `.max`; no metadata constant | `epoch.submit` account-rate check |
 | `MaxLiveProposals = 32` | metadata constant | discovery bounds |
 | `prop.bond` per class | `params()` | `epoch.submit` |
 | `mkt.fee` (30 bps default) | `params()` | quote display, `buy/sell` cost recompute |
 | `mkt.obs_interval` (10 blocks) | `params()` | crank staleness check |
-| `dec.window`, `dec.trailing`, `dec.extension`, `dec.delta`, `dec.sigma`, `dec.coverage`, `dec.v_min` | `params()` (kernel floors as metadata constants) | decision previews, `decide` crank |
+| `dec.window`, `dec.trailing`, `dec.delta`, `dec.sigma`, `dec.coverage`, `dec.v_min`; `dec.extension` (K) | `params()` for tunable values/bounds. Metadata constants exist only for the rule-7 kernel-bounded `dec.window` / `dec.delta` / `dec.sigma` floors and kernel-only `dec.extension`. `dec.trailing` / `dec.coverage` / `dec.v_min` bind through `ParamView.min` / `.max`: respectively 3,600 / 28,800 blocks, 90 / 99 percent, and ×0.1 / ×10 of the per-class schedule; only the effective-v-min `2·InCapPrize` term is K. | decision previews, `decide` crank |
 | `gate.p_max`, `gate.eps` | `params()` (0.10 K ceiling as constant) | gate-market screens |
 | `exec.timelock` per class, `exec.grace` | `params()` (K floors as constants) | `execution_guard.execute` |
 | `orc.bond_floor`/`orc.rounds`/`orc.window`, `orc.bond_bps` value scaling, `orc.reporter_stake` | `params()` | `oracle.report/challenge` |
 | `trs.cap_proposal`/`cap_30d`/`cap_180d`, `trs.stream_threshold` | `params()` | treasury proposal screens |
 | `fee.vit_usdc_rate` | `params()` | fee-currency selector (D-12) |
-| `epoch.length`, `epoch.slots`, phase-offset fractions | `params()` + metadata constants | countdowns, phase headers |
+| `epoch.length`, `epoch.slots` | `params()` (live values and record bounds) + applicable metadata floor/bound constants | countdowns, phase headers |
+| Phase-offset fractions | `PhaseOffsets` metadata constant only (kernel-fixed `futarchy-primitives::phase_offsets`; never `Params`) | countdowns, phase headers |
 | `DescriptorLeadTime = 43,200` blocks | metadata constant | upgrade banners, execute precondition |
 | `RecentCohortSummaries` ring size = 32; books/proposal ≤ 6; `MaxLiveMarkets = 196` | metadata constants | history windows, chart bounds |
+
+### Frozen metadata-constant names (SQ-138)
+
+The tuple/array orders in this table are part of the freeze. Every per-class array is ordered **Param, Treasury, Code, Meta**. `FixedU64` values use the contract's 1e9 grid; `Balance` values use USDC base units where the row is USDC-denominated. “Wired” means the named constant exists in the shipped pallet today. “Next wiring” means this v4 amendment freezes the name, type and value source now; B2/A8 adds the pallet metadata exposure in the queued follow-up without renaming it.
+
+| Pallet | Constant name | Type | Value source | Status |
+|---|---|---|---|---|
+| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 4) | Wired |
+| Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) | Wired |
+| Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) | Wired |
+| Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) | Wired |
+| ConditionalLedger | `MinSplit` | `Balance` | live `Params[ledger.min_split]`, backstopped by `kernel::MIN_SPLIT_USDC` | Wired |
+| ConditionalLedger | `PositionDeposit` | `Balance` | live `Params[ledger.pos_dep]` (launch 0.1 USDC) | Wired |
+| ConditionalLedger | `MaxPositionsPerAccount` | `u32` | `bounds::MAX_ACCOUNT_POSITIONS` (= 64) | Wired |
+| ConditionalLedger | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` | Wired |
+| ConditionalLedger | `ReapBatch` | `u32` | `kernel::REAP_BATCH` (= 100) | Wired |
+| ConditionalLedger | `MinTransfer` | `Balance` | `kernel::MIN_TRANSFER_USDC` (= 10,000 base units) | Wired |
+| Market | `Fee` | `u128` | live `Params[mkt.fee]`, projected in basis points (launch 30) | Wired |
+| Market | `ObsInterval` | `u64` | live `Params[mkt.obs_interval]`, promoted from `u32` (launch 10 blocks) | Wired |
+| Market | `Kappa1e9` | `u64` | live `Params[mkt.kappa]` on the 1e9 grid (launch 5,000,000) | Wired |
+| Market | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` | Wired |
+| Market | `MinTrade` | `Balance` | `kernel::MIN_TRADE_USDC` (= 1,000,000 base units) | Wired |
+| Market | `MaxTradeRatio` | `(u32, u32)` | kernel ratio `(1, 4)` (`b/4`) | Wired |
+| Market | `MaxLiveMarkets` | `u32` | `bounds::MAX_LIVE_MARKETS` (= 196) | Wired |
+| Market | `GatePMaxCeiling` | `FixedU64` | `kernel::GATE_P_MAX_CEILING_1E9` (= 100,000,000; 0.10) | Wired |
+| Market | `GateEpsFloor` | `FixedU64` | [13 §1](13-parameters.md) `gate.eps` K floor (= 5,000,000; 0.005) | Wired |
+| Oracle | `MaxRoundCloseBatch` | `u32` | `kernel::TICK_BATCH` (= 10) | Wired |
+| Registry (each instance) | `Kind` | `RegistryKind` | runtime instance `Config::Kind` (`Incident` or `Milestone`) | Wired |
+| Registry (each instance) | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` | Wired |
+| Registry (each instance) | `MaxFilingsPerEpoch` | `u32` | `kernel::REG_MAX_FILINGS_EPOCH` (= 64) | Wired |
+| Registry (each instance) | `MaxEvidenceLen` | `u32` | fixed `H256` evidence-hash width (= 32 bytes) | Wired |
+| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 4) | Wired |
+| ExecutionGuard | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) | Wired |
+| ExecutionGuard | `MaxExecutionRecords` | `u32` | `bounds::MAX_EXECUTION_RECORDS` (= 256) | Wired |
+| ExecutionGuard | `MaxCalls` | `u32` | `kernel::MAX_CALLS` (= 16) | Wired |
+| ExecutionGuard | `MaxPayloadBytes` | `u32` | `kernel::MAX_BYTES` (= 65,536) | Wired |
+| ExecutionGuard | `DescriptorLeadTime` | `BlockNumber` (`u32`) | `kernel::DESCRIPTOR_LEAD_TIME_BLOCKS` (= 43,200) | Wired |
+| ExecutionGuard | `MaxRuntimeCodeBytes` | `u32` | runtime `Config::MaxRuntimeCodeBytes` (`pallet_preimage::MAX_SIZE`) | Wired |
+| ExecutionGuard | `ExecutionTimelockFloor` | `[u32; 4]` | [13 §1](13-parameters.md) `exec.lock.*` K hard minima, `[14,400; 4]` blocks | Wired |
+| ExecutionGuard | `ExecutionGraceFloor` | `u32` | [13 §1](13-parameters.md) `exec.grace` K hard minimum (= 100,800 blocks) | Wired |
+| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 4) | Wired |
+| Epoch | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) | Wired |
+| Epoch | `MaxIntakeQueue` | `u32` | `bounds::INTAKE_QUEUE` (= 64) | Wired |
+| Epoch | `MaxNonTerminalCohorts` | `u32` | `bounds::MAX_NON_TERMINAL_COHORTS` (= 4) | Wired |
+| Epoch | `RecentCohortSummariesBound` | `u32` | `bounds::RECENT_COHORT_SUMMARIES` (= 32) | Wired |
+| Epoch | `TickBatch` | `u32` | `kernel::TICK_BATCH` (= 10) | Wired |
+| Epoch | `PhaseOffsets` | `[(u32, u32); 7]` | `futarchy_primitives::phase_offsets`: `[(0,21), (3,21), (4,21), (5,21), (15,21), (18,21), (20,21)]` for Intake/Qualify/Seed/Trade/DecideWindow/Decide/Housekeeping | Wired |
+| Epoch | `MaxBooksPerProposal` | `u32` | `bounds::BOOKS_PER_PROPOSAL` (= 6) | Wired |
+| Epoch | `MinEpochLength` | `u32` | `kernel::MIN_EPOCH_LENGTH_BLOCKS` (= 201,600) | Wired |
+| Epoch | `DecisionWindowFloor` | `u32` | [13 §1](13-parameters.md) `dec.window` K hard minimum (= 14,400 blocks) | Wired |
+| Epoch | `DecisionExtension` | `u32` | `kernel::DEC_EXTENSION_BLOCKS` (= 43,200) | Wired |
+| Epoch | `DecisionDeltaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.delta.*` K hard minima (= `[5,000,000; 4]`) | Wired |
+| Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) | Wired |
+
+The `PalletId` configuration constants exposed by ConditionalLedger, Market and Registry are intentionally absent: they are internal custody identifiers and no frontend workflow binds them. No placeholder names from external release tooling are normative; this table is the canonical name freeze.
 
 Catch-all rule: **any** [13](13-parameters.md) key a frontend workflow evaluates MUST be sourced from `params()`/metadata at a pinned finalized block. Shipping a numeric copy of any of these values in the frontend bundle is a release-gate failure (frontend CI asserts no literal matches against the constants list).
 
@@ -506,6 +584,7 @@ Total **168 bytes** (v1.0 baseline — the pre-freeze 78- and 92-byte drafts in 
 
 **Version history.**
 
+- **v4 (2026-07-17) — B2 02-amendment batch.** One pre-genesis revision carries the queued SQ-2 residuals — SQ-23's intake representation erratum, SQ-24's phase-fraction representation split, and SQ-26's attestor storage freeze in §7.5 — together with SQ-37's §6 conditional-ledger event completion, SQ-43's 12-entry `CohortSummary.proposals` hard-max bound, SQ-55's three trailing `NavView` fields, SQ-125's phase-fraction metadata-exposure mandate, and SQ-138's frozen metadata-constant names, restricted to genuine kernel values per [13](13-parameters.md) reading rule 7; META-amendable registry bounds bind through `params()`. The batch also lands the storage change the B2 implementation needs to make §4's `ParamView.last_change: BlockNumber` faithful: §7.3's `ParamRecord` gains `last_change_block`, because the record previously stored only `last_changed_epoch` and a block number cannot be reconstructed from an epoch index (historical epoch boundaries are not retained). **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-17, user-delegated batch.
 - **v3 (2026-07-15) — oracle per-version reconciliation (A5).** 07 §2(4) runs one reporting game per `(component, epoch, frozen spec_version)`, so §7.2 `Rounds`/`ComponentValues` take the **triple key** `(MetricId, EpochId, MetricSpecVersion)`. Contract v2's pair key was self-contradictory — its own bound note said per-version games "append a `RoundState` per frozen version," which a one-value-per-key map cannot do; the triple resolves it. `RoundState` additionally carries the ack-keying/bond-freezing/§5.5-slashing fields the protocol requires, `ReserveHealth` its probe-timing fields, and `OracleRoundView` (§4) gains `spec_version`. **Pre-genesis revision** — no runtime is deployed, so §13's post-genesis append-only/migration clause (point 3) does not apply; the change is a straight restructure. Joint backend+frontend sign-off: the user (owner for both sides under R-1), 2026-07-15.
 - **v2** — the frozen baseline established at D-2 (all FE §30 patch items applied).
 

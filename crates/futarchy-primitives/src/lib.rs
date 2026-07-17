@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 3;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 4;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -764,6 +764,9 @@ pub struct NavView {
     pub stream_remainders: Balance,
     pub obligations: Balance,
     pub haircut_flag: bool,
+    pub spendable_nav: Balance,
+    pub meter_utilization_bps: u32,
+    pub class_floors: [Balance; 4],
 }
 
 #[derive(
@@ -773,7 +776,8 @@ pub struct CohortSummary {
     pub epoch: EpochId,
     pub s_1e9: FixedU64,
     pub baseline_twap_1e9: FixedU64,
-    pub proposals: BoundedVec<(ProposalId, ProposalClass, DecisionOutcome), 5>,
+    pub proposals:
+        BoundedVec<(ProposalId, ProposalClass, DecisionOutcome), { bounds::MAX_COHORT_PROPOSALS }>,
     pub voided: bool,
     pub settled_at: BlockNumber,
 }
@@ -806,7 +810,7 @@ pub mod bounds {
     pub const MAX_PARAM_KEYS: u32 = 64;
     pub const RECENT_COHORT_SUMMARIES: u32 = 32;
     pub const MAX_OPEN_ORACLE_ROUNDS: u32 = 192;
-    pub const MAX_COHORT_PROPOSALS: u32 = 5;
+    pub const MAX_COHORT_PROPOSALS: u32 = 12;
     pub const MAX_NON_TERMINAL_COHORTS: u32 = 4;
     pub const MAX_RESOURCES_PER_PROPOSAL: u32 = 8;
     /// Generic bounded-meter registry capacity (13 §4).
@@ -862,12 +866,25 @@ pub mod kernel {
     pub const MIN_SPLIT_USDC: u128 = super::currency::USDC_CENT;
     pub const MIN_TRANSFER_USDC: u128 = super::currency::USDC_CENT;
     pub const MIN_TRADE_USDC: u128 = 1_000_000;
+    /// Maximum trade size as a fraction of the book liquidity parameter `b`
+    /// (04 §6.2 / 13 §2). The tuple shape is frozen by 02 §9.
+    pub const MAX_TRADE_RATIO: (u32, u32) = (1, 4);
     /// Max observation gap before a decision-window staleness event (04 §7; 13 §3.2).
     pub const MKT_STALE_GAP_BLOCKS: u64 = 50;
     pub const POSITION_DEPOSIT_USDC: u128 = 100_000;
     /// Minimum META-amendable epoch length (14 days; 05 §3.1 / 13 §1).
     pub const MIN_EPOCH_LENGTH_BLOCKS: u32 = 201_600;
+    /// Kernel floor for the decision window (`dec.window`, 13 §1).
+    pub const DECISION_WINDOW_FLOOR_BLOCKS: u32 = BLOCKS_PER_DAY;
     pub const DEC_EXTENSION_BLOCKS: u32 = 43_200;
+    /// Per-class `dec.delta` kernel floor on the contract's 1e9 grid.
+    pub const DECISION_DELTA_FLOOR: super::FixedU64 = super::FixedU64(5_000_000);
+    /// PARAM/TREASURY/CODE/META order frozen by 02 §9.
+    pub const DECISION_DELTA_FLOORS: [super::FixedU64; 4] = [DECISION_DELTA_FLOOR; 4];
+    /// Per-class `dec.sigma` kernel floor on the contract's 1e9 grid.
+    pub const DECISION_SIGMA_FLOOR: super::FixedU64 = super::FixedU64(0);
+    /// PARAM/TREASURY/CODE/META order frozen by 02 §9.
+    pub const DECISION_SIGMA_FLOORS: [super::FixedU64; 4] = [DECISION_SIGMA_FLOOR; 4];
     /// Rerun hurdle increment (one percentage point; T13 / 05 §5.4).
     pub const RERUN_HURDLE_BUMP_1E9: u64 = 10_000_000;
     /// Capture-resistance multiplier `AttackCost >= 3 * InCapPrize` (D-4).
@@ -906,6 +923,14 @@ pub mod kernel {
     pub const QUOTE_CLAMP_MIN_1E9: u64 = 1_000_000;
     pub const QUOTE_CLAMP_MAX_1E9: u64 = 999_000_000;
     pub const GATE_P_MAX_CEILING_1E9: u64 = 100_000_000;
+    /// `gate.eps` kernel floor on the contract's 1e9 grid (13 §1).
+    pub const GATE_EPS_FLOOR: super::FixedU64 = super::FixedU64(5_000_000);
+    /// `exec.timelock` kernel floor shared by every proposal class (13 §1).
+    pub const EXECUTION_TIMELOCK_FLOOR_BLOCKS: u32 = BLOCKS_PER_DAY;
+    /// PARAM/TREASURY/CODE/META order frozen by 02 §9.
+    pub const EXECUTION_TIMELOCK_FLOORS_BLOCKS: [u32; 4] = [EXECUTION_TIMELOCK_FLOOR_BLOCKS; 4];
+    /// `exec.grace` kernel floor (seven days; 13 §1).
+    pub const EXECUTION_GRACE_FLOOR_BLOCKS: u32 = 7 * BLOCKS_PER_DAY;
     /// 05 §5 decision-grade scalar-book sanity band (kernel rule, not a
     /// governance-tunable parameter).
     pub const DECISION_SANITY_MIN_1E9: u64 = 20_000_000;
@@ -947,6 +972,17 @@ pub mod phase_offsets {
     pub const DECIDE_WINDOW_NUM: u32 = 15;
     pub const DECIDE_NUM: u32 = 18;
     pub const HOUSEKEEPING_NUM: u32 = 20;
+    /// Intake/Qualify/Seed/Trade/DecideWindow/Decide/Housekeeping order frozen
+    /// by 02 §9.
+    pub const ORDERED: [(u32, u32); 7] = [
+        (INTAKE_NUM, DENOMINATOR),
+        (QUALIFY_NUM, DENOMINATOR),
+        (SEED_NUM, DENOMINATOR),
+        (TRADE_NUM, DENOMINATOR),
+        (DECIDE_WINDOW_NUM, DENOMINATOR),
+        (DECIDE_NUM, DENOMINATOR),
+        (HOUSEKEEPING_NUM, DENOMINATOR),
+    ];
 }
 
 impl Branch {
@@ -1008,10 +1044,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_version_is_v3() {
-        // Bumped 2 → 3 for the oracle per-version triple-key reconciliation (A5;
-        // 02 §7.2/§13). A change to §2–§12 of the frozen contract bumps this.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 3);
+    fn contract_version_is_v4() {
+        // Bumped 3 → 4 for the pre-genesis B2 integration-contract amendment
+        // batch (02 §13). A change to §2–§12 of the frozen contract bumps this.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 4);
     }
 
     #[test]
@@ -1187,6 +1223,77 @@ mod tests {
     }
 
     #[test]
+    fn nav_view_v4_fields_and_scale_layout_match_contract_02_section_4() {
+        use scale_info::TypeDef;
+
+        const CONTRACT_FIELDS: [&str; 13] = [
+            "total",
+            "main",
+            "pol",
+            "insurance",
+            "keeper",
+            "oracle",
+            "rewards",
+            "stream_remainders",
+            "obligations",
+            "haircut_flag",
+            "spendable_nav",
+            "meter_utilization_bps",
+            "class_floors",
+        ];
+        let type_info = NavView::type_info();
+        let names: alloc::vec::Vec<&str> = match &type_info.type_def {
+            TypeDef::Composite(composite) => composite
+                .fields
+                .iter()
+                .filter_map(|field| field.name)
+                .collect(),
+            _ => panic!("NavView must encode as a SCALE composite type"),
+        };
+        assert_eq!(names, CONTRACT_FIELDS);
+
+        let view = NavView {
+            total: 1,
+            main: 2,
+            pol: 3,
+            insurance: 4,
+            keeper: 5,
+            oracle: 6,
+            rewards: 7,
+            stream_remainders: 8,
+            obligations: 9,
+            haircut_flag: true,
+            spendable_nav: 0,
+            meter_utilization_bps: 7_500,
+            class_floors: [10, 20, 30, 40],
+        };
+        let encoded = view.encode();
+        assert_eq!(NavView::decode(&mut &encoded[..]).unwrap(), view);
+        assert_eq!(NavView::max_encoded_len(), 229);
+    }
+
+    #[test]
+    fn cohort_summary_v4_bound_and_scale_layout_match_contract_02_section_4() {
+        assert_eq!(bounds::MAX_COHORT_PROPOSALS, 12);
+        let proposals = (0..bounds::MAX_COHORT_PROPOSALS)
+            .map(|pid| (u64::from(pid), ProposalClass::Param, DecisionOutcome::Adopt))
+            .collect::<alloc::vec::Vec<_>>()
+            .try_into()
+            .unwrap();
+        let summary = CohortSummary {
+            epoch: 7,
+            s_1e9: FixedU64(500_000_000),
+            baseline_twap_1e9: FixedU64(490_000_000),
+            proposals,
+            voided: false,
+            settled_at: 42,
+        };
+        let encoded = summary.encode();
+        assert_eq!(CohortSummary::decode(&mut &encoded[..]).unwrap(), summary);
+        assert_eq!(CohortSummary::max_encoded_len(), 158);
+    }
+
+    #[test]
     fn proposal_scale_round_trips_and_bounds_resources() {
         let proposal = Proposal::<AccountId> {
             id: 7,
@@ -1322,5 +1429,26 @@ mod tests {
         assert!(*boundaries.last().unwrap() < DENOMINATOR);
         // Pin the exact 13 §3.1 numerators, not just their ordering.
         assert_eq!(boundaries, [0, 3, 4, 5, 15, 18, 20]);
+    }
+
+    #[test]
+    fn epoch_constant_values_match_contract_02_section_9() {
+        // 02 §9 freezes these metadata-visible Epoch constant values and their
+        // PARAM/TREASURY/CODE/META ordering. Any change here MUST be a deliberate
+        // integration-contract revision that also re-freezes the release manifest.
+        assert_eq!(
+            phase_offsets::ORDERED,
+            [
+                (0, 21),
+                (3, 21),
+                (4, 21),
+                (5, 21),
+                (15, 21),
+                (18, 21),
+                (20, 21),
+            ]
+        );
+        assert_eq!(kernel::DECISION_DELTA_FLOORS, [FixedU64(5_000_000); 4]);
+        assert_eq!(kernel::DECISION_SIGMA_FLOORS, [FixedU64(0); 4]);
     }
 }

@@ -47,11 +47,11 @@ use frame_support::{
     BoundedVec,
 };
 use futarchy_primitives::{
-    BlockNumber, ProposalClass, ProposalId, ResourceId, RuntimeVersionConstraint, H256,
+    kernel, BlockNumber, ProposalClass, ProposalId, ResourceId, RuntimeVersionConstraint, H256,
 };
 
 pub use execution_guard_core::{
-    domain_allowed, AttestationView as CoreAttestationView, CallDomain,
+    domain_allowed, requires_ratification, AttestationView as CoreAttestationView, CallDomain,
     EpochHandoff as CoreEpochHandoff, Error as CoreError, Event as CoreEvent, ExecutionGuard,
     GuardOrigin, GuardianView as CoreGuardianView, PendingUpgrade, QueuedExecution,
     UpgradeAuthorization, DESCRIPTOR_LEAD_TIME, MAX_CALLS, MAX_DECLARED_DOMAINS,
@@ -682,6 +682,14 @@ pub mod pallet {
         fn max_runtime_code_bytes() -> u32 {
             T::MaxRuntimeCodeBytes::get()
         }
+        #[pallet::constant_name(ExecutionTimelockFloor)]
+        fn execution_timelock_floor() -> [u32; 4] {
+            kernel::EXECUTION_TIMELOCK_FLOORS_BLOCKS
+        }
+        #[pallet::constant_name(ExecutionGraceFloor)]
+        fn execution_grace_floor() -> u32 {
+            kernel::EXECUTION_GRACE_FLOOR_BLOCKS
+        }
     }
 
     #[pallet::genesis_config]
@@ -967,6 +975,17 @@ pub mod pallet {
                 }
             }
             None
+        }
+
+        /// Read-only 02 §3 execution-queue projection. Hydration sorts by
+        /// proposal id and [`ExecutionGuard::view`] single-homes ratification
+        /// and blocked-meter semantics. A missing/invalid runtime version is a
+        /// G-1 empty sentinel rather than a partially trusted queue.
+        pub fn queue_view() -> Vec<futarchy_primitives::QueuedExecutionView> {
+            match Self::load() {
+                Ok(guard) => guard.view(),
+                Err(_) => Vec::new(),
+            }
         }
 
         pub fn retry_exhausted(pid: ProposalId) -> bool {

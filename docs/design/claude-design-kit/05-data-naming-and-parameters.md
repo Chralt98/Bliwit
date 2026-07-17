@@ -1,7 +1,7 @@
 # Data surface, canonical naming & UI-visible parameter values
 
-> **DERIVED, NON-NORMATIVE.** Distilled 2026-07-12 (commit `9f250be`) from the frozen spec —
-> doc 02 (integration contract, frozen, v1) and doc 13 (the single home of parameter values) —
+> **DERIVED, NON-NORMATIVE.** Refreshed 2026-07-17 from the frozen spec —
+> doc 02 (integration contract, frozen, v4) and doc 13 (the single home of parameter values) —
 > for upload to Claude Design. Where this file and the spec disagree, the spec wins. All names
 > below are CANONICAL: use these exact spellings in UI copy, labels and mock data. Values
 > marked [VERIFY] are unresolved in the spec — never invent them.
@@ -20,7 +20,7 @@ Block-time basis for human-time conversions: **6 s/block, 14,400 blocks/day** (1
 | **VIT** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 VIT |
 | Prices / scores | fixed-point, **1e9 scale** at every API/event boundary; quote clamp [0.001, 0.999]; `p_S = 1 − p_L`; gate books map YES ↦ LONG |
 | Time | all deadlines are block numbers (`decide_at`, `maturity`, `grace_end`, `challenge_deadline`, `next_boundary`) — the UI computes countdowns from them |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 3`, a runtime constant, echoed in `release.json` |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 4`, a runtime constant, echoed in `release.json` |
 
 ### A2. What the UI can read and display (02 §3–§4, §7)
 
@@ -79,16 +79,17 @@ gate values `gate_s_1e9`, `gate_c_1e9`, composite `w_current_1e9`, flags `s_brea
 `c_breached`, `reserve_flag`.
 
 **Treasury** — `nav()` → `NavView`: `total`, `main`, `pol`, `insurance`, `keeper`, `oracle`,
-`rewards`, `stream_remainders`, `obligations`, `haircut_flag` (NAV haircut surfaced when the
-reserve flag is set).
+`rewards`, `stream_remainders`, `obligations`, `haircut_flag` (exactly 08 §1.2
+`reserve_impaired`), `spendable_nav`, `meter_utilization_bps`, `class_floors` (Param,
+Treasury, Code, Meta order).
 
 **Settlement history** — `recent_cohorts()` → ring of the last **32** `CohortSummary`:
-`epoch`, `s_1e9`, `baseline_twap_1e9`, `proposals` (≤ 5 of (id, class, `DecisionOutcome`)),
+`epoch`, `s_1e9`, `baseline_twap_1e9`, `proposals` (≤ 12 of (id, class, `DecisionOutcome`)),
 `voided`, `settled_at`. "A fresh browser renders ~22 months of settlement history with zero
 infrastructure dependency." `DecisionOutcome` = `Adopt | Reject(RejectReason) | Extend`.
 
 **Oracle** — `open_oracle_rounds()` → up to 192 `OracleRoundView`: `component`, `epoch`,
-`round` (1..=3), `reporter`, `value_1e9`, `evidence_hash`, `bond`, `challenge_deadline`,
+`spec_version`, `round` (1..=3), `reporter`, `value_1e9`, `evidence_hash`, `bond`, `challenge_deadline`,
 `acked_by_watchtowers`, `escalated`. Component settlement paths: `Unchallenged, Recomputed,
 Adjudicated, Neutral`.
 

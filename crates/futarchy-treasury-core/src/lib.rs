@@ -172,7 +172,7 @@ pub enum AssetKind {
 
 /// Internal NAV computation (08 §1.2): the treasury's own solvency view. Named
 /// distinctly from the frozen 02 §4 `NavView` runtime-API type (in
-/// `futarchy-primitives`, a 10-field account decomposition) which the B2
+/// `futarchy-primitives`, a 13-field account decomposition) which the B2
 /// `FutarchyApi` builds from these components plus the line balances (rule 5).
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
 pub struct NavComponents {
@@ -934,9 +934,7 @@ impl Treasury {
         // open-time line debit. Counting only the obligation would double-
         // subtract them (understating NAV, tightening every cap and floor).
         let escrow = self.open_stream_remainders();
-        let obligations = escrow
-            .saturating_add(sum(&self.pending_outflows))
-            .saturating_add(sum(&self.pol_commitments));
+        let obligations = self.obligations();
         let assets = self
             .main_usdc
             .saturating_add(sum_lines(&self.lines))
@@ -1077,13 +1075,23 @@ impl Treasury {
         *bal -= amount;
         Ok(())
     }
-    fn open_stream_remainders(&self) -> Balance {
+    /// Sum of every non-cancelled stream's undisbursed remainder (08 §1.2).
+    /// Saturating arithmetic is the same conservative path consumed by NAV.
+    pub fn open_stream_remainders(&self) -> Balance {
         self.streams
             .iter()
             .filter(|s| !s.cancelled)
             .fold(0, |acc, s| {
                 acc.saturating_add(s.total.saturating_sub(s.claimed))
             })
+    }
+
+    /// Exact 08 §1.2 obligation term consumed by [`Self::nav`]: open stream
+    /// remainders, queued in-cap outflows, and live-book POL commitments.
+    pub fn obligations(&self) -> Balance {
+        self.open_stream_remainders()
+            .saturating_add(sum(&self.pending_outflows))
+            .saturating_add(sum(&self.pol_commitments))
     }
 }
 
@@ -1609,6 +1617,44 @@ mod tests {
         t.spend(TREASURY, 0, BudgetLine::OpsCollators, acct(1), USDC)
             .unwrap();
     }
+
+    #[test]
+    fn nav_reuses_public_stream_remainder_and_obligation_helpers() {
+        let mut t = Treasury {
+            main_usdc: 1_000,
+            ..Treasury::default()
+        };
+        t.lines = vec![(BudgetLine::Pol, 100)];
+        t.streams = vec![
+            Stream {
+                id: 1,
+                recipient: acct(1),
+                line: BudgetLine::Rewards,
+                total: 90,
+                claimed: 30,
+                start: 0,
+                duration: 10,
+                cancelled: false,
+            },
+            Stream {
+                id: 2,
+                recipient: acct(2),
+                line: BudgetLine::Rewards,
+                total: 80,
+                claimed: 10,
+                start: 0,
+                duration: 10,
+                cancelled: true,
+            },
+        ];
+        t.pending_outflows = vec![20, 30];
+        t.pol_commitments = vec![40];
+
+        assert_eq!(t.open_stream_remainders(), 60);
+        assert_eq!(t.obligations(), 150);
+        assert_eq!(t.nav().nav, 1_010);
+    }
+
     #[test]
     fn try_state_checks_bounds() {
         let mut t = funded();

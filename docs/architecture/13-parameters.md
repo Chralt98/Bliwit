@@ -135,7 +135,7 @@ Safety rationale (row-wise, carried forward): kernel floors/ceilings exist so no
 
 ### 3.1 Epoch schedule — offsets as **fractions of `epoch.length`** (d-labels at the 21-day default)
 
-Phase offsets are stored as rational fractions of `epoch.length` (B-med fix), so the schedule survives `epoch.length` changes. **Representation: the fraction pairs (numerator, denominator = 21) are kernel constants (K) in `futarchy-primitives`, exposed to clients as pallet metadata constants — not `Params` storage.** ([02 §9](02-integration-contract.md)'s constant-binding table currently lumps the fractions with the genuinely-`Params` keys `epoch.length`/`epoch.slots` under one "`params()` + metadata constants" row; splitting the fractions onto the metadata-constant side is queued for the B2 contract amendment alongside SQ-2/SQ-23, so 02 bumps once. Until then a frontend binds the fractions via metadata constants, never `params()`.) **Changes take effect next epoch; in-flight cohorts keep their creation-time schedule.** Day labels below are the 302,400-block default.
+Phase offsets are stored as rational fractions of `epoch.length` (B-med fix), so the schedule survives `epoch.length` changes. **Representation: the fraction pairs (numerator, denominator = 21) are kernel constants (K) in `futarchy-primitives`, exposed to clients as the [02 §9](02-integration-contract.md) `Epoch::PhaseOffsets` metadata constant — not `Params` storage.** The genuinely tunable `epoch.length`/`epoch.slots` values remain in `Params`. **Changes take effect next epoch; in-flight cohorts keep their creation-time schedule.** Day labels below are the 302,400-block default.
 
 | Phase | Fraction of epoch | Blocks (default) | Label |
 |---|---|---|---|

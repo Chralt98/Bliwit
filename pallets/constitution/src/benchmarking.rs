@@ -34,6 +34,7 @@ mod benches {
             max_delta: None,
             cooldown_epochs: 0,
             last_changed_epoch: 0,
+            last_change_block: 0,
             class: ParamClass::Param,
             kernel_bounded: false,
         };

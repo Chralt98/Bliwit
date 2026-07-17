@@ -1,7 +1,19 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 3,
+  "integration_contract_version": 4,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
+  "release_blockers": [
+    {
+      "id": "b1b.compliance",
+      "owner": "B1b",
+      "reason": "SQ-172..SQ-182 remain open"
+    },
+    {
+      "id": "treasury.reserve_health_unwired",
+      "owner": "B1a",
+      "reason": "SQ-205: oracle ReserveHealth never reaches treasury set_reserve_impaired — 08 §1.2 fail-static NAV is not enforced"
+    }
+  ],
   "entries": [
     {
       "id": "api.epoch_status",
@@ -11,7 +23,6 @@
       "state_call": "FutarchyApi_epoch_status",
       "params_hex": "0x",
       "required": true,
-      "blocked_by": "B2 FutarchyApi runtime wiring",
       "citation": "02 §3"
     },
     {
@@ -22,7 +33,6 @@
       "state_call": "FutarchyApi_proposal_summaries",
       "params_hex": "0x",
       "required": true,
-      "blocked_by": "B2 FutarchyApi runtime wiring",
       "citation": "02 §3"
     },
     {
@@ -34,7 +44,6 @@
       "params_hex": "0x00000000000000000001000000000000000000000000000000",
       "params_description": "MarketId(0) ++ TradeSide::BuyLong(0) ++ Balance(1), SCALE little-endian",
       "required": true,
-      "blocked_by": "B2 FutarchyApi runtime wiring",
       "citation": "02 §3"
     },
     {
@@ -46,7 +55,6 @@
       "params_hex": "0x0000000000000000",
       "params_description": "ProposalId(0)",
       "required": true,
-      "blocked_by": "B2 FutarchyApi runtime wiring",
       "citation": "02 §3"
     },
     {
@@ -58,7 +66,6 @@
       "params_hex": "0x0000000000000000000000000000000000000000000000000000000000000000",
       "params_description": "AccountId([0;32])",
       "required": true,
-      "blocked_by": "B2 FutarchyApi runtime wiring",
       "citation": "02 §3"
     },
     {
@@ -69,7 +76,6 @@
       "state_call": "FutarchyApi_execution_queue",
       "params_hex": "0x",
       "required": true,
-      "blocked_by": "B2 FutarchyApi runtime wiring",
       "citation": "02 §3"
     },
     {
@@ -80,7 +86,6 @@
       "state_call": "FutarchyApi_welfare_current",
       "params_hex": "0x",
       "required": true,
-      "blocked_by": "B2 FutarchyApi runtime wiring",
       "citation": "02 §3"
     },
     {
@@ -92,7 +97,6 @@
       "params_hex": "0x00",
       "params_description": "empty BoundedVec<ParamKey>",
       "required": true,
-      "blocked_by": "B2 FutarchyApi runtime wiring",
       "citation": "02 §3"
     },
     {
@@ -103,7 +107,6 @@
       "state_call": "FutarchyApi_nav",
       "params_hex": "0x",
       "required": true,
-      "blocked_by": "B2 FutarchyApi runtime wiring",
       "citation": "02 §3"
     },
     {
@@ -114,7 +117,6 @@
       "state_call": "FutarchyApi_recent_cohorts",
       "params_hex": "0x",
       "required": true,
-      "blocked_by": "B2 FutarchyApi runtime wiring",
       "citation": "02 §3"
     },
     {
@@ -125,7 +127,6 @@
       "state_call": "FutarchyApi_open_oracle_rounds",
       "params_hex": "0x",
       "required": true,
-      "blocked_by": "B2 FutarchyApi runtime wiring",
       "citation": "02 §3"
     },
     {
@@ -135,8 +136,14 @@
       "item": "Proposals",
       "query": "prefix",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §7.1"
+      "citation": "02 §7.1",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u64",
+        "value": "futarchy_primitives::Proposal{id:u64,proposer:sp_core::crypto::AccountId32([u8;32]),class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],state:futarchy_primitives::ProposalStateenum[Submitted=0|Screening=1|Qualified=2|Trading=3|Extended=4|Queued=5|Suspended=6|Rerun=7|Rejected=8(futarchy_primitives::RejectReasonenum[NotDecisionGrade=0|GateVetoSurvival=1|GateVetoSecurity=2|HurdleNotMet=3|ConvergenceFailed=4|SecondExtensionFailed=5|ProcessHold=6|ConstitutionViolation=7|ResourceConflict=8|RateLimited=9|VetoUpheldByReview=10|StaleQueue=11|PayloadReverted=12|NotRatified=13|SecuritySizing=14|AttestationMissing=15])|Executed=9|FailedExecuted=10|Measuring=11|Settled=12|Cancelled=13|Expired=14],epoch:u32,submitted_at:u32,payload_hash:[u8;32],payload_len:u32,ask:u128,bond:u128,resources:futarchy_primitives::BoundedVec(Vec<[u8;8]>),metric_spec:u16,decide_at:u32,rerun:bool,extended:bool,delayed_once:bool,markets:Optionenum[None=0|Some=1(futarchy_primitives::MarketSet{accept:u64,reject:u64,gates:Optionenum[None=0|Some=1([u64;4])],baseline:u64})],maturity:Optionenum[None=0|Some=1(u32)],grace_end:Optionenum[None=0|Some=1(u32)],version_constraint:Optionenum[None=0|Some=1(futarchy_primitives::RuntimeVersionConstraint{spec_name:futarchy_primitives::BoundedVec(Vec<u8>),spec_version:u32})],decision:Optionenum[None=0|Some=1(futarchy_primitives::DecisionOutcomeenum[Adopt=0|Reject=1(futarchy_primitives::RejectReasonenum[NotDecisionGrade=0|GateVetoSurvival=1|GateVetoSecurity=2|HurdleNotMet=3|ConvergenceFailed=4|SecondExtensionFailed=5|ProcessHold=6|ConstitutionViolation=7|ResourceConflict=8|RateLimited=9|VetoUpheldByReview=10|StaleQueue=11|PayloadReverted=12|NotRatified=13|SecuritySizing=14|AttestationMissing=15])|Extend=2])]}"
+      }
     },
     {
       "id": "storage.epoch.epoch_of",
@@ -145,8 +152,12 @@
       "item": "EpochOf",
       "query": "value",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §7.1"
+      "citation": "02 §7.1",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "pallet_epoch::pallet::EpochInfo{index:u32,phase:futarchy_primitives::EpochPhaseenum[Intake=0|Qualify=1|Seed=2|Trade=3|Decide=4|Review=5|Execute=6|Housekeeping=7],phase_start_block:u32}"
+      }
     },
     {
       "id": "storage.epoch.intake_queue",
@@ -155,8 +166,12 @@
       "item": "IntakeQueue",
       "query": "value",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §7.1"
+      "citation": "02 §7.1",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "bounded_collections::bounded_vec::BoundedVec(Vec<u64>)"
+      }
     },
     {
       "id": "storage.epoch.recent_cohort_summaries",
@@ -165,8 +180,12 @@
       "item": "RecentCohortSummaries",
       "query": "value",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §7.1"
+      "citation": "02 §7.1",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "bounded_collections::bounded_vec::BoundedVec(Vec<futarchy_primitives::CohortSummary{epoch:u32,s_1e9:futarchy_primitives::FixedU64(u64),baseline_twap_1e9:futarchy_primitives::FixedU64(u64),proposals:futarchy_primitives::BoundedVec(Vec<(u64,futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],futarchy_primitives::DecisionOutcomeenum[Adopt=0|Reject=1(futarchy_primitives::RejectReasonenum[NotDecisionGrade=0|GateVetoSurvival=1|GateVetoSecurity=2|HurdleNotMet=3|ConvergenceFailed=4|SecondExtensionFailed=5|ProcessHold=6|ConstitutionViolation=7|ResourceConflict=8|RateLimited=9|VetoUpheldByReview=10|StaleQueue=11|PayloadReverted=12|NotRatified=13|SecuritySizing=14|AttestationMissing=15])|Extend=2])>),voided:bool,settled_at:u32}>)"
+      }
     },
     {
       "id": "storage.epoch.cohorts",
@@ -175,8 +194,14 @@
       "item": "Cohorts",
       "query": "prefix",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §7.1"
+      "citation": "02 §7.1",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u32",
+        "value": "pallet_epoch::pallet::CohortInfo{epoch:u32,proposals:bounded_collections::bounded_vec::BoundedVec(Vec<u64>),status:epoch_core::CohortStatusenum[Measuring=0{until_epoch:u32}|AwaitingOracle=1|Settling=2{cursor:u32}|Settled=3|Void=4]}"
+      }
     },
     {
       "id": "storage.oracle.reporters",
@@ -273,7 +298,7 @@
           "Blake2_128Concat"
         ],
         "key": "[u8;16]",
-        "value": "constitution_core::ParamRecord{key:[u8;16],value:constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)],min:constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)],max:constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)],max_delta:Optionenum[None=0|Some=1(constitution_core::MaxDeltaenum[Absolute=0(constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)])|Percent=1(u8)|Factor=2(u8)])],cooldown_epochs:u32,last_changed_epoch:u32,class:constitution_core::ParamClassenum[Param=0|Treasury=1|Meta=2|Const=3|Entrenched=4|MetaAndValues=5],kernel_bounded:bool}"
+        "value": "constitution_core::ParamRecord{key:[u8;16],value:constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)],min:constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)],max:constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)],max_delta:Optionenum[None=0|Some=1(constitution_core::MaxDeltaenum[Absolute=0(constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)])|Percent=1(u8)|Factor=2(u8)])],cooldown_epochs:u32,last_changed_epoch:u32,last_change_block:u32,class:constitution_core::ParamClassenum[Param=0|Treasury=1|Meta=2|Const=3|Entrenched=4|MetaAndValues=5],kernel_bounded:bool}"
       }
     },
     {
@@ -406,8 +431,14 @@
       "item": "Queue",
       "query": "prefix",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §7.4"
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u64",
+        "value": "pallet_execution_guard::pallet::StoredQueuedExecution{pid:u64,payload_hash:[u8;32],payload_len:u32,class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],maturity:u32,grace_end:u32,version_constraint:futarchy_primitives::RuntimeVersionConstraint{spec_name:futarchy_primitives::BoundedVec(Vec<u8>),spec_version:u32},meters_declared:bounded_collections::bounded_vec::BoundedVec(Vec<[u8;8]>),ratify_ref:Optionenum[None=0|Some=1(u32)],ratification_passed:bool,attestation_id:Optionenum[None=0|Some=1(u32)],pre_upgrade_checkpoint:Optionenum[None=0|Some=1(([u8;32],[u8;32]))],cancelled:bool,declared_domains:bounded_collections::bounded_vec::BoundedVec(Vec<execution_guard_core::CallDomainenum[Public=0|Param=1|Treasury=2|Code=3|Meta=4|InternalRootAuthorizeUpgrade=5|InternalRootApplyUpgrade=6]>),failed_at:Optionenum[None=0|Some=1(u32)]}"
+      }
     },
     {
       "id": "storage.execution_guard.ratifications",
@@ -416,8 +447,14 @@
       "item": "Ratifications",
       "query": "prefix",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §7.4"
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u64",
+        "value": "pallet_execution_guard::pallet::RatificationRecord{referendum_index:u32,payload_hash:[u8;32],ratified_at:u32}"
+      }
     },
     {
       "id": "storage.execution_guard.execution_records",
@@ -426,8 +463,12 @@
       "item": "ExecutionRecords",
       "query": "value",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §7.4"
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "bounded_collections::bounded_vec::BoundedVec(Vec<futarchy_primitives::ExecutionRecord{pid:u64,payload_hash:[u8;32],class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],executed_at:u32,result:futarchy_primitives::DispatchOutcomeCodeenum[Ok=0|Failed=1{call_index:u8,error:[u8;4]}]}>)"
+      }
     },
     {
       "id": "storage.welfare.snapshots",
@@ -503,6 +544,48 @@
         "hashers": [],
         "key": null,
         "value": "pallet_guardian::pallet::AllowanceState{delay_used_this_epoch:u8,force_rerun_used_this_epoch:u8,pause_window_start:u32,pause_used_in_window:u8}"
+      }
+    },
+    {
+      "id": "storage.attestor.members",
+      "kind": "storage",
+      "pallet": "Attestor",
+      "item": "Members",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.5",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "bounded_collections::bounded_vec::BoundedVec(Vec<attestor_core::AttestorInfo{account:[u8;32],bond:u128,false_count:u8,active:bool}>)"
+      }
+    },
+    {
+      "id": "storage.attestor.attestations",
+      "kind": "storage",
+      "pallet": "Attestor",
+      "item": "Attestations",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.5",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "bounded_collections::bounded_vec::BoundedVec(Vec<attestor_core::Attestation{id:u32,pid:u64,artifact_hash:[u8;32],statement_hash:[u8;32],attestor:[u8;32],submitted_at:u32,challenge_deadline:u32,challenge:Optionenum[None=0|Some=1(attestor_core::ChallengeStatusenum[Open=0{challenger:[u8;32],evidence_hash:[u8;32],bond:u128}|Upheld=1|Rejected=2])]}>)"
+      }
+    },
+    {
+      "id": "storage.attestor.next_attestation_id",
+      "kind": "storage",
+      "pallet": "Attestor",
+      "item": "NextAttestationId",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.5",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "u32"
       }
     },
     {
@@ -636,7 +719,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x03000000"
+        "value": "0x04000000"
       }
     },
     {
@@ -681,8 +764,11 @@
       "pallet": "ConditionalLedger",
       "constant": "MinTransfer",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u128",
+        "value": "0x10270000000000000000000000000000"
+      }
     },
     {
       "id": "constant.market.min_trade",
@@ -690,8 +776,11 @@
       "pallet": "Market",
       "constant": "MinTrade",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u128",
+        "value": "0x40420f00000000000000000000000000"
+      }
     },
     {
       "id": "constant.market.max_trade_ratio",
@@ -699,8 +788,11 @@
       "pallet": "Market",
       "constant": "MaxTradeRatio",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "(u32,u32)",
+        "value": "0x0100000004000000"
+      }
     },
     {
       "id": "constant.market.max_live_markets",
@@ -708,8 +800,11 @@
       "pallet": "Market",
       "constant": "MaxLiveMarkets",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0xc4000000"
+      }
     },
     {
       "id": "constant.epoch.max_intake_queue",
@@ -717,8 +812,11 @@
       "pallet": "Epoch",
       "constant": "MaxIntakeQueue",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x40000000"
+      }
     },
     {
       "id": "constant.epoch.max_live_proposals",
@@ -726,8 +824,11 @@
       "pallet": "Epoch",
       "constant": "MaxLiveProposals",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x20000000"
+      }
     },
     {
       "id": "constant.epoch.recent_cohorts",
@@ -735,8 +836,11 @@
       "pallet": "Epoch",
       "constant": "RecentCohortSummariesBound",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x20000000"
+      }
     },
     {
       "id": "constant.epoch.books_per_proposal",
@@ -744,8 +848,11 @@
       "pallet": "Epoch",
       "constant": "MaxBooksPerProposal",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x06000000"
+      }
     },
     {
       "id": "constant.epoch.phase_offsets",
@@ -753,8 +860,11 @@
       "pallet": "Epoch",
       "constant": "PhaseOffsets",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "[(u32,u32);7]",
+        "value": "0x00000000150000000300000015000000040000001500000005000000150000000f0000001500000012000000150000001400000015000000"
+      }
     },
     {
       "id": "constant.execution_guard.descriptor_lead_time",
@@ -762,35 +872,35 @@
       "pallet": "ExecutionGuard",
       "constant": "DescriptorLeadTime",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0xc0a80000"
+      }
     },
     {
-      "id": "constant.market.gate_p_max",
+      "id": "constant.market.gate_p_max_ceiling",
       "kind": "constant",
       "pallet": "Market",
-      "constant": "GatePMax",
+      "constant": "GatePMaxCeiling",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "futarchy_primitives::FixedU64(u64)",
+        "value": "0x00e1f50500000000"
+      }
     },
     {
-      "id": "constant.market.gate_eps",
+      "id": "constant.market.gate_eps_floor",
       "kind": "constant",
       "pallet": "Market",
-      "constant": "GateEps",
+      "constant": "GateEpsFloor",
       "required": true,
-      "blocked_by": "B2 metadata constants wiring",
-      "citation": "02 §9"
-    },
-    {
-      "id": "constant.epoch.intake_rate_limit",
-      "kind": "constant",
-      "pallet": "Epoch",
-      "constant": "MaxIntakePerAccountPerEpoch",
-      "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "futarchy_primitives::FixedU64(u64)",
+        "value": "0x404b4c0000000000"
+      }
     },
     {
       "id": "constant.decision.window_floor",
@@ -798,17 +908,11 @@
       "pallet": "Epoch",
       "constant": "DecisionWindowFloor",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
-    },
-    {
-      "id": "constant.decision.trailing_floor",
-      "kind": "constant",
-      "pallet": "Epoch",
-      "constant": "DecisionTrailingFloor",
-      "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x40380000"
+      }
     },
     {
       "id": "constant.decision.extension",
@@ -816,8 +920,11 @@
       "pallet": "Epoch",
       "constant": "DecisionExtension",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0xc0a80000"
+      }
     },
     {
       "id": "constant.decision.delta_floors",
@@ -825,8 +932,11 @@
       "pallet": "Epoch",
       "constant": "DecisionDeltaFloors",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "[futarchy_primitives::FixedU64(u64);4]",
+        "value": "0x404b4c0000000000404b4c0000000000404b4c0000000000404b4c0000000000"
+      }
     },
     {
       "id": "constant.decision.sigma_floors",
@@ -834,26 +944,11 @@
       "pallet": "Epoch",
       "constant": "DecisionSigmaFloors",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
-    },
-    {
-      "id": "constant.decision.coverage_floor",
-      "kind": "constant",
-      "pallet": "Epoch",
-      "constant": "DecisionCoverageFloor",
-      "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
-    },
-    {
-      "id": "constant.decision.v_min_floors",
-      "kind": "constant",
-      "pallet": "Epoch",
-      "constant": "DecisionVMinFloors",
-      "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "[futarchy_primitives::FixedU64(u64);4]",
+        "value": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }
     },
     {
       "id": "constant.execution_guard.timelock_floor",
@@ -861,8 +956,11 @@
       "pallet": "ExecutionGuard",
       "constant": "ExecutionTimelockFloor",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "[u32;4]",
+        "value": "0x40380000403800004038000040380000"
+      }
     },
     {
       "id": "constant.execution_guard.grace_floor",
@@ -870,8 +968,11 @@
       "pallet": "ExecutionGuard",
       "constant": "ExecutionGraceFloor",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0xc0890100"
+      }
     },
     {
       "id": "constant.epoch.length_floor",
@@ -879,17 +980,11 @@
       "pallet": "Epoch",
       "constant": "MinEpochLength",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
-    },
-    {
-      "id": "constant.epoch.slots_bounds",
-      "kind": "constant",
-      "pallet": "Epoch",
-      "constant": "EpochSlotsBounds",
-      "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
-      "citation": "02 §9"
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x80130300"
+      }
     },
     {
       "id": "event.ledger.split",
@@ -971,6 +1066,102 @@
           {
             "name": "branch",
             "type": "futarchy_primitives::Branchenum[Accept=0|Reject=1]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.gate_split",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "GateSplit",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "branch",
+            "type": "futarchy_primitives::Branchenum[Accept=0|Reject=1]"
+          },
+          {
+            "name": "gate",
+            "type": "futarchy_primitives::GateTypeenum[Survival=0|Security=1]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.gate_merged",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "GateMerged",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "branch",
+            "type": "futarchy_primitives::Branchenum[Accept=0|Reject=1]"
+          },
+          {
+            "name": "gate",
+            "type": "futarchy_primitives::GateTypeenum[Survival=0|Security=1]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.baseline_split",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "BaselineSplit",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.baseline_merged",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "BaselineMerged",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
           },
           {
             "name": "amount",
@@ -1108,6 +1299,30 @@
       }
     },
     {
+      "id": "event.ledger.gate_redeemed",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "GateRedeemed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "gate",
+            "type": "futarchy_primitives::GateTypeenum[Survival=0|Security=1]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
       "id": "event.ledger.gate_settled",
       "kind": "event",
       "pallet": "ConditionalLedger",
@@ -1131,6 +1346,26 @@
           {
             "name": "outcome",
             "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.baseline_settled",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "BaselineSettled",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "s",
+            "type": "futarchy_primitives::FixedU64(u64)"
           }
         ]
       }
@@ -1180,6 +1415,30 @@
       }
     },
     {
+      "id": "event.ledger.baseline_redeemed",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "BaselineRedeemed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "side",
+            "type": "futarchy_primitives::ScalarSideenum[Long=0|Short=1]"
+          },
+          {
+            "name": "payout",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
       "id": "event.ledger.vault_reaped",
       "kind": "event",
       "pallet": "ConditionalLedger",
@@ -1191,6 +1450,26 @@
           {
             "name": "pid",
             "type": "u64"
+          },
+          {
+            "name": "residue",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.baseline_vault_reaped",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "BaselineVaultReaped",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
           },
           {
             "name": "residue",
@@ -1325,8 +1604,15 @@
       "pallet": "Epoch",
       "event": "ProposalSubmitted",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": null,
+            "type": "u64"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.proposal_withdrawn",
@@ -1334,8 +1620,15 @@
       "pallet": "Epoch",
       "event": "ProposalWithdrawn",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": null,
+            "type": "u64"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.screening_started",
@@ -1343,8 +1636,15 @@
       "pallet": "Epoch",
       "event": "ScreeningStarted",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": null,
+            "type": "u64"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.proposal_cancelled",
@@ -1352,8 +1652,19 @@
       "pallet": "Epoch",
       "event": "ProposalCancelled",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "reason",
+            "type": "futarchy_primitives::RejectReasonenum[NotDecisionGrade=0|GateVetoSurvival=1|GateVetoSecurity=2|HurdleNotMet=3|ConvergenceFailed=4|SecondExtensionFailed=5|ProcessHold=6|ConstitutionViolation=7|ResourceConflict=8|RateLimited=9|VetoUpheldByReview=10|StaleQueue=11|PayloadReverted=12|NotRatified=13|SecuritySizing=14|AttestationMissing=15]"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.proposal_qualified",
@@ -1361,8 +1672,15 @@
       "pallet": "Epoch",
       "event": "ProposalQualified",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": null,
+            "type": "u64"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.proposal_deferred",
@@ -1370,8 +1688,15 @@
       "pallet": "Epoch",
       "event": "ProposalDeferred",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": null,
+            "type": "u64"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.markets_opened",
@@ -1379,8 +1704,15 @@
       "pallet": "Epoch",
       "event": "MarketsOpened",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": null,
+            "type": "u64"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.decision_extended",
@@ -1388,8 +1720,15 @@
       "pallet": "Epoch",
       "event": "DecisionExtended",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": null,
+            "type": "u64"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.proposal_queued",
@@ -1397,8 +1736,23 @@
       "pallet": "Epoch",
       "event": "ProposalQueued",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "payload_hash",
+            "type": "[u8;32]"
+          },
+          {
+            "name": "maturity",
+            "type": "u32"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.proposal_rejected",
@@ -1406,8 +1760,19 @@
       "pallet": "Epoch",
       "event": "ProposalRejected",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "reason",
+            "type": "futarchy_primitives::RejectReasonenum[NotDecisionGrade=0|GateVetoSurvival=1|GateVetoSecurity=2|HurdleNotMet=3|ConvergenceFailed=4|SecondExtensionFailed=5|ProcessHold=6|ConstitutionViolation=7|ResourceConflict=8|RateLimited=9|VetoUpheldByReview=10|StaleQueue=11|PayloadReverted=12|NotRatified=13|SecuritySizing=14|AttestationMissing=15]"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.proposal_delayed",
@@ -1415,8 +1780,19 @@
       "pallet": "Epoch",
       "event": "ProposalDelayed",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "justification_hash",
+            "type": "[u8;32]"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.rerun_scheduled",
@@ -1424,8 +1800,15 @@
       "pallet": "Epoch",
       "event": "RerunScheduled",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": null,
+            "type": "u64"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.rerun_opened",
@@ -1433,8 +1816,15 @@
       "pallet": "Epoch",
       "event": "RerunOpened",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": null,
+            "type": "u64"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.mandate_expired",
@@ -1442,8 +1832,15 @@
       "pallet": "Epoch",
       "event": "MandateExpired",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": null,
+            "type": "u64"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.measurement_started",
@@ -1451,8 +1848,15 @@
       "pallet": "Epoch",
       "event": "MeasurementStarted",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "cohort",
+            "type": "u32"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.cohort_settled",
@@ -1460,8 +1864,19 @@
       "pallet": "Epoch",
       "event": "CohortSettled",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "s",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.proposal_force_rejected",
@@ -1469,8 +1884,19 @@
       "pallet": "Epoch",
       "event": "ProposalForceRejected",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "reason",
+            "type": "futarchy_primitives::RejectReasonenum[NotDecisionGrade=0|GateVetoSurvival=1|GateVetoSecurity=2|HurdleNotMet=3|ConvergenceFailed=4|SecondExtensionFailed=5|ProcessHold=6|ConstitutionViolation=7|ResourceConflict=8|RateLimited=9|VetoUpheldByReview=10|StaleQueue=11|PayloadReverted=12|NotRatified=13|SecuritySizing=14|AttestationMissing=15]"
+          }
+        ]
+      }
     },
     {
       "id": "event.epoch.intake_slashed",
@@ -1478,8 +1904,23 @@
       "pallet": "Epoch",
       "event": "IntakeSlashed",
       "required": true,
-      "blocked_by": "A8 pallet-epoch runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "reason",
+            "type": "futarchy_primitives::RejectReasonenum[NotDecisionGrade=0|GateVetoSurvival=1|GateVetoSecurity=2|HurdleNotMet=3|ConvergenceFailed=4|SecondExtensionFailed=5|ProcessHold=6|ConstitutionViolation=7|ResourceConflict=8|RateLimited=9|VetoUpheldByReview=10|StaleQueue=11|PayloadReverted=12|NotRatified=13|SecuritySizing=14|AttestationMissing=15]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
     },
     {
       "id": "event.execution_guard.executed",
@@ -1487,8 +1928,19 @@
       "pallet": "ExecutionGuard",
       "event": "Executed",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "record",
+            "type": "futarchy_primitives::ExecutionRecord{pid:u64,payload_hash:[u8;32],class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],executed_at:u32,result:futarchy_primitives::DispatchOutcomeCodeenum[Ok=0|Failed=1{call_index:u8,error:[u8;4]}]}"
+          }
+        ]
+      }
     },
     {
       "id": "event.execution_guard.execution_failed",
@@ -1496,8 +1948,19 @@
       "pallet": "ExecutionGuard",
       "event": "ExecutionFailed",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "outcome",
+            "type": "futarchy_primitives::DispatchOutcomeCodeenum[Ok=0|Failed=1{call_index:u8,error:[u8;4]}]"
+          }
+        ]
+      }
     },
     {
       "id": "event.execution_guard.ratified",
@@ -1505,8 +1968,19 @@
       "pallet": "ExecutionGuard",
       "event": "Ratified",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "referendum_index",
+            "type": "u32"
+          }
+        ]
+      }
     },
     {
       "id": "event.execution_guard.upgrade_authorized",
@@ -1514,8 +1988,19 @@
       "pallet": "ExecutionGuard",
       "event": "UpgradeAuthorized",
       "required": true,
-      "blocked_by": "A11 pallet-execution-guard runtime wiring",
-      "citation": "02 §6"
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "code_hash",
+            "type": "[u8;32]"
+          },
+          {
+            "name": "authorized_at",
+            "type": "u32"
+          }
+        ]
+      }
     },
     {
       "id": "event.oracle.reporter_registered",

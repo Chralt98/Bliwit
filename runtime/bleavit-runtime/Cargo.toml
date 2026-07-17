@@ -9,6 +9,7 @@ build = "build.rs"
 [dependencies]
 # --- Local protocol crates (all twelve production FRAME pallets).
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
+futarchy-runtime-api = { path = "../../runtime-api", default-features = false }
 bleavit-xcm = { path = "../bleavit-xcm", default-features = false }
 origins-core = { path = "../../crates/origins-core", default-features = false }
 pallet-constitution = { path = "../../pallets/constitution", default-features = false }
@@ -130,6 +131,7 @@ std = [
   "frame-system/std",
   "frame-try-runtime?/std",
   "futarchy-primitives/std",
+  "futarchy-runtime-api/std",
   "origins-core/std",
   "pallet-asset-tx-payment/std",
   "pallet-assets/std",

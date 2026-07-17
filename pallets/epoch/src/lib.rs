@@ -30,6 +30,7 @@ use futarchy_primitives::{
 };
 
 pub use epoch_core::{
+    attack_cost_hat, decision_converged, effective_baseline_twaps, effective_reject_1e9,
     CohortInfo as CoreCohortInfo, CohortStatus, DecisionGuards, DecisionInputs,
     EpochInfo as CoreEpochInfo, EpochParams as CoreEpochParams, EpochState, Error as CoreError,
     Event as CoreEvent, LedgerOps as CoreLedgerOps, Origin as CoreOrigin, SettlementTarget,
@@ -59,6 +60,19 @@ pub enum BookRole {
     Decision,
     Baseline,
     Gate,
+}
+
+/// One immutable read of every market/constitution input consumed by
+/// `decide()`. The crank and `FutarchyApi::decision_stats` share the private
+/// assembly routine that produces this value; `backing_complete` lets the
+/// read-only view return `None` where the crank's fail-closed zero sentinel
+/// would otherwise hide an unavailable market read.
+#[derive(Clone, Debug)]
+pub struct DecisionInputSnapshot<AccountId> {
+    pub proposal: Proposal<AccountId>,
+    pub params: CoreEpochParams,
+    pub inputs: DecisionInputs,
+    pub backing_complete: bool,
 }
 
 /// Decision-book reads and Seed/rerun market deployment (A3 → A8).
@@ -98,7 +112,7 @@ pub trait MarketAccess<AccountId> {
         class: ProposalClass,
         params: &CoreEpochParams,
     ) -> bool;
-    fn measured_depth(pid: ProposalId) -> Balance;
+    fn measured_depth(pid: ProposalId) -> Option<Balance>;
     fn published_flow_per_day(pid: ProposalId) -> Option<Balance>;
     fn second_insufficiency(pid: ProposalId) -> bool;
     /// Previous epoch's finalized Baseline decision-window TWAP (05 §5.3).
@@ -892,68 +906,8 @@ pub mod pallet {
                     .clone();
                 let decision_was_recorded = proposal.decision.is_some();
                 let extension_was_recorded = proposal.extended;
-                let markets = proposal.markets.ok_or(Error::<T>::BadDecisionInput)?;
                 T::Market::seal_decision_window(&proposal)?;
-                let end = proposal.decide_at;
-                let accept_full =
-                    T::Market::twap_full_at(markets.accept, end).unwrap_or(FixedU64(0));
-                let reject_full =
-                    T::Market::twap_full_at(markets.reject, end).unwrap_or(FixedU64(0));
-                let baseline_full =
-                    T::Market::twap_full_at(markets.baseline, end).unwrap_or(FixedU64(0));
-                let accept_trailing =
-                    T::Market::twap_trailing_at(markets.accept, end, params.trailing_window)
-                        .unwrap_or(FixedU64(0));
-                let reject_trailing =
-                    T::Market::twap_trailing_at(markets.reject, end, params.trailing_window)
-                        .unwrap_or(FixedU64(0));
-                let baseline_trailing =
-                    T::Market::twap_trailing_at(markets.baseline, end, params.trailing_window)
-                        .unwrap_or(FixedU64(0));
-                let accept_spot = T::Market::spot_at(markets.accept, end).unwrap_or(FixedU64(0));
-                let reject_spot = T::Market::spot_at(markets.reject, end).unwrap_or(FixedU64(0));
-                let welfare_grade_ok = [
-                    (markets.accept, BookRole::Decision),
-                    (markets.reject, BookRole::Decision),
-                ]
-                .iter()
-                .all(|(market, role)| {
-                    T::Market::decision_grade(*market, end, *role, proposal.class, &params)
-                });
-                let baseline_grade_ok = T::Market::baseline_market(proposal.epoch)
-                    == Some(markets.baseline)
-                    && T::Market::decision_grade(
-                        markets.baseline,
-                        end,
-                        BookRole::Baseline,
-                        proposal.class,
-                        &params,
-                    );
-                let gate_twaps = markets.gates.map(|gates| {
-                    let [s_adopt, s_reject, c_adopt, c_reject] = gates;
-                    [
-                        T::Market::twap_full_at(s_adopt, end).unwrap_or(FixedU64(0)),
-                        T::Market::twap_full_at(s_reject, end).unwrap_or(FixedU64(0)),
-                        T::Market::twap_full_at(c_adopt, end).unwrap_or(FixedU64(0)),
-                        T::Market::twap_full_at(c_reject, end).unwrap_or(FixedU64(0)),
-                    ]
-                });
-                let has_gate_markets = markets.gates.is_some();
-                let gate_grade_ok = if has_gate_markets {
-                    markets.gates.is_some_and(|gates| {
-                        gates.iter().all(|market| {
-                            T::Market::decision_grade(
-                                *market,
-                                end,
-                                BookRole::Gate,
-                                proposal.class,
-                                &params,
-                            )
-                        })
-                    })
-                } else {
-                    true
-                };
+                let input = Self::assemble_decision_input_snapshot(&state, pid, params)?.inputs;
                 let guards = DecisionGuards {
                     preimage_ok: proposal.payload_len <= futarchy_primitives::kernel::MAX_BYTES
                         && T::Preimage::len(proposal.payload_hash) == Some(proposal.payload_len),
@@ -962,30 +916,6 @@ pub mod pallet {
                         || T::Guardian::hold_active(pid)
                         || T::Guardian::dead_man_engaged()
                         || state.stale_process_hold(pid),
-                };
-                let input = DecisionInputs {
-                    accept_full,
-                    reject_full,
-                    baseline_full,
-                    accept_trailing,
-                    reject_trailing,
-                    baseline_trailing,
-                    accept_spot,
-                    reject_spot,
-                    welfare_grade_ok,
-                    baseline_grade_ok,
-                    previous_settled_baseline_twap: T::Market::previous_settled_baseline_twap(
-                        proposal.epoch,
-                    ),
-                    welfare_second_insufficient: T::Market::second_insufficiency(pid),
-                    gate_grade_ok,
-                    gate_twaps,
-                    measured_depth: T::Market::measured_depth(pid),
-                    published_flow_per_day: T::Market::published_flow_per_day(pid),
-                    in_cap_prize: T::Constitution::in_cap_prize(&proposal),
-                    attestation_quorate: T::Constitution::attestation_artifact(&proposal)
-                        .is_some_and(|artifact| T::Attestation::present_and_quorate(pid, artifact)),
-                    constitution_queue_ok: T::Constitution::queue_time_check(&proposal),
                 };
                 let mut ledger = LedgerAdapter::<T>(PhantomData);
                 let outcome = state
@@ -1262,6 +1192,34 @@ pub mod pallet {
         fn tick_batch() -> u32 {
             TICK_BATCH_BOUND
         }
+        #[pallet::constant_name(PhaseOffsets)]
+        fn phase_offsets() -> [(u32, u32); 7] {
+            futarchy_primitives::phase_offsets::ORDERED
+        }
+        #[pallet::constant_name(MaxBooksPerProposal)]
+        fn max_books_per_proposal() -> u32 {
+            futarchy_primitives::bounds::BOOKS_PER_PROPOSAL
+        }
+        #[pallet::constant_name(MinEpochLength)]
+        fn min_epoch_length() -> u32 {
+            futarchy_primitives::kernel::MIN_EPOCH_LENGTH_BLOCKS
+        }
+        #[pallet::constant_name(DecisionWindowFloor)]
+        fn decision_window_floor() -> u32 {
+            futarchy_primitives::kernel::DECISION_WINDOW_FLOOR_BLOCKS
+        }
+        #[pallet::constant_name(DecisionExtension)]
+        fn decision_extension() -> u32 {
+            futarchy_primitives::kernel::DEC_EXTENSION_BLOCKS
+        }
+        #[pallet::constant_name(DecisionDeltaFloors)]
+        fn decision_delta_floors() -> [FixedU64; 4] {
+            futarchy_primitives::kernel::DECISION_DELTA_FLOORS
+        }
+        #[pallet::constant_name(DecisionSigmaFloors)]
+        fn decision_sigma_floors() -> [FixedU64; 4] {
+            futarchy_primitives::kernel::DECISION_SIGMA_FLOORS
+        }
     }
 
     #[pallet::genesis_config]
@@ -1359,6 +1317,19 @@ pub mod pallet {
 
         pub fn epoch_state() -> EpochState<T::AccountId> {
             Self::load()
+        }
+
+        /// Read the exact 02 §3 decision inputs the crank assembles for `pid`.
+        /// This accessor never seals windows or writes storage. Callers that
+        /// require a complete public view MUST reject `backing_complete ==
+        /// false`; `published_flow_per_day == None` remains complete because
+        /// 05 §5.6/08 §5.2 define it as the measured-depth/2 fallback.
+        pub fn decision_input_snapshot(
+            pid: ProposalId,
+        ) -> Option<DecisionInputSnapshot<T::AccountId>> {
+            let params = Self::live_params().ok()?;
+            let state = Self::load();
+            Self::assemble_decision_input_snapshot(&state, pid, params).ok()
         }
 
         pub fn epoch_timing(index: EpochId) -> Option<EpochTiming> {
@@ -1474,6 +1445,128 @@ pub mod pallet {
                 .validate()
                 .map_err(|_| DispatchError::from(Error::<T>::BadParams))?;
             Ok(params)
+        }
+
+        /// Single assembly point for the values consumed by `decide_with` and
+        /// exposed by `decision_input_snapshot` (02 §3; 05 §5.2-§5.6).
+        /// The core's historical zero sentinels remain in `inputs` so a missing
+        /// read cannot create an adoption, while `backing_complete` preserves
+        /// enough provenance for the runtime API to return `None` instead of
+        /// presenting those sentinels as measurements (G-1).
+        fn assemble_decision_input_snapshot(
+            state: &EpochState<T::AccountId>,
+            pid: ProposalId,
+            params: CoreEpochParams,
+        ) -> Result<DecisionInputSnapshot<T::AccountId>, DispatchError> {
+            let proposal = state
+                .proposal_view(pid)
+                .map_err(Self::map_core_error)?
+                .clone();
+            let markets = proposal.markets.ok_or(Error::<T>::BadDecisionInput)?;
+            let end = proposal.decide_at;
+
+            // 04 §7 / 05 §5.2: exact registered full/trailing windows and
+            // close-block spots. The crank keeps the established zero sentinel;
+            // the view consults `backing_complete` before exposing any field.
+            let accept_full = T::Market::twap_full_at(markets.accept, end);
+            let reject_full = T::Market::twap_full_at(markets.reject, end);
+            let baseline_full = T::Market::twap_full_at(markets.baseline, end);
+            let accept_trailing =
+                T::Market::twap_trailing_at(markets.accept, end, params.trailing_window);
+            let reject_trailing =
+                T::Market::twap_trailing_at(markets.reject, end, params.trailing_window);
+            let baseline_trailing =
+                T::Market::twap_trailing_at(markets.baseline, end, params.trailing_window);
+            let accept_spot = T::Market::spot_at(markets.accept, end);
+            let reject_spot = T::Market::spot_at(markets.reject, end);
+
+            let welfare_grade_ok = [
+                (markets.accept, BookRole::Decision),
+                (markets.reject, BookRole::Decision),
+            ]
+            .iter()
+            .all(|(market, role)| {
+                T::Market::decision_grade(*market, end, *role, proposal.class, &params)
+            });
+            let baseline_grade_ok = T::Market::baseline_market(proposal.epoch)
+                == Some(markets.baseline)
+                && T::Market::decision_grade(
+                    markets.baseline,
+                    end,
+                    BookRole::Baseline,
+                    proposal.class,
+                    &params,
+                );
+
+            // 05 §5.1: gate order is (S,C) × (adopt,reject), identical to
+            // `MarketSet::gates` and the frozen 02 §4 view order.
+            let (gate_twaps, gate_backing_complete) = match markets.gates {
+                Some(gates) => {
+                    let reads = gates.map(|market| T::Market::twap_full_at(market, end));
+                    let complete = reads.iter().all(Option::is_some);
+                    (
+                        Some(reads.map(|value| value.unwrap_or(FixedU64(0)))),
+                        complete,
+                    )
+                }
+                None => (None, true),
+            };
+            let gate_grade_ok = markets.gates.is_none_or(|gates| {
+                gates.iter().all(|market| {
+                    T::Market::decision_grade(*market, end, BookRole::Gate, proposal.class, &params)
+                })
+            });
+
+            // 05 §5.6 / 08 §5.2-§5.3: measured decision-pair depth and
+            // the same constitution prize proxy feed both security sizing and
+            // the Ask-scaled per-book contest floor in the runtime adapter.
+            let measured_depth = T::Market::measured_depth(pid);
+            let in_cap_prize = T::Constitution::in_cap_prize(&proposal);
+            let backing_complete = [
+                accept_full,
+                reject_full,
+                baseline_full,
+                accept_trailing,
+                reject_trailing,
+                baseline_trailing,
+                accept_spot,
+                reject_spot,
+            ]
+            .iter()
+            .all(Option::is_some)
+                && gate_backing_complete
+                && measured_depth.is_some()
+                && in_cap_prize.is_some();
+
+            Ok(DecisionInputSnapshot {
+                proposal: proposal.clone(),
+                params,
+                inputs: DecisionInputs {
+                    accept_full: accept_full.unwrap_or(FixedU64(0)),
+                    reject_full: reject_full.unwrap_or(FixedU64(0)),
+                    baseline_full: baseline_full.unwrap_or(FixedU64(0)),
+                    accept_trailing: accept_trailing.unwrap_or(FixedU64(0)),
+                    reject_trailing: reject_trailing.unwrap_or(FixedU64(0)),
+                    baseline_trailing: baseline_trailing.unwrap_or(FixedU64(0)),
+                    accept_spot: accept_spot.unwrap_or(FixedU64(0)),
+                    reject_spot: reject_spot.unwrap_or(FixedU64(0)),
+                    welfare_grade_ok,
+                    baseline_grade_ok,
+                    previous_settled_baseline_twap: T::Market::previous_settled_baseline_twap(
+                        proposal.epoch,
+                    ),
+                    welfare_second_insufficient: T::Market::second_insufficiency(pid),
+                    gate_grade_ok,
+                    gate_twaps,
+                    measured_depth: measured_depth.unwrap_or(0),
+                    published_flow_per_day: T::Market::published_flow_per_day(pid),
+                    in_cap_prize,
+                    attestation_quorate: T::Constitution::attestation_artifact(&proposal)
+                        .is_some_and(|artifact| T::Attestation::present_and_quorate(pid, artifact)),
+                    constitution_queue_ok: T::Constitution::queue_time_check(&proposal),
+                },
+                backing_complete,
+            })
         }
 
         fn requires_gate_markets_at_seed(proposal: &Proposal<T::AccountId>) -> bool {

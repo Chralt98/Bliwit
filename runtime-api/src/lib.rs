@@ -6,7 +6,7 @@
 //! The 11-method surface is specified by the integration contract (02 §3). Calls
 //! are made with `chainHead_call`; implementations perform no dispatch and must
 //! remain O(bounded-collection). The production runtime implements this trait in
-//! milestone B1a; this crate owns only the declaration shared with clients.
+//! milestone B2; this crate owns the declaration shared with clients.
 
 use futarchy_primitives::{
     bounds, AccountId, Balance, BoundedVec, CohortSummaryView, DecisionStatsView, EpochStatusView,

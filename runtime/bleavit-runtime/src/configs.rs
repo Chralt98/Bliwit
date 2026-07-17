@@ -1455,6 +1455,156 @@ pub(crate) fn proposal_class_index(class: futarchy_primitives::ProposalClass) ->
     }
 }
 
+/// Exact Ask-scaled contest floor enforced per decision book (05 §5.2; 08
+/// §5.3; 13 `dec.v_min`): `max(dec.v_min(class), 2P)`. Both the grade adapter
+/// and `FutarchyApi::decision_stats` call this helper, so the view can never
+/// report a floor the grade does not enforce.
+///
+/// An **unavailable** prize proxy (SQ-173 leaves `in_cap_prize` unbacked for
+/// every non-TREASURY class) keeps the base `dec.v_min` floor rather than
+/// voiding the grade. The distinction is economic, not cosmetic: a missing
+/// prize is a security-sizing *input* gap, not evidence that the book lacked
+/// coverage or contest depth, and `decide` already fails such a proposal at
+/// the sizing step (`in_cap_prize.ok_or(BadDecisionInput)`) — an error that
+/// leaves the proposal in place, retryable once the prize is backed. Voiding
+/// the grade instead would reach `Reject(NotDecisionGrade)` first and slash
+/// 10% of the proposer's intake bond (06 §4; 08 §7) for an input the chain,
+/// not the proposer, is missing.
+///
+/// The `2P` doubling saturates: it can only raise the floor, never wrap it
+/// down into a permissive value.
+pub(crate) fn effective_decision_contest_floor(
+    proposal: &futarchy_primitives::Proposal<AccountId>,
+    params: &pallet_epoch::CoreEpochParams,
+) -> Balance {
+    let base = params.v_min[proposal_class_index(proposal.class)];
+    match <RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<AccountId>>::in_cap_prize(
+        proposal,
+    ) {
+        Some(prize) => base.max(prize.saturating_mul(2)),
+        None => base,
+    }
+}
+
+fn contest_floor_for_grade(
+    market: futarchy_primitives::MarketId,
+    end: BlockNumber,
+    role: pallet_epoch::BookRole,
+    class: futarchy_primitives::ProposalClass,
+    params: &pallet_epoch::CoreEpochParams,
+) -> Option<Balance> {
+    let book = pallet_market::Markets::<Runtime>::get(market)?;
+    match book.kind {
+        pallet_market::core_market::BookKind::Decision { proposal, .. } => {
+            matches!(role, pallet_epoch::BookRole::Decision)
+                .then_some(())
+                .and_then(|()| pallet_epoch::Proposals::<Runtime>::get(proposal))
+                .filter(|proposal| proposal.class == class && proposal.decide_at == end)
+                .map(|proposal| effective_decision_contest_floor(&proposal, params))
+        }
+        pallet_market::core_market::BookKind::Gate { proposal, .. } => {
+            matches!(role, pallet_epoch::BookRole::Gate)
+                .then(|| params.gate_v_min[proposal_class_index(class)])
+                .filter(|_| {
+                    pallet_epoch::Proposals::<Runtime>::get(proposal).is_some_and(|proposal| {
+                        proposal.class == class && proposal.decide_at == end
+                    })
+                })
+        }
+        pallet_market::core_market::BookKind::Baseline { .. } => {
+            if !matches!(role, pallet_epoch::BookRole::Baseline) {
+                return None;
+            }
+            pallet_epoch::Proposals::<Runtime>::iter_values()
+                .filter(|proposal| {
+                    proposal.class == class
+                        && proposal.decide_at == end
+                        && proposal
+                            .markets
+                            .is_some_and(|markets| markets.baseline == market)
+                })
+                .map(|proposal| effective_decision_contest_floor(&proposal, params))
+                .max()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeDecisionMarketStats {
+    pub coverage_pct: u8,
+    pub traded_volume: Balance,
+    pub v_min_required: Balance,
+}
+
+fn decision_book_window_stats(
+    market: futarchy_primitives::MarketId,
+    end: BlockNumber,
+    window: BlockNumber,
+) -> Option<(u8, Balance)> {
+    let start = end.checked_sub(window)?;
+    let stats = pallet_market::DecisionWindows::<Runtime>::get(market)
+        .into_iter()
+        .find(|record| record.start == start && record.end == end && record.sealed)?;
+    if !stats.contest_valid {
+        return None;
+    }
+    let interval = u32::try_from(MarketObsInterval::get()).ok()?;
+    let expected = window.checked_div(interval)?;
+    if expected == 0 {
+        return None;
+    }
+    // Actual scheduled-interval coverage uses the same observations/window/
+    // interval sources as market-core's division-free grade predicate. The
+    // display rounds down and caps surplus observations at 100%.
+    let coverage = stats
+        .observations
+        .saturating_mul(100)
+        .checked_div(expected)?
+        .min(100);
+    let coverage_pct = u8::try_from(coverage).ok()?;
+    let traded_volume = stats
+        .contest_notional_blocks
+        .checked_div(Balance::from(window))?;
+    Some((coverage_pct, traded_volume))
+}
+
+/// Proposal-level projection of the two per-book grade records. 05 §5.2
+/// grades Accept and Reject independently, while 02 §4 exposes one coverage
+/// and one volume scalar, so the projection takes the conservative minimum:
+/// the displayed statistic clears a per-book threshold iff both books do.
+pub(crate) fn decision_market_stats_for_view(
+    proposal: &futarchy_primitives::Proposal<AccountId>,
+    params: &pallet_epoch::CoreEpochParams,
+) -> Option<RuntimeDecisionMarketStats> {
+    let markets = proposal.markets?;
+    let accept =
+        decision_book_window_stats(markets.accept, proposal.decide_at, params.decision_window)?;
+    let reject =
+        decision_book_window_stats(markets.reject, proposal.decide_at, params.decision_window)?;
+    let accept_floor = contest_floor_for_grade(
+        markets.accept,
+        proposal.decide_at,
+        pallet_epoch::BookRole::Decision,
+        proposal.class,
+        params,
+    )?;
+    let reject_floor = contest_floor_for_grade(
+        markets.reject,
+        proposal.decide_at,
+        pallet_epoch::BookRole::Decision,
+        proposal.class,
+        params,
+    )?;
+    if accept_floor != reject_floor {
+        return None;
+    }
+    Some(RuntimeDecisionMarketStats {
+        coverage_pct: accept.0.min(reject.0),
+        traded_volume: accept.1.min(reject.1),
+        v_min_required: accept_floor,
+    })
+}
+
 pub struct RuntimeMarketAccess;
 #[cfg_attr(feature = "runtime-benchmarks", allow(unreachable_code))]
 impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
@@ -1936,42 +2086,8 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
         if !role_matches {
             return false;
         }
-        let contest = match book.kind {
-            pallet_market::core_market::BookKind::Decision { proposal, .. }
-            | pallet_market::core_market::BookKind::Gate { proposal, .. } => {
-                let base = params.v_min[proposal_class_index(class)];
-                let effective = pallet_epoch::Proposals::<Runtime>::get(proposal)
-                    .and_then(|proposal| {
-                        <RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
-                            AccountId,
-                        >>::in_cap_prize(&proposal)
-                    })
-                    .and_then(|prize| prize.checked_mul(2))
-                    .map_or(base, |scaled| base.max(scaled));
-                if matches!(role, pallet_epoch::BookRole::Gate) {
-                    params.gate_v_min[proposal_class_index(class)]
-                } else {
-                    effective
-                }
-            }
-            pallet_market::core_market::BookKind::Baseline { .. } => {
-                let base = params.v_min[proposal_class_index(class)];
-                pallet_epoch::Proposals::<Runtime>::iter_values()
-                    .filter(|proposal| {
-                        proposal.class == class
-                            && proposal.decide_at == end
-                            && proposal
-                                .markets
-                                .is_some_and(|markets| markets.baseline == market)
-                    })
-                    .filter_map(|proposal| {
-                        <RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
-                            AccountId,
-                        >>::in_cap_prize(&proposal)
-                        .and_then(|prize| prize.checked_mul(2))
-                    })
-                    .fold(base, Balance::max)
-            }
+        let Some(contest) = contest_floor_for_grade(market, end, role, class, params) else {
+            return false;
         };
         let (coverage, convergence, pol_floor, sanity) = match role {
             pallet_epoch::BookRole::Decision => (
@@ -2021,33 +2137,36 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
         )
     }
 
-    fn measured_depth(pid: futarchy_primitives::ProposalId) -> Balance {
+    fn measured_depth(pid: futarchy_primitives::ProposalId) -> Option<Balance> {
+        // B5 benchmarks need a realistic, read-free depth; the production path
+        // below returns `None` when a backing read is unavailable so the B2
+        // `decision_stats` view can tell "not measurable" from "depth is zero"
+        // (a zero would render a fabricated measurement as observed data).
         #[cfg(feature = "runtime-benchmarks")]
         {
             let _ = pid;
-            return currency::USDC.saturating_mul(1_000_000);
+            return Some(currency::USDC.saturating_mul(1_000_000));
         }
-        pallet_epoch::Proposals::<Runtime>::get(pid)
-            .and_then(|proposal| {
-                let markets = proposal.markets?;
-                let window = u32_param(b"dec.window");
-                let mut total = 0_u128;
-                for id in [markets.accept, markets.reject] {
-                    if !pallet_market::SeededMarkets::<Runtime>::contains_key(id) {
-                        return None;
-                    }
-                    let book = pallet_market::Markets::<Runtime>::get(id)?;
-                    let pol = pallet_market::core_market::maker_loss_floor(book.b)?;
-                    let contest = pallet_market::Pallet::<Runtime>::average_contest_at(
-                        id,
-                        proposal.decide_at,
-                        window,
-                    )?;
-                    total = total.checked_add(pol)?.checked_add(contest)?;
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        pallet_epoch::Proposals::<Runtime>::get(pid).and_then(|proposal| {
+            let markets = proposal.markets?;
+            let window = u32_param(b"dec.window");
+            let mut total = 0_u128;
+            for id in [markets.accept, markets.reject] {
+                if !pallet_market::SeededMarkets::<Runtime>::contains_key(id) {
+                    return None;
                 }
-                Some(total)
-            })
-            .map_or(0, |depth| depth)
+                let book = pallet_market::Markets::<Runtime>::get(id)?;
+                let pol = pallet_market::core_market::maker_loss_floor(book.b)?;
+                let contest = pallet_market::Pallet::<Runtime>::average_contest_at(
+                    id,
+                    proposal.decide_at,
+                    window,
+                )?;
+                total = total.checked_add(pol)?.checked_add(contest)?;
+            }
+            Some(total)
+        })
     }
 
     fn published_flow_per_day(_: futarchy_primitives::ProposalId) -> Option<Balance> {

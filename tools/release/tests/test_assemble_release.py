@@ -250,6 +250,34 @@ class AssembleReleaseTests(unittest.TestCase):
             addressed = output / "dist" / f"{sha256(friendly)}-{name}"
             self.assertTrue(addressed.is_file())
 
+    def test_manifest_release_blocker_gates_complete_surface_recording(self) -> None:
+        manifest = json.loads(self.surface_manifest.read_text(encoding="utf-8"))
+        manifest["release_blockers"] = [
+            {
+                "id": "b1b.compliance",
+                "owner": "B1b",
+                "reason": "SQ-140..SQ-150 remain open",
+            }
+        ]
+        self.surface_manifest.write_text(json.dumps(manifest), encoding="utf-8")
+
+        output = self.root / "manifest-blocker"
+        result = self.run_assemble(output, allow_missing=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        release = json.loads(
+            (output / "release-manifest.json").read_text(encoding="utf-8")
+        )
+        gaps = {item["id"]: item for item in release["readiness"]["missing"]}
+        self.assertEqual(
+            gaps["b1b.compliance"],
+            {
+                "id": "b1b.compliance",
+                "owner": "B1b",
+                "reason": "SQ-140..SQ-150 remain open",
+            },
+        )
+        self.assertFalse(release["readiness"]["publishable"])
+
     def test_build_info_shape_validator(self) -> None:
         valid = json.loads((self.runtime / "build-info.json").read_text(encoding="utf-8"))
         self.assertEqual(ASSEMBLE.validate_build_info(valid), [])

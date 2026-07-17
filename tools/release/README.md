@@ -153,12 +153,16 @@ the resolved layout; a manifest layout mismatch is a strict failure with both
 forms in `fixtures-report.json`.
 
 Layout expectations are frozen only for surface the current runtime actually
-wires (they were validated against a live node). Blocked entries (A8/A11/B2)
-carry no `layout` — a guessed rendering would false-alarm once the owning
-milestone lands; the expectation is frozen from the real runtime at that
-point. The `ForeignAssets` trio's Location-keyed expectation is live wired
-surface: the runtime keys the instance by the frozen XCM `Location` (02 §8;
-SQ-101 resolved 2026-07-17). Two renderer caveats are inherent to portable
+wires (they were validated against a live node), and a still-blocked entry
+carries no `layout` — a guessed rendering would false-alarm once the owning
+milestone lands; the expectation is frozen from the real runtime at that point.
+The wired Epoch storage/events carry layouts rendered from the runtime's real
+metadata, like every other live storage/event row, and the `ForeignAssets`
+trio's Location-keyed expectation is now live wired surface too: the runtime
+keys the instance by the frozen XCM `Location` (02 §8; SQ-101 resolved
+2026-07-17). Runtime API entries deliberately carry no layout expectation: the
+recorder resolves their registered method signatures from the released
+metadata. Two renderer caveats are inherent to portable
 metadata: const-generic
 bounds (`BoundedVec<T, ConstU32<N>>`) do not appear in the registry — bounds
 are certified through the paired metadata constants instead — and the 02 §12
@@ -182,20 +186,33 @@ coverage missing. Strict mode fails; it never fabricates chainHead responses.
 
 Strict mode is expected to fail today:
 
-- B7 owns the per-release `run-evidence.json` for the `zombienet/` and
-  `chopsticks/` environment definitions;
-- B2 owns implementation of all 11 `FutarchyApi` methods and remaining metadata
-  constants;
-- A8 owns wiring `pallet-epoch` into the runtime;
-- A11 owns wiring `pallet-execution-guard` into the runtime.
+- B7 owns the per-release `run-evidence.json` for the committed `zombienet/`
+  and `chopsticks/` environment definitions;
+- B1b's compliance gaps SQ-172…SQ-182 remain release-blocking (canonical
+  resource keys/call effects, values and prize backing, phase/playbook mirrors,
+  and the remaining epoch integration gaps tracked in `PLAN.md`) — enforced by
+  the manifest's `release_blockers` row `b1b.compliance`;
+- SQ-205 (owner B1a): the oracle's authoritative reserve health never reaches
+  `treasury::set_reserve_impaired`, so 08 §1.2's fail-static NAV is not
+  enforced — enforced by the `treasury.reserve_health_unwired` row.
 
-The `ForeignAssets` `u32`→`Location` re-key (SQ-101) cleared its three rows on
-2026-07-17; the manifest's frozen Location-keyed expectations now record
-against the live runtime.
+Two previously-listed blockers are cleared: **B2** implemented all 11
+`FutarchyApi` methods and the remaining metadata constants (contract v4), and
+**A8/A11** are wired (`pallet-epoch` at index 61, `pallet-execution-guard` at
+62). The `ForeignAssets` `u32`→`Location` re-key (SQ-101) cleared its three
+rows on 2026-07-17; the manifest's frozen Location-keyed expectations now
+record against the live runtime.
+
+`release_blockers` rows fail a tagged release closed even when every surface
+records — a per-entry `blocked_by` cannot, since the assembler only reads it
+for a *missing* recording.
 
 These entries remain `required: true` in `surface-manifest.json`. Their
 `blocked_by` fields are diagnostics, not waivers. A tagged workflow uses strict
-mode and therefore cannot publish while any remain.
+mode and therefore cannot publish while any remain. Cross-surface gaps that can
+remain open even when metadata records successfully are listed in the
+manifest's `release_blockers`; the assembler always emits them as readiness
+gaps. B1b removes `b1b.compliance` only when SQ-140…SQ-150 are closed.
 
 ## Local dry-run
 
