@@ -68,6 +68,7 @@ class WorkflowContractTests(unittest.TestCase):
             "tools/reference-model/tests",
             "tools/release/tests",
             "tools/env/tests",
+            "tools/ci/tests",
         ):
             self.assertIn(suite, workflow)
         install_step = workflow.index(

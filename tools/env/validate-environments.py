@@ -30,6 +30,10 @@ PIN_KEYS = {
     # home, so the TLC jar pin lives here too (tools/verify/fetch-tla2tools.sh).
     "TLA2TOOLS_VERSION",
     "TLA2TOOLS_SHA256",
+    # Supply-chain pin (15 §4.5): same single-pin-home rule — the osv-scanner
+    # binary backing the GHSA-only leg (tools/ci/supply-chain-gates.sh).
+    "OSV_SCANNER_VERSION",
+    "OSV_SCANNER_SHA256",
 }
 
 # Normative inventories: 15 §4.7 + 09 §7.1.

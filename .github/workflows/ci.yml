@@ -62,7 +62,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.89.0
       - uses: Swatinem/rust-cache@v2
-      - name: Check lockfiles and RustSec advisories
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Check lockfiles, RustSec advisories, and GHSA-only advisories
         run: tools/ci/supply-chain-gates.sh
 
   reference-model:
@@ -79,7 +82,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests; do
+          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests tools/ci/tests; do
             if [[ -d "$suite" ]]; then
               python3 -m unittest discover -s "$suite"
             fi

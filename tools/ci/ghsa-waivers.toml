@@ -1,0 +1,56 @@
+# GHSA-only advisory waivers — the blind spot in the 15 §4.5 RustSec gate.
+#
+# 15 §4.5 gates every backend CI run on "a clean `cargo-audit` (RustSec) pass".
+# cargo-audit can only see what the RustSec advisory-db carries, and the GitHub
+# Advisory Database (what Dependabot reports against) is a strict superset for
+# crates.io: an advisory can exist as a GHSA with no RUSTSEC id at all, and
+# cargo-audit is then structurally blind to it — not misconfigured, blind.
+#
+# `tools/ci/check-ghsa-only.py` closes exactly that delta and nothing else: it
+# fails on any osv-scanner finding that carries neither a RUSTSEC id nor a
+# RUSTSEC alias and is not waived below. Findings RustSec DOES carry are left
+# to cargo-audit and `.cargo/audit.toml`, which classify informational
+# (`unmaintained`/`unsound`) advisories correctly as warnings — so this file
+# never duplicates that list and never inherits its noise.
+#
+# Every waiver states the pin that forces it and the condition that clears it.
+# A waiver that stops matching any finding FAILS the gate (see the checker's
+# stale-waiver leg): an exemption can never outlive the advisory that justified
+# it, mirroring the limit-coverage registry discipline (SQ-155).
+#
+# Triaged 2026-07-17 against the 25 open Dependabot alerts. Of those 25, this is
+# the only one RustSec does not carry; the other 24 are cargo-audit's to gate.
+
+[[waiver]]
+id = "GHSA-vxx9-2994-q338"
+aliases = ["CVE-2026-32314"]
+package = "yamux"
+version = "0.12.1"
+severity = "high"
+# Remote unauthenticated panic: a single Data frame with SYN and a body larger
+# than DEFAULT_CREDIT drops a half-created stream, and cleanup hits
+# `remove(...).expect("stream not found")`. Fixed in yamux 0.13.10.
+#
+# Not fixable, and not fixable by any SDK train bump: libp2p-yamux 0.46.0
+# hard-depends (non-optional, no feature gate) on BOTH yamux012 = yamux "^0.12.1"
+# AND yamux013 = yamux "^0.13.3". The 0.12.x line ends at 0.12.1, so the fix is
+# permanently out of range while that dual dependency exists — and
+# libp2p-yamux 0.47.0 still declares it. The 0.13.10 copy is already in the
+# lockfile and is already patched.
+#
+# NOT REACHED in the shipped collator. Every sc-network 0.56.1 call site
+# constructs `yamux::Config::default()`, and libp2p-yamux's `impl Default for
+# Config` returns `Either::Right(Config013::default())` — the yamux 0.13 path.
+# The 0.12 multiplexer is only constructible through the deprecated
+# `Config::client()` / `Config::server()` constructors, which appear nowhere in
+# the tree. The vulnerable code is linked but never instantiated. Independently,
+# litep2p is the default backend (sc-cli `default_value_t =
+# NetworkBackendType::Litep2p`) and carries its own yamux 0.13.10.
+#
+# Residual risk: an operator who explicitly passes `--network-backend libp2p`
+# runs the linked-but-legacy path; impact would be collator liveness (DoS), not
+# state integrity. The runtime wasm contains no yamux at all.
+reason = "linked but never instantiated (libp2p-yamux defaults to yamux 0.13); 0.12.x line has no fix and libp2p-yamux hard-pins it"
+blocked_by = "libp2p-yamux 0.46.0 -> yamux012 = yamux \"^0.12.1\" (non-optional; 0.47.0 unchanged)"
+clears_when = "upstream libp2p-yamux drops its yamux 0.12 dependency — NOT cleared by a polkadot-sdk train bump alone"
+triaged = "2026-07-17"
