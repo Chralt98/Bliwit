@@ -9,6 +9,7 @@ build = "build.rs"
 [dependencies]
 # --- Local protocol crates (all twelve production FRAME pallets).
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
+bleavit-xcm = { path = "../bleavit-xcm", default-features = false }
 origins-core = { path = "../../crates/origins-core", default-features = false }
 pallet-constitution = { path = "../../pallets/constitution", default-features = false }
 pallet-conditional-ledger = { path = "../../pallets/conditional-ledger", default-features = false }
@@ -109,6 +110,7 @@ substrate-wasm-builder = { workspace = true, optional = true }
 [features]
 default = ["std"]
 std = [
+  "bleavit-xcm/std",
   "cumulus-pallet-aura-ext/std",
   "cumulus-pallet-parachain-system/std",
   "cumulus-pallet-xcm/std",
@@ -187,6 +189,7 @@ std = [
   "substrate-wasm-builder",
 ]
 runtime-benchmarks = [
+  "bleavit-xcm/runtime-benchmarks",
   "cumulus-pallet-parachain-system/runtime-benchmarks",
   "cumulus-pallet-session-benchmarking/runtime-benchmarks",
   "cumulus-pallet-xcmp-queue/runtime-benchmarks",

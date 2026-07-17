@@ -76,7 +76,11 @@ Read this file first. Then read `PLAN.md`. Then work.
 - **R-9 — Commit discipline.** Conventional commits with the milestone ID, e.g.
   `feat(ledger): split/merge families with per-branch supplies (A2)`. Commit only
   when the user asks (or has standing instructions); never push, publish, or tag
-  without an explicit ask. Never commit with red gates.
+  without an explicit ask. Never commit with red gates. Enable
+  `git config rerere.enabled true` locally — `PLAN.md`'s `Current focus`,
+  `Milestones`, and `Session log` sections are touched by nearly every PR, so the
+  same conflict shapes recur across branches; rerere replays your own past
+  resolutions automatically instead of re-solving them by hand each time.
 - **R-10 — Honest reporting.** Report what happened: gates that failed, spec
   questions found, work left open. The next session inherits your PLAN.md state —
   optimistic status lines are technical debt with interest.

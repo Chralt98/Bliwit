@@ -45,11 +45,12 @@ use sp_runtime::{
 #[cfg(feature = "runtime-benchmarks")]
 use crate::Welfare;
 use crate::{
-    AccountId, AssetId, Aura, Balance, Balances, Block, BlockNumber, CollatorSelection,
-    ConditionalLedger, ConsensusHook, Epoch, ExecutionGuard, ForeignAssets, FutarchyTreasury, Hash,
-    MessageQueue, Migrations, Nonce, PalletInfo, ParachainSystem, PolkadotXcm, Preimage, Referenda,
-    Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin,
-    RuntimeTask, Scheduler, Session, SessionKeys, System, XcmpQueue, USDC_ASSET_ID, VERSION,
+    usdc_location, AccountId, AssetId, Aura, Balance, Balances, Block, BlockNumber,
+    CollatorSelection, ConditionalLedger, ConsensusHook, Epoch, ExecutionGuard, ForeignAssets,
+    FutarchyTreasury, Hash, MessageQueue, Migrations, Nonce, PalletInfo, ParachainSystem,
+    PolkadotXcm, Preimage, Referenda, Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason,
+    RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler, Session, SessionKeys, System,
+    XcmpQueue, VERSION,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -153,7 +154,7 @@ impl pallet_vesting::Config for Runtime {
 }
 
 parameter_types! {
-    pub const UsdcAssetId: AssetId = USDC_ASSET_ID;
+    pub UsdcAssetId: AssetId = usdc_location();
     pub const AssetDeposit: Balance = currency::VIT_EXISTENTIAL_DEPOSIT;
     pub const AssetAccountDeposit: Balance = currency::VIT_EXISTENTIAL_DEPOSIT;
     pub const ApprovalDeposit: Balance = currency::VIT_EXISTENTIAL_DEPOSIT;
@@ -202,9 +203,14 @@ pub struct AssetBenchmarkHelper;
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_assets::BenchmarkHelper<AssetId, ()> for AssetBenchmarkHelper {
     fn create_asset_id_parameter(id: u32) -> AssetId {
-        id
+        benchmark_asset_id(id)
     }
     fn create_reserve_id_parameter(_: u32) {}
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_asset_id(id: u32) -> AssetId {
+    bleavit_xcm::identity::asset_hub_asset_location(id as u128)
 }
 
 pub struct EnsureConstitutionalAssetCreate;
@@ -246,7 +252,7 @@ impl frame_support::traits::tokens::ConversionToAssetBalance<Balance, AssetId, B
 {
     type Error = ();
     fn to_asset_balance(vit: Balance, asset_id: AssetId) -> Result<Balance, ()> {
-        if asset_id != USDC_ASSET_ID {
+        if asset_id != usdc_location() {
             return Err(());
         }
         let rate = pallet_constitution::Params::<Runtime>::get(crate::FEE_VIT_USDC_RATE_KEY)
@@ -292,7 +298,8 @@ impl pallet_asset_tx_payment::BenchmarkHelperTrait<AccountId, AssetId, AssetId>
     for AssetTxBenchmarkHelper
 {
     fn create_asset_id_parameter(id: u32) -> (AssetId, AssetId) {
-        (id, id)
+        let asset_id = benchmark_asset_id(id);
+        (asset_id.clone(), asset_id)
     }
     fn setup_balances_and_pool(_: AssetId, _: AccountId) {}
 }
@@ -1701,7 +1708,7 @@ impl pallet_futarchy_treasury::RebatePayout<AccountId> for TreasuryRebatePayout 
             pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
         };
         <ForeignAssets as Mutate<AccountId>>::transfer(
-            USDC_ASSET_ID,
+            usdc_location(),
             &source,
             who,
             amount,
@@ -1715,7 +1722,7 @@ impl pallet_futarchy_treasury::RebatePayout<AccountId> for TreasuryRebatePayout 
             pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
             pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
         };
-        <ForeignAssets as Inspect<AccountId>>::balance(USDC_ASSET_ID, &source)
+        <ForeignAssets as Inspect<AccountId>>::balance(usdc_location(), &source)
     }
 }
 /// B4 pending renewal-dispatch seam: fail-closed (G-1) — every
@@ -3125,10 +3132,10 @@ pub(crate) fn prime_keeper_rebate_worst_case() {
     });
 
     for pot in [treasury_keeper_account(), treasury_oracle_account()] {
-        let balance = <ForeignAssets as Inspect<AccountId>>::balance(USDC_ASSET_ID, &pot);
+        let balance = <ForeignAssets as Inspect<AccountId>>::balance(usdc_location(), &pot);
         if balance < BENCHMARK_REBATE_LINE_BALANCE {
             <ForeignAssets as Mutate<AccountId>>::mint_into(
-                USDC_ASSET_ID,
+                usdc_location(),
                 &pot,
                 BENCHMARK_REBATE_LINE_BALANCE - balance,
             )
@@ -3292,7 +3299,7 @@ impl pallet_registry::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBench
         let who = AccountId32::new([seed; 32]);
         let reserve = currency::USDC.saturating_mul(1_000_000);
         let _ = <ForeignAssets as frame_support::traits::fungibles::Mutate<AccountId>>::mint_into(
-            USDC_ASSET_ID,
+            usdc_location(),
             &who,
             reserve,
         );
@@ -3302,7 +3309,7 @@ impl pallet_registry::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBench
         ] {
             let _ =
                 <ForeignAssets as frame_support::traits::fungibles::Mutate<AccountId>>::mint_into(
-                    USDC_ASSET_ID,
+                    usdc_location(),
                     &sovereign,
                     reserve,
                 );

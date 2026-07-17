@@ -112,10 +112,19 @@ jobs:
       - name: Build benchmark runtime Wasm
         run: cargo build --locked --release -p bleavit-runtime --features runtime-benchmarks
       - name: Execute every pallet benchmark
+        # pallet_assets::migration_v2_foreign_asset_set_reserve_weight is the
+        # weight function for pallet-assets's v2 storage migration, which a
+        # chain born at the current storage version never executes. Upstream's
+        # benchmark asserts `Asset::iter_keys().next()` equals its own created
+        # asset — an empty-map assumption the development genesis breaks by
+        # design: it registers the 02 §8 Location-keyed USDC at genesis and the
+        # USDC key hashes before the benchmark's. Every executable call/hook
+        # weight remains covered (15 §4.5).
         run: >-
           frame-omni-bencher v1 benchmark pallet
           --runtime target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm
           --all --steps 2 --repeat 1
+          --exclude-extrinsics pallet_assets::migration_v2_foreign_asset_set_reserve_weight
 
   # B7 environment release artifacts — 15 §4.7; 02 §11.
   environments:

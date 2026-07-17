@@ -10,7 +10,7 @@ use frame_support::{
     },
     weights::Weight,
 };
-use futarchy_primitives::{currency, kernel};
+use futarchy_primitives::{chain_identity, currency, kernel};
 use origins_core::{BoxedCall, CallDomain, Origin as ClassOrigin, RuntimeCall as FilterCall};
 use pallet_origins::{SafetyClassifier, SafetyFilter};
 use parity_scale_codec::Encode;
@@ -30,7 +30,7 @@ use crate::{
         ConditionalKind, ExpectedTreatment, InventoryRow, RuntimeMetadataModel, WrapperShape,
         INVENTORY,
     },
-    ForeignAssets, Multisig, Runtime, RuntimeCall, RuntimeOrigin, System, USDC_ASSET_ID,
+    ForeignAssets, Multisig, Runtime, RuntimeCall, RuntimeOrigin, System,
 };
 
 #[allow(clippy::needless_match)] // Intentionally compile-time exhaustive over ClassOrigin growth.
@@ -1305,11 +1305,11 @@ fn values_domain_leaves_including_foreign_assets_create_are_scheduler_admissible
 #[test]
 fn foreign_assets_create_reaches_and_retains_its_constitutional_origin_check() {
     development_ext().execute_with(|| {
-        let asset_id = USDC_ASSET_ID
-            .checked_add(1)
-            .expect("test asset id must fit the runtime AssetId");
+        let asset_id = bleavit_xcm::identity::asset_hub_asset_location(
+            chain_identity::USDC_ASSET_INDEX.saturating_add(1),
+        );
         let create = RuntimeCall::ForeignAssets(pallet_assets::Call::create {
-            id: asset_id,
+            id: asset_id.clone(),
             admin: MultiAddress::Id(account(78)),
             min_balance: currency::USDC_CENT,
         });
@@ -1336,7 +1336,7 @@ fn foreign_assets_create_reaches_and_retains_its_constitutional_origin_check() {
             matches!(&signed_result, Err(error) if error.error == sp_runtime::DispatchError::BadOrigin),
             "signed ForeignAssets.create must reach and fail CreateOrigin, got {signed_result:?}"
         );
-        assert!(!ForeignAssets::asset_exists(asset_id));
+        assert!(!ForeignAssets::asset_exists(asset_id.clone()));
 
         let values_result =
             create.dispatch(pallet_origins::Origin::ConstitutionalValues.into());
@@ -1344,7 +1344,7 @@ fn foreign_assets_create_reaches_and_retains_its_constitutional_origin_check() {
             values_result.is_ok(),
             "ConstitutionalValues ForeignAssets.create must pass the base filter and CreateOrigin: {values_result:?}"
         );
-        assert!(ForeignAssets::asset_exists(asset_id));
+        assert!(ForeignAssets::asset_exists(asset_id.clone()));
     });
 }
 
@@ -1554,11 +1554,11 @@ fn hash_only_multisig_approval_remains_public_and_dispatches_no_inner_call() {
         let mut signatories = vec![alice.clone(), bob.clone()];
         signatories.sort();
         let multisig_account = Multisig::multi_account_id(&signatories, 2);
-        let asset_id = USDC_ASSET_ID
-            .checked_add(1)
-            .expect("test asset id must fit the runtime AssetId");
+        let asset_id = bleavit_xcm::identity::asset_hub_asset_location(
+            chain_identity::USDC_ASSET_INDEX.saturating_add(1),
+        );
         <ForeignAssets as Create<_>>::create(
-            asset_id,
+            asset_id.clone(),
             multisig_account.clone(),
             true,
             currency::USDC_CENT,
@@ -1567,7 +1567,7 @@ fn hash_only_multisig_approval_remains_public_and_dispatches_no_inner_call() {
         let beneficiary = account(76);
         let amount = currency::USDC_CENT;
         let nobody_call = RuntimeCall::ForeignAssets(pallet_assets::Call::mint {
-            id: asset_id,
+            id: asset_id.clone(),
             beneficiary: MultiAddress::Id(beneficiary.clone()),
             amount,
         });
@@ -1596,7 +1596,7 @@ fn hash_only_multisig_approval_remains_public_and_dispatches_no_inner_call() {
             approval_result.is_ok(),
             "hash-only approval must remain Public: {approval_result:?}"
         );
-        assert_eq!(ForeignAssets::balance(asset_id, &beneficiary), 0);
+        assert_eq!(ForeignAssets::balance(asset_id.clone(), &beneficiary), 0);
 
         let pending = pallet_multisig::Multisigs::<Runtime>::get(&multisig_account, call_hash)
             .expect("approve_as_multi must prepare real multisig state");
@@ -1613,7 +1613,7 @@ fn hash_only_multisig_approval_remains_public_and_dispatches_no_inner_call() {
             "terminal multisig.as_multi carrying ForeignAssets.mint",
         );
         assert_eq!(
-            ForeignAssets::balance(asset_id, &beneficiary),
+            ForeignAssets::balance(asset_id.clone(), &beneficiary),
             0,
             "hash approval cannot smuggle the nobody-row mint; only the filtered terminal carries it"
         );
