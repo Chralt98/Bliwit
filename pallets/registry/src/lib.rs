@@ -139,6 +139,8 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     fn funded_account(seed: u8) -> AccountId;
     /// Make [`Config::Watchtowers`] report `who` as a registered watchtower.
     fn register_watchtower(who: &AccountId);
+    /// Install the real epoch/spec filing context for the benchmark epoch.
+    fn prime_epoch(epoch: EpochId);
 }
 
 #[frame_support::pallet]

@@ -14,7 +14,6 @@ use frame_support::{
 };
 use futarchy_primitives::{chain_identity, currency, kernel, ProposalClass};
 use origins_core::Origin as ClassOrigin;
-use pallet_guardian::WeightInfo as GuardianWeightInfo;
 use parity_scale_codec::Encode;
 use sp_core::H256;
 use sp_genesis_builder::PresetId;
@@ -27,16 +26,16 @@ use sp_runtime::{
 };
 
 use crate::{
-    classifier::{set_test_applicable_at, RuntimeBaseCallFilter},
+    classifier::{RuntimeBaseCallFilter, RuntimeDispatcher},
     AccountId, AllPalletsWithSystem, AssetTxPayment, Attestor, Aura, AuraExt, Authorship, Balances,
     BlockNumber, CollatorSelection, ConditionalLedger, Constitution, ConvictionVoting, CumulusXcm,
-    ForeignAssets, FutarchyTreasury, Guardian, IncidentRegistry, Market, MessageQueue, Migrations,
-    MilestoneRegistry, Multisig, Oracle, Origins, PalletInfo as RuntimePalletInfo, ParachainInfo,
-    ParachainSystem, PolkadotXcm, Preimage, Proxy, Referenda, Runtime, RuntimeCall,
-    RuntimeGenesisConfig, RuntimeOrigin, Scheduler, Session, Sudo, System, Timestamp,
-    TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Welfare, XcmpQueue,
-    FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX, USDC_ASSET_ID, USDC_DECIMALS,
-    USDC_LOCATION, VERSION, VIT_DECIMALS,
+    Epoch, ExecutionGuard, ForeignAssets, FutarchyTreasury, Guardian, IncidentRegistry, Market,
+    MessageQueue, Migrations, MilestoneRegistry, Multisig, Oracle, Origins,
+    PalletInfo as RuntimePalletInfo, ParachainInfo, ParachainSystem, PolkadotXcm, Preimage, Proxy,
+    Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin, Scheduler, Session, Sudo,
+    System, Timestamp, TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Welfare,
+    XcmpQueue, FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX, USDC_ASSET_ID,
+    USDC_DECIMALS, USDC_LOCATION, VERSION, VIT_DECIMALS,
 };
 
 fn account(seed: u8) -> AccountId {
@@ -318,10 +317,376 @@ fn composition_contains_all_b1a_pallets_and_only_future_slots_are_absent() {
     assert_pallet!(FutarchyTreasury, 58, "FutarchyTreasury");
     assert_pallet!(Guardian, 59, "Guardian");
     assert_pallet!(Attestor, 60, "Attestor");
+    assert_pallet!(Epoch, 61, "Epoch");
+    assert_pallet!(ExecutionGuard, 62, "ExecutionGuard");
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        37
+        39
     );
+}
+
+#[test]
+fn epoch_clock_is_live_across_sibling_configs() {
+    use frame_support::traits::Get;
+
+    development_ext().execute_with(|| {
+        pallet_epoch::EpochOf::<Runtime>::mutate(|epoch| epoch.index = 7);
+        assert_eq!(Epoch::current_epoch(), 7);
+        assert_eq!(pallet_epoch::CurrentEpoch::<Runtime>::get(), 7);
+        assert_eq!(
+            <<Runtime as pallet_welfare::Config>::CurrentEpoch as Get<u32>>::get(),
+            7
+        );
+        assert_eq!(
+            <<Runtime as pallet_guardian::Config>::CurrentEpoch as Get<u32>>::get(),
+            7
+        );
+        assert_eq!(
+            <<Runtime as pallet_futarchy_treasury::Config>::CurrentEpoch as Get<u32>>::get(),
+            7
+        );
+    });
+}
+
+#[test]
+fn execution_guard_enqueue_rejects_signed_callers() {
+    development_ext().execute_with(|| {
+        let version = match pallet_execution_guard::CurrentSpecName::<Runtime>::get() {
+            Some(version) => version,
+            None => return assert!(false, "guard genesis must seed its runtime version"),
+        };
+        let item = pallet_execution_guard::StoredQueuedExecution {
+            pid: 1,
+            payload_hash: [1; 32],
+            payload_len: 0,
+            class: ProposalClass::Param,
+            maturity: 1,
+            grace_end: 2,
+            version_constraint: version,
+            meters_declared: Default::default(),
+            ratify_ref: None,
+            ratification_passed: false,
+            attestation_id: None,
+            pre_upgrade_checkpoint: None,
+            cancelled: false,
+            declared_domains: Default::default(),
+            failed_at: None,
+        };
+        assert_eq!(
+            ExecutionGuard::enqueue(RuntimeOrigin::signed(account(77)), item, false),
+            Err(DispatchError::BadOrigin)
+        );
+    });
+}
+
+#[test]
+fn guard_rejects_best_effort_wrappers_and_admits_atomic_batch_all() {
+    use pallet_execution_guard::BatchDispatcher;
+
+    development_ext().execute_with(|| {
+        let leaf = RuntimeCall::Constitution(pallet_constitution::Call::set_param {
+            key: pallet_constitution::key16(b"mkt.obs_interval"),
+            value: pallet_constitution::ParamValue::U32(10),
+        });
+        let batch = RuntimeCall::Utility(pallet_utility::Call::batch {
+            calls: vec![leaf.clone()],
+        });
+        let force_batch = RuntimeCall::Utility(pallet_utility::Call::force_batch {
+            calls: vec![leaf.clone()],
+        });
+        let batch_all = RuntimeCall::Utility(pallet_utility::Call::batch_all { calls: vec![leaf] });
+        assert!(!RuntimeDispatcher::safety_filter(
+            ProposalClass::Param,
+            &batch
+        ));
+        assert!(!RuntimeDispatcher::safety_filter(
+            ProposalClass::Param,
+            &force_batch
+        ));
+        assert!(RuntimeDispatcher::safety_filter(
+            ProposalClass::Param,
+            &batch_all
+        ));
+        pallet_epoch::EpochOf::<Runtime>::mutate(|epoch| epoch.index = 10);
+        assert!(RuntimeDispatcher::dispatch_with_class_origin(
+            batch_all.clone(),
+            ProposalClass::Param,
+        )
+        .is_ok());
+        pallet_constitution::Capabilities::<Runtime>::mutate(|rows| {
+            if let Some(row) = rows.iter_mut().find(|row| {
+                row.class == ProposalClass::Param
+                    && row.capability
+                        == pallet_constitution::Capability::SetParam(pallet_constitution::key16(
+                            b"mkt.obs_interval",
+                        ))
+            }) {
+                row.enabled = false;
+            }
+        });
+        assert!(!RuntimeDispatcher::safety_filter(
+            ProposalClass::Param,
+            &batch_all
+        ));
+        assert!(RuntimeDispatcher::dispatch_with_class_origin(
+            batch_all.clone(),
+            ProposalClass::Param,
+        )
+        .is_err());
+        pallet_constitution::Capabilities::<Runtime>::mutate(|rows| {
+            if let Some(row) = rows.iter_mut().find(|row| {
+                row.class == ProposalClass::Param
+                    && row.capability
+                        == pallet_constitution::Capability::SetParam(pallet_constitution::key16(
+                            b"mkt.obs_interval",
+                        ))
+            }) {
+                row.enabled = true;
+            }
+        });
+        pallet_welfare::GateBreachFlags::<Runtime>::insert(
+            1,
+            pallet_welfare::CoreGateBreachFlags {
+                s_breached: true,
+                c_breached: false,
+                day_bitmap: [1, 0],
+            },
+        );
+        assert!(!RuntimeDispatcher::safety_filter(
+            ProposalClass::Param,
+            &batch_all
+        ));
+        pallet_welfare::GateBreachFlags::<Runtime>::remove(1);
+        pallet_constitution::PhaseFlags::<Runtime>::mutate(|flags| {
+            *flags |= pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED;
+        });
+        assert!(!RuntimeDispatcher::safety_filter(
+            ProposalClass::Param,
+            &batch_all
+        ));
+    });
+}
+
+#[test]
+fn epoch_to_guard_terminal_dequeue_cleans_guard_owned_state() {
+    use pallet_epoch::ExecutionGuardAccess;
+
+    development_ext().execute_with(|| {
+        let version = match pallet_execution_guard::CurrentSpecName::<Runtime>::get() {
+            Some(version) => version,
+            None => return assert!(false, "guard genesis must seed its runtime version"),
+        };
+        let pid = 91;
+        let payload_hash = [91; 32];
+        pallet_execution_guard::Queue::<Runtime>::insert(
+            pid,
+            pallet_execution_guard::StoredQueuedExecution {
+                pid,
+                payload_hash,
+                payload_len: 0,
+                class: ProposalClass::Param,
+                maturity: 1,
+                grace_end: 2,
+                version_constraint: version,
+                meters_declared: Default::default(),
+                ratify_ref: None,
+                ratification_passed: false,
+                attestation_id: None,
+                pre_upgrade_checkpoint: None,
+                cancelled: false,
+                declared_domains: Default::default(),
+                failed_at: None,
+            },
+        );
+        pallet_execution_guard::Expedited::<Runtime>::insert(pid, true);
+        pallet_execution_guard::AttestationBindings::<Runtime>::insert(pid, (7, payload_hash));
+        pallet_execution_guard::Ratifications::<Runtime>::insert(
+            pid,
+            pallet_execution_guard::RatificationRecord {
+                referendum_index: 4,
+                payload_hash,
+                ratified_at: 1,
+            },
+        );
+        assert!(crate::configs::RuntimeEpochGuard::dequeue_terminal(pid).is_ok());
+        assert!(!pallet_execution_guard::Queue::<Runtime>::contains_key(pid));
+        assert!(!pallet_execution_guard::Expedited::<Runtime>::contains_key(
+            pid
+        ));
+        assert!(!pallet_execution_guard::AttestationBindings::<Runtime>::contains_key(pid));
+        assert!(!pallet_execution_guard::Ratifications::<Runtime>::contains_key(pid));
+    });
+}
+
+#[test]
+fn epoch_enqueue_pins_preimage_and_converts_grace_duration_to_deadline() {
+    use pallet_epoch::ExecutionGuardAccess;
+    use pallet_execution_guard::Params;
+    use sp_runtime::traits::Hash as HashT;
+
+    development_ext().execute_with(|| {
+        System::set_block_number(1);
+        let batch = match pallet_execution_guard::RuntimeBatch::<Runtime>::try_from(vec![remark()])
+        {
+            Ok(batch) => batch,
+            Err(_) => return assert!(false, "one call must fit the guard batch bound"),
+        };
+        let bytes = batch.encode();
+        let payload_hash = <Runtime as frame_system::Config>::Hashing::hash(&bytes).0;
+        let proposer = Sr25519Keyring::Alice.to_account_id();
+        assert!(
+            Preimage::note_preimage(RuntimeOrigin::signed(proposer.clone()), bytes.clone()).is_ok()
+        );
+        let version = match pallet_execution_guard::CurrentSpecName::<Runtime>::get() {
+            Some(version) => version,
+            None => return assert!(false, "guard genesis must seed its runtime version"),
+        };
+        let pid = 92;
+        pallet_epoch::Proposals::<Runtime>::insert(
+            pid,
+            futarchy_primitives::Proposal {
+                id: pid,
+                proposer,
+                class: ProposalClass::Param,
+                state: futarchy_primitives::ProposalState::Queued,
+                epoch: 1,
+                submitted_at: 0,
+                payload_hash,
+                payload_len: bytes.len() as u32,
+                ask: 0,
+                bond: 1,
+                resources: Default::default(),
+                metric_spec: 1,
+                decide_at: 0,
+                rerun: false,
+                extended: false,
+                delayed_once: false,
+                markets: None,
+                maturity: None,
+                grace_end: None,
+                version_constraint: Some(version.clone()),
+                decision: None,
+            },
+        );
+        let maturity = System::block_number()
+            + crate::configs::RuntimeGuardParams::exec_timelock(ProposalClass::Param);
+        let grace = crate::configs::RuntimeGuardParams::exec_grace(ProposalClass::Param);
+        assert!(crate::configs::RuntimeEpochGuard::enqueue(
+            pid,
+            payload_hash,
+            Some(version),
+            maturity,
+            grace,
+            false,
+        )
+        .is_ok());
+        assert!(
+            <Preimage as frame_support::traits::QueryPreimage>::is_requested(&payload_hash.into())
+        );
+        assert_eq!(
+            pallet_execution_guard::Queue::<Runtime>::get(pid).map(|queued| queued.grace_end),
+            Some(maturity + grace)
+        );
+        assert!(crate::configs::RuntimeEpochGuard::dequeue_terminal(pid).is_ok());
+        assert!(
+            !<Preimage as frame_support::traits::QueryPreimage>::is_requested(&payload_hash.into())
+        );
+    });
+}
+
+#[test]
+fn explicitly_pending_b5_inputs_remain_fail_closed() {
+    use pallet_epoch::{ConstitutionAccess, GuardianAccess, MarketAccess};
+    use pallet_guardian::{GuardianRecallScheduler, GuardianReviewScheduler};
+    use pallet_oracle::ReportingContext;
+    use pallet_registry::EpochContext;
+    use pallet_welfare::MetricInputs;
+
+    development_ext().execute_with(|| {
+        System::set_block_number(1);
+        let proposal = futarchy_primitives::Proposal {
+            id: 1,
+            proposer: account(1),
+            class: ProposalClass::Param,
+            state: futarchy_primitives::ProposalState::Submitted,
+            epoch: 1,
+            submitted_at: 0,
+            payload_hash: [0; 32],
+            payload_len: 0,
+            ask: 0,
+            bond: 0,
+            resources: Default::default(),
+            metric_spec: 1,
+            decide_at: 0,
+            rerun: false,
+            extended: false,
+            delayed_once: false,
+            markets: None,
+            maturity: None,
+            grace_end: None,
+            version_constraint: None,
+            decision: None,
+        };
+        assert_eq!(crate::configs::RuntimeReporting::stake_at_risk(1, 1), 0);
+        assert!(!crate::configs::RuntimeReporting::is_expected_spec_version(
+            1, 1, 1
+        ));
+        assert_eq!(crate::configs::RuntimeEpochMarket::twap_full(1), None);
+        assert_eq!(
+            crate::configs::RuntimeEpochMarket::twap_trailing(1, 1),
+            None
+        );
+        assert!(!crate::configs::RuntimeEpochMarket::decision_grade(
+            1,
+            pallet_epoch::BookRole::Decision,
+            ProposalClass::Param,
+            &pallet_epoch::CoreEpochParams::DEFAULT,
+        ));
+        assert_eq!(crate::configs::RuntimeEpochMarket::measured_depth(1), 0);
+        assert_eq!(
+            crate::configs::RuntimeEpochMarket::published_flow_per_day(1),
+            None
+        );
+        assert_eq!(
+            crate::configs::RuntimeEpochMarket::previous_settled_baseline_twap(1),
+            None
+        );
+        assert!(crate::configs::RuntimeEpochMarket::open_markets(&proposal, false, false).is_err());
+        assert!(crate::configs::RuntimeMetricInputs::daily_components(1, 1, 0).is_empty());
+        assert_eq!(
+            crate::configs::RuntimeRegistryEpoch::frozen_spec_version(1),
+            0
+        );
+        assert_eq!(
+            crate::configs::RuntimeRegistryEpoch::filing_window_end(1),
+            0
+        );
+        assert_eq!(crate::configs::RuntimeRegistryEpoch::milestone_target(1), 0);
+        assert!(!crate::configs::RuntimeEpochConstitution::queue_time_check(
+            &proposal
+        ));
+        assert_eq!(
+            crate::configs::RuntimeEpochConstitution::in_cap_prize(&proposal),
+            None
+        );
+        assert!(!crate::configs::RuntimeEpochGuardian::review_window_closed(
+            1
+        ));
+        let triggers =
+            <crate::configs::RuntimeGuardianTriggers as pallet_guardian::GuardianTriggers>::current(
+            );
+        assert!(!triggers.depeg);
+        assert!(!triggers.oracle_deadlock);
+        assert!(!triggers.ledger_drift);
+        assert_eq!(
+            crate::configs::PendingGuardianReviewScheduler::schedule_review(1),
+            u32::MAX
+        );
+        assert_eq!(
+            crate::configs::PendingGuardianRecallScheduler::schedule_recall(1),
+            u32::MAX
+        );
+    });
 }
 
 #[test]
@@ -501,7 +866,7 @@ fn nesting_budget_accepts_the_limit_and_fails_closed_beyond_it() {
 }
 
 #[test]
-fn upgrade_filter_requires_internal_root_and_a_mature_pending_descriptor() {
+fn bare_system_upgrade_calls_stay_denied_when_guard_descriptor_matures() {
     let authorize = RuntimeCall::System(frame_system::Call::authorize_upgrade {
         code_hash: H256::repeat_byte(1),
     });
@@ -524,23 +889,38 @@ fn upgrade_filter_requires_internal_root_and_a_mature_pending_descriptor() {
         let apply =
             RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code: vec![1] });
         System::set_block_number(10);
-        set_test_applicable_at(None);
+        pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::kill();
         assert!(!RuntimeBaseCallFilter::contains(&apply));
         for wrapped in closed_wrappers(apply.clone()) {
             assert!(!RuntimeBaseCallFilter::contains(&wrapped));
         }
-        set_test_applicable_at(Some(11));
+        pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::put(
+            pallet_execution_guard::PendingUpgrade {
+                hash: [1; 32],
+                authorized_at: 1,
+                applicable_at: 11,
+                target_spec_version: 2,
+            },
+        );
         assert!(!RuntimeBaseCallFilter::contains(&apply));
-        set_test_applicable_at(Some(10));
-        assert!(RuntimeBaseCallFilter::contains(&apply));
-        assert!(RuntimeBaseCallFilter::contains(&RuntimeCall::Utility(
+        pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::mutate(|pending| {
+            if let Some(pending) = pending {
+                pending.applicable_at = 10;
+            }
+        });
+        assert!(!RuntimeBaseCallFilter::contains(&apply));
+        assert!(!RuntimeBaseCallFilter::contains(&RuntimeCall::Utility(
             pallet_utility::Call::batch {
                 calls: vec![apply.clone()],
             }
         )));
-        set_test_applicable_at(Some(9));
-        assert!(RuntimeBaseCallFilter::contains(&apply));
-        set_test_applicable_at(None);
+        pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::mutate(|pending| {
+            if let Some(pending) = pending {
+                pending.applicable_at = 9;
+            }
+        });
+        assert!(!RuntimeBaseCallFilter::contains(&apply));
+        pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::kill();
     });
 }
 
@@ -896,7 +1276,7 @@ fn guardian_pending_empty_membership_on_initialize_is_a_no_op() {
         let weight = <Guardian as frame_support::traits::Hooks<BlockNumber>>::on_initialize(1);
         assert_eq!(
             weight,
-            pallet_guardian::weights::SubstrateWeight::<Runtime>::on_initialize()
+            <<Runtime as pallet_guardian::Config>::WeightInfo as pallet_guardian::WeightInfo>::on_initialize()
         );
         assert_eq!(System::events().len(), before);
     });
@@ -1119,13 +1499,13 @@ fn live_param_adapters_resolve_their_registry_keys() {
 }
 
 #[test]
-fn pending_incident_multiplier_defaults_to_the_neutral_identity() {
+fn metric_inputs_incident_multiplier_defaults_to_the_neutral_identity() {
     use pallet_welfare::MetricInputs;
     development_ext().execute_with(|| {
         // No closed registry epoch ⇒ the neutral 1.0 multiplier (a zero would
         // erase C_attested outright — fail-destructive, not fail-safe).
         assert_eq!(
-            crate::configs::PendingMetricInputs::incident_multiplier(5),
+            crate::configs::RuntimeMetricInputs::incident_multiplier(5),
             futarchy_primitives::FixedU64(1_000_000_000)
         );
     });

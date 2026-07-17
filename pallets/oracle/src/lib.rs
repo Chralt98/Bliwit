@@ -147,6 +147,9 @@ pub trait ReportingContext {
 pub trait BenchmarkHelper<RuntimeOrigin> {
     /// A runtime origin that [`Config::AdjudicationOrigin`] accepts.
     fn adjudication_origin() -> RuntimeOrigin;
+    /// Install the real cross-pallet reporting window/spec context consumed by
+    /// `report`; mock runtimes whose provider is already primed may no-op.
+    fn prime_reporting(component: MetricId, epoch: EpochId, version: MetricSpecVersion);
 }
 
 #[frame_support::pallet]

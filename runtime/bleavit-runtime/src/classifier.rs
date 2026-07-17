@@ -1,50 +1,14 @@
-use alloc::{boxed::Box, vec::Vec};
-use frame_support::traits::Contains;
-use futarchy_primitives::kernel;
+use alloc::{boxed::Box, vec, vec::Vec};
+use frame_support::traits::{Contains, IsSubType, UnfilteredDispatchable};
+use futarchy_primitives::{kernel, ProposalClass, RuntimeVersionConstraint, H256};
 use origins_core::{BoxedCall, CallDomain, Origin as ClassOrigin, RuntimeCall as FilterCall};
 use pallet_origins::{SafetyClassifier, SafetyFilter};
+use parity_scale_codec::Decode;
+use sp_runtime::DispatchError;
 
-use crate::{RuntimeCall, System};
-
-/// Execution-guard-owned upgrade availability seam (A11). Until A11 lands,
-/// production always returns `None`, making `apply_authorized_upgrade`
-/// unreachable under G-1.
-pub trait PendingUpgradeProvider {
-    fn applicable_at() -> Option<futarchy_primitives::BlockNumber>;
-}
-
-/// A11 pending adapter: no pending descriptor can be fabricated before the
-/// execution guard is present.
-pub struct PendingExecutionGuard;
-
-impl PendingUpgradeProvider for PendingExecutionGuard {
-    fn applicable_at() -> Option<futarchy_primitives::BlockNumber> {
-        #[cfg(test)]
-        {
-            let value = TEST_APPLICABLE_AT.load(core::sync::atomic::Ordering::Relaxed);
-            (value != u32::MAX).then_some(value)
-        }
-        #[cfg(not(test))]
-        {
-            None
-        }
-    }
-}
-
-#[cfg(test)]
-static TEST_APPLICABLE_AT: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(u32::MAX);
-
-#[cfg(test)]
-pub(crate) fn set_test_applicable_at(value: Option<u32>) {
-    TEST_APPLICABLE_AT.store(
-        match value {
-            Some(at) => at,
-            None => u32::MAX,
-        },
-        core::sync::atomic::Ordering::Relaxed,
-    );
-}
+use crate::{
+    configs::execution_guard_account, Runtime, RuntimeCall, RuntimeOrigin, System, VERSION,
+};
 
 #[derive(Clone, Copy)]
 struct ProjectionBudget {
@@ -144,13 +108,11 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
                 leaf(CallDomain::Public)
             }
             frame_system::Call::authorize_upgrade { .. } => leaf(CallDomain::InternalRoot),
-            frame_system::Call::apply_authorized_upgrade { .. } => {
-                if pending_upgrade_is_applicable() {
-                    leaf(CallDomain::Public)
-                } else {
-                    denied()
-                }
-            }
+            // The public apply path is the execution-guard extrinsic, which
+            // re-derives the candidate version and clears guard/release state.
+            // Bare system apply would bypass those checks even when a pending
+            // descriptor is mature, so it is always denied by the base filter.
+            frame_system::Call::apply_authorized_upgrade { .. } => denied(),
             frame_system::Call::set_heap_pages { .. }
             | frame_system::Call::set_code { .. }
             | frame_system::Call::set_code_without_checks { .. }
@@ -563,6 +525,38 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_attestor::Call::challenge_attestation { .. } => leaf(CallDomain::Public),
             pallet_attestor::Call::__Ignore(_, _) => denied(),
         },
+        RuntimeCall::Epoch(call) => match call {
+            pallet_epoch::Call::submit { .. }
+            | pallet_epoch::Call::withdraw { .. }
+            | pallet_epoch::Call::tick { .. }
+            | pallet_epoch::Call::decide { .. }
+            | pallet_epoch::Call::settle_cohort { .. } => leaf(CallDomain::Public),
+            pallet_epoch::Call::set_next_epoch_length { .. } => {
+                leaf(CallDomain::ConstitutionalValues)
+            }
+            pallet_epoch::Call::delay_once { .. }
+            | pallet_epoch::Call::veto_upheld { .. }
+            | pallet_epoch::Call::force_reject_process_hold { .. } => {
+                leaf(CallDomain::GuardianHold)
+            }
+            // These callbacks accept only the execution-guard sovereign
+            // Signed account. They are origin-gated in-pallet and have no
+            // externally constructible custom origin.
+            pallet_epoch::Call::mark_executed { .. }
+            | pallet_epoch::Call::mark_failed_executed { .. }
+            | pallet_epoch::Call::retry_exhausted_to_measurement { .. }
+            | pallet_epoch::Call::expire_or_stale_queue { .. } => leaf(CallDomain::Public),
+            pallet_epoch::Call::void_cohort { .. } => leaf(CallDomain::EmergencyPlaybook),
+            pallet_epoch::Call::__Ignore(_, _) => denied(),
+        },
+        RuntimeCall::ExecutionGuard(call) => match call {
+            pallet_execution_guard::Call::execute { .. }
+            | pallet_execution_guard::Call::apply_authorized_upgrade { .. }
+            | pallet_execution_guard::Call::expire_failed_execution { .. }
+            | pallet_execution_guard::Call::reject_stale { .. } => leaf(CallDomain::Public),
+            pallet_execution_guard::Call::ratify { .. } => leaf(CallDomain::ConstitutionalValues),
+            pallet_execution_guard::Call::__Ignore(_, _) => denied(),
+        },
     }
 }
 
@@ -576,8 +570,242 @@ impl SafetyClassifier for BleavitSafetyClassifier {
     }
 }
 
-fn pending_upgrade_is_applicable() -> bool {
-    PendingExecutionGuard::applicable_at().is_some_and(|at| System::block_number() >= at)
+fn guard_domain(domain: CallDomain) -> Option<pallet_execution_guard::CallDomain> {
+    match domain {
+        CallDomain::Public => Some(pallet_execution_guard::CallDomain::Public),
+        CallDomain::Param => Some(pallet_execution_guard::CallDomain::Param),
+        CallDomain::Treasury => Some(pallet_execution_guard::CallDomain::Treasury),
+        CallDomain::Code => Some(pallet_execution_guard::CallDomain::Code),
+        CallDomain::Meta => Some(pallet_execution_guard::CallDomain::Meta),
+        CallDomain::InternalRoot => {
+            Some(pallet_execution_guard::CallDomain::InternalRootApplyUpgrade)
+        }
+        _ => None,
+    }
+}
+
+fn collect_guard_domains(
+    call: &FilterCall,
+    domains: &mut pallet_execution_guard::ReDerivedDomains,
+    nested_calls: &mut u32,
+) -> Result<(), DispatchError> {
+    *nested_calls = nested_calls
+        .checked_add(1)
+        .ok_or(DispatchError::Other("guard nested-call count overflow"))?;
+    if *nested_calls > kernel::MAX_NESTED_CALLS {
+        return Err(DispatchError::Other("guard nested-call bound exceeded"));
+    }
+    match call {
+        FilterCall::Leaf(domain) => {
+            let domain = guard_domain(*domain)
+                .ok_or(DispatchError::Other("guard call has forbidden domain"))?;
+            if !domains.contains(&domain) {
+                domains
+                    .try_push(domain)
+                    .map_err(|_| DispatchError::Other("guard domain bound exceeded"))?;
+            }
+        }
+        // SQ-96 / 09 section 1.2(12): best-effort wrappers cannot provide
+        // all-or-nothing execution, including when nested in batch_all.
+        FilterCall::UtilityBatch(_) | FilterCall::UtilityForceBatch(_) => {
+            return Err(DispatchError::Other("guard rejects best-effort wrapper"));
+        }
+        FilterCall::UtilityBatchAll(calls) => {
+            for call in calls {
+                collect_guard_domains(call, domains, nested_calls)?;
+            }
+        }
+        FilterCall::UtilityDispatchAs(call)
+        | FilterCall::UtilityAsDerivative(call)
+        | FilterCall::UtilityWithWeight(call)
+        | FilterCall::Proxy(call)
+        | FilterCall::ProxyAnnounced(call)
+        | FilterCall::MultisigAsMulti(call)
+        | FilterCall::MultisigAsMultiThreshold1(call)
+        | FilterCall::Sudo(call) => collect_guard_domains(&call.0, domains, nested_calls)?,
+        FilterCall::Scheduler { call, .. } => {
+            collect_guard_domains(&call.0, domains, nested_calls)?
+        }
+        FilterCall::MultisigApproveAsMulti => {}
+    }
+    Ok(())
+}
+
+/// Concrete execution-guard dispatcher. It reuses the same closed classifier
+/// as the runtime base filter and bypasses the origin-less base filter only
+/// after an origin-aware recheck has succeeded.
+pub struct RuntimeDispatcher;
+
+fn live_execution_freeze() -> bool {
+    let gate_breach = pallet_welfare::GateBreachFlags::<Runtime>::iter()
+        .any(|(_, flags)| flags.s_breached || flags.c_breached);
+    let dead_man = pallet_constitution::PhaseFlags::<Runtime>::get()
+        & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED
+        != 0;
+    gate_breach || dead_man
+}
+
+pub(crate) fn capability_enabled_for_call(class: ProposalClass, call: &RuntimeCall) -> bool {
+    let enabled =
+        |capability| pallet_constitution::Pallet::<Runtime>::capability_enabled(class, capability);
+    match call {
+        RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) => calls
+            .iter()
+            .all(|call| capability_enabled_for_call(class, call)),
+        RuntimeCall::Constitution(pallet_constitution::Call::set_param { key, .. }) => {
+            enabled(pallet_constitution::Capability::SetParam(*key))
+        }
+        RuntimeCall::Constitution(pallet_constitution::Call::set_capability { .. }) => {
+            enabled(pallet_constitution::Capability::SetCapability)
+        }
+        RuntimeCall::Constitution(pallet_constitution::Call::amend_registry { .. }) => {
+            enabled(pallet_constitution::Capability::AmendRegistry)
+        }
+        RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
+            // The exact internal-Root upgrade operation is governed by the
+            // CODE row even when a META proposal carries it. This conservative
+            // single-row policy is tracked against the 06/09 ambiguity in
+            // SQ-104; no proposal can create a second upgrade capability lane.
+            pallet_constitution::Pallet::<Runtime>::capability_enabled(
+                ProposalClass::Code,
+                pallet_constitution::Capability::AuthorizeUpgrade,
+            )
+        }
+        _ => {
+            let projected = BleavitSafetyClassifier::project(call);
+            let mut domains = pallet_execution_guard::ReDerivedDomains::default();
+            let mut nested_calls = 0;
+            if collect_guard_domains(&projected, &mut domains, &mut nested_calls).is_err() {
+                return false;
+            }
+            domains.iter().all(|domain| match domain {
+                pallet_execution_guard::CallDomain::Public => true,
+                pallet_execution_guard::CallDomain::Treasury => {
+                    enabled(pallet_constitution::Capability::TreasurySpend)
+                }
+                // Every non-public capability domain needs an explicit typed
+                // match above; an unmapped future call is denied by default.
+                _ => false,
+            })
+        }
+    }
+}
+
+impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher {
+    fn rederive_call(
+        call: &RuntimeCall,
+    ) -> Result<pallet_execution_guard::ReDerivedCall, DispatchError> {
+        if live_execution_freeze() {
+            return Err(DispatchError::Other("live execution freeze active"));
+        }
+        if Self::authorize_upgrade_hash(call).is_some() {
+            if !capability_enabled_for_call(ProposalClass::Code, call) {
+                return Err(DispatchError::Other("live upgrade capability disabled"));
+            }
+            let domains = pallet_execution_guard::ReDerivedDomains::try_from(vec![
+                pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade,
+            ])
+            .map_err(|_| DispatchError::Other("guard domain bound exceeded"))?;
+            return Ok(pallet_execution_guard::ReDerivedCall {
+                domains,
+                nested_calls: 1,
+            });
+        }
+        let projected = BleavitSafetyClassifier::project(call);
+        let mut domains = pallet_execution_guard::ReDerivedDomains::default();
+        let mut nested_calls = 0;
+        collect_guard_domains(&projected, &mut domains, &mut nested_calls)?;
+        Ok(pallet_execution_guard::ReDerivedCall {
+            domains,
+            nested_calls,
+        })
+    }
+
+    fn safety_filter(class: ProposalClass, call: &RuntimeCall) -> bool {
+        Self::rederive_call(call).is_ok()
+            && capability_enabled_for_call(class, call)
+            && ClassOrigin::from_proposal_class(class).is_some_and(|origin| {
+                SafetyFilter::<BleavitSafetyClassifier>::contains_for(origin, call)
+            })
+    }
+
+    fn authorize_upgrade_hash(call: &RuntimeCall) -> Option<H256> {
+        let system: Option<&frame_system::Call<Runtime>> = call.is_sub_type();
+        match system {
+            Some(frame_system::Call::authorize_upgrade { code_hash }) => Some(code_hash.0),
+            _ => None,
+        }
+    }
+
+    fn dispatch_with_class_origin(
+        call: RuntimeCall,
+        class: ProposalClass,
+    ) -> frame_support::dispatch::DispatchResult {
+        if !Self::safety_filter(class, &call) {
+            return Err(DispatchError::BadOrigin);
+        }
+        match call {
+            RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) => {
+                // `pallet-utility` normally dispatches inner calls through the
+                // origin-less base filter, which deliberately rejects privileged
+                // leaves. Execute the already-classified atomic wrapper here so
+                // each leaf gets the same class origin and failures roll back the
+                // complete nested batch (09 section 1.2(12), SQ-96).
+                frame_support::storage::with_storage_layer(|| {
+                    for call in calls {
+                        Self::dispatch_with_class_origin(call, class)?;
+                    }
+                    Ok(())
+                })
+            }
+            call => {
+                let origin = pallet_origins::Origin::from_proposal_class(class)
+                    .ok_or(DispatchError::BadOrigin)?;
+                call.dispatch_bypass_filter(RuntimeOrigin::from(origin))
+                    .map(|_| ())
+                    .map_err(|error| error.error)
+            }
+        }
+    }
+
+    fn dispatch_authorize_upgrade(code_hash: H256) -> frame_support::dispatch::DispatchResult {
+        RuntimeCall::System(frame_system::Call::authorize_upgrade {
+            code_hash: code_hash.into(),
+        })
+        .dispatch_bypass_filter(RuntimeOrigin::root())
+        .map(|_| ())
+        .map_err(|error| error.error)
+    }
+
+    fn dispatch_apply_authorized_upgrade(code: Vec<u8>) -> frame_support::dispatch::DispatchResult {
+        if live_execution_freeze() {
+            return Err(DispatchError::Other("live execution freeze active"));
+        }
+        RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code })
+            .dispatch_bypass_filter(RuntimeOrigin::signed(execution_guard_account()))
+            .map(|_| ())
+            .map_err(|error| error.error)
+    }
+
+    fn observed_runtime_version(code: &[u8]) -> Option<RuntimeVersionConstraint> {
+        let encoded = sp_io::misc::runtime_version(code)?;
+        let version = sp_version::RuntimeVersion::decode(&mut &encoded[..]).ok()?;
+        Some(RuntimeVersionConstraint {
+            spec_name: version.spec_name.as_bytes().to_vec().try_into().ok()?,
+            spec_version: version.spec_version,
+        })
+    }
+
+    fn checkpoint() -> (H256, H256) {
+        let parent_hash = System::parent_hash().0;
+        let state_root = sp_io::storage::root(VERSION.state_version());
+        #[allow(clippy::manual_unwrap_or, clippy::manual_unwrap_or_default)]
+        let state_root = match <[u8; 32]>::try_from(state_root.as_slice()) {
+            Ok(root) => root,
+            Err(_) => [0; 32],
+        };
+        (parent_hash, state_root)
+    }
 }
 
 /// Closed bare-leaf admission set required because stable2603 scheduler uses
@@ -623,6 +851,7 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             | RuntimeCall::Attestor(pallet_attestor::Call::set_members { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::resolve_challenge { .. })
             | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. }) // A11-wiring: execution_guard.ratify joins this closed list with the pallet.
+            | RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::ratify { .. })
     )
 }
 

@@ -9,8 +9,9 @@ use sp_runtime::traits::AccountIdConversion;
 
 use crate::{
     configs::LedgerPalletId, AccountId, BalancesConfig, CollatorSelectionConfig,
-    ConstitutionConfig, ForeignAssetsConfig, ParachainInfoConfig, PolkadotXcmConfig,
-    RuntimeGenesisConfig, SessionConfig, SessionKeys, SudoConfig, USDC_ASSET_ID,
+    ConstitutionConfig, EpochConfig, ExecutionGuardConfig, ForeignAssetsConfig,
+    ParachainInfoConfig, PolkadotXcmConfig, RuntimeGenesisConfig, SessionConfig, SessionKeys,
+    SudoConfig, USDC_ASSET_ID,
 };
 
 const SAFE_XCM_VERSION: u32 = staging_xcm::prelude::XCM_VERSION;
@@ -92,6 +93,12 @@ fn testnet_genesis(
             phase_flags: BOOTSTRAP_PHASE_FLAGS,
             ..Default::default()
         },
+        epoch: EpochConfig {
+            index: 1,
+            start_block: 0,
+            ..Default::default()
+        },
+        execution_guard: ExecutionGuardConfig::default(),
         sudo: SudoConfig { key: Some(root) },
     })
 }
