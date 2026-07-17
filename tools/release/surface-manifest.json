@@ -1,0 +1,2521 @@
+{
+  "schema": "bleavit.critical-surface.v1",
+  "integration_contract_version": 3,
+  "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
+  "entries": [
+    {
+      "id": "api.epoch_status",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "epoch_status",
+      "state_call": "FutarchyApi_epoch_status",
+      "params_hex": "0x",
+      "required": true,
+      "blocked_by": "B2 FutarchyApi runtime wiring",
+      "citation": "02 §3"
+    },
+    {
+      "id": "api.proposal_summaries",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "proposal_summaries",
+      "state_call": "FutarchyApi_proposal_summaries",
+      "params_hex": "0x",
+      "required": true,
+      "blocked_by": "B2 FutarchyApi runtime wiring",
+      "citation": "02 §3"
+    },
+    {
+      "id": "api.quote",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "quote",
+      "state_call": "FutarchyApi_quote",
+      "params_hex": "0x00000000000000000001000000000000000000000000000000",
+      "params_description": "MarketId(0) ++ TradeSide::BuyLong(0) ++ Balance(1), SCALE little-endian",
+      "required": true,
+      "blocked_by": "B2 FutarchyApi runtime wiring",
+      "citation": "02 §3"
+    },
+    {
+      "id": "api.decision_stats",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "decision_stats",
+      "state_call": "FutarchyApi_decision_stats",
+      "params_hex": "0x0000000000000000",
+      "params_description": "ProposalId(0)",
+      "required": true,
+      "blocked_by": "B2 FutarchyApi runtime wiring",
+      "citation": "02 §3"
+    },
+    {
+      "id": "api.account_positions",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "account_positions",
+      "state_call": "FutarchyApi_account_positions",
+      "params_hex": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "params_description": "AccountId([0;32])",
+      "required": true,
+      "blocked_by": "B2 FutarchyApi runtime wiring",
+      "citation": "02 §3"
+    },
+    {
+      "id": "api.execution_queue",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "execution_queue",
+      "state_call": "FutarchyApi_execution_queue",
+      "params_hex": "0x",
+      "required": true,
+      "blocked_by": "B2 FutarchyApi runtime wiring",
+      "citation": "02 §3"
+    },
+    {
+      "id": "api.welfare_current",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "welfare_current",
+      "state_call": "FutarchyApi_welfare_current",
+      "params_hex": "0x",
+      "required": true,
+      "blocked_by": "B2 FutarchyApi runtime wiring",
+      "citation": "02 §3"
+    },
+    {
+      "id": "api.params",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "params",
+      "state_call": "FutarchyApi_params",
+      "params_hex": "0x00",
+      "params_description": "empty BoundedVec<ParamKey>",
+      "required": true,
+      "blocked_by": "B2 FutarchyApi runtime wiring",
+      "citation": "02 §3"
+    },
+    {
+      "id": "api.nav",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "nav",
+      "state_call": "FutarchyApi_nav",
+      "params_hex": "0x",
+      "required": true,
+      "blocked_by": "B2 FutarchyApi runtime wiring",
+      "citation": "02 §3"
+    },
+    {
+      "id": "api.recent_cohorts",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "recent_cohorts",
+      "state_call": "FutarchyApi_recent_cohorts",
+      "params_hex": "0x",
+      "required": true,
+      "blocked_by": "B2 FutarchyApi runtime wiring",
+      "citation": "02 §3"
+    },
+    {
+      "id": "api.open_oracle_rounds",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "open_oracle_rounds",
+      "state_call": "FutarchyApi_open_oracle_rounds",
+      "params_hex": "0x",
+      "required": true,
+      "blocked_by": "B2 FutarchyApi runtime wiring",
+      "citation": "02 §3"
+    },
+    {
+      "id": "storage.epoch.proposals",
+      "kind": "storage",
+      "pallet": "Epoch",
+      "item": "Proposals",
+      "query": "prefix",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §7.1"
+    },
+    {
+      "id": "storage.epoch.epoch_of",
+      "kind": "storage",
+      "pallet": "Epoch",
+      "item": "EpochOf",
+      "query": "value",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §7.1"
+    },
+    {
+      "id": "storage.epoch.intake_queue",
+      "kind": "storage",
+      "pallet": "Epoch",
+      "item": "IntakeQueue",
+      "query": "value",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §7.1"
+    },
+    {
+      "id": "storage.epoch.recent_cohort_summaries",
+      "kind": "storage",
+      "pallet": "Epoch",
+      "item": "RecentCohortSummaries",
+      "query": "value",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §7.1"
+    },
+    {
+      "id": "storage.epoch.cohorts",
+      "kind": "storage",
+      "pallet": "Epoch",
+      "item": "Cohorts",
+      "query": "prefix",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §7.1"
+    },
+    {
+      "id": "storage.oracle.reporters",
+      "kind": "storage",
+      "pallet": "Oracle",
+      "item": "Reporters",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.2",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "sp_core::crypto::AccountId32([u8;32])",
+        "value": "oracle_core::ReporterInfo{stake:u128,registered_at:u32,offenses:u8}"
+      }
+    },
+    {
+      "id": "storage.oracle.rounds",
+      "kind": "storage",
+      "pallet": "Oracle",
+      "item": "Rounds",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.2",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat",
+          "Blake2_128Concat",
+          "Blake2_128Concat"
+        ],
+        "key": "(u16,u32,u16)",
+        "value": "oracle_core::RoundState{component:u16,epoch:u32,round:u8,spec_version:u16,reporter:[u8;32],value:futarchy_primitives::FixedU64(u64),evidence_hash:[u8;32],bond:u128,challenge_deadline:u32,extended:bool,challenger:Optionenum[None=0|Some=1([u8;32])],counter_value:Optionenum[None=0|Some=1(futarchy_primitives::FixedU64(u64))],acks:u8,report_hash:[u8;32],stake_at_risk:u128,cumulative_reporter_bond:u128,cumulative_challenger_bond:u128}"
+      }
+    },
+    {
+      "id": "storage.oracle.component_values",
+      "kind": "storage",
+      "pallet": "Oracle",
+      "item": "ComponentValues",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.2",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat",
+          "Blake2_128Concat",
+          "Blake2_128Concat"
+        ],
+        "key": "(u16,u32,u16)",
+        "value": "oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|Neutral=3],flagged:bool}"
+      }
+    },
+    {
+      "id": "storage.oracle.watchtowers",
+      "kind": "storage",
+      "pallet": "Oracle",
+      "item": "Watchtowers",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.2",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "sp_core::crypto::AccountId32([u8;32])",
+        "value": "oracle_core::WatchtowerInfo{stake:u128,registered_at:u32,inactive_epochs:u8}"
+      }
+    },
+    {
+      "id": "storage.oracle.reserve_health",
+      "kind": "storage",
+      "pallet": "Oracle",
+      "item": "ReserveHealth",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.2",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "oracle_core::ReserveHealth{consecutive_fails:u8,consecutive_passes:u8,unhealthy:bool,last_query_id:u64,last_probe_at:u32,pending_since:Optionenum[None=0|Some=1(u32)]}"
+      }
+    },
+    {
+      "id": "storage.constitution.params",
+      "kind": "storage",
+      "pallet": "Constitution",
+      "item": "Params",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.3",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "[u8;16]",
+        "value": "constitution_core::ParamRecord{key:[u8;16],value:constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)],min:constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)],max:constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)],max_delta:Optionenum[None=0|Some=1(constitution_core::MaxDeltaenum[Absolute=0(constitution_core::ParamValueenum[U8=0(u8)|U32=1(u32)|Balance=2(u128)|Fixed=3(futarchy_primitives::FixedU64(u64))|Percent=4(u8)|Perbill=5(u32)])|Percent=1(u8)|Factor=2(u8)])],cooldown_epochs:u32,last_changed_epoch:u32,class:constitution_core::ParamClassenum[Param=0|Treasury=1|Meta=2|Const=3|Entrenched=4|MetaAndValues=5],kernel_bounded:bool}"
+      }
+    },
+    {
+      "id": "storage.constitution.phase_flags",
+      "kind": "storage",
+      "pallet": "Constitution",
+      "item": "PhaseFlags",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.3",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "u32"
+      }
+    },
+    {
+      "id": "storage.constitution.release_channel",
+      "kind": "raw_storage",
+      "pallet": "Constitution",
+      "item": "ReleaseChannel",
+      "query": "value",
+      "raw_key": "0xfb8ccbf677a3d2ce27ab85165f32df6afec7194a5368a58e1f6bf57457134a6c",
+      "classic_rpc_fallback": true,
+      "required": true,
+      "citation": "02 §7.3; 02 §12",
+      "value_optional": true
+    },
+    {
+      "id": "storage.market.baseline_market_of",
+      "kind": "storage",
+      "pallet": "Market",
+      "item": "BaselineMarketOf",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u32",
+        "value": "u64"
+      }
+    },
+    {
+      "id": "storage.market.markets",
+      "kind": "storage",
+      "pallet": "Market",
+      "item": "Markets",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u64",
+        "value": "market_core::MarketBook{id:u64,kind:market_core::BookKindenum[Decision=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1]}|Gate=1{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],gate:futarchy_primitives::GateTypeenum[Survival=0|Security=1]}|Baseline=2{epoch:u32}],phase:market_core::MarketPhaseenum[Trading=0|Extended=1|Closed=2|Settled=3],account:sp_core::crypto::AccountId32([u8;32]),fees_account:sp_core::crypto::AccountId32([u8;32]),b:u128,q_long:u128,q_short:u128,fees_accrued:u128,last_quote_1e9:futarchy_primitives::FixedU64(u64),last_observation_1e9:futarchy_primitives::FixedU64(u64),last_observed_block:u64,cumulative_price_blocks:u128,stale_events:u8}"
+      }
+    },
+    {
+      "id": "storage.ledger.vaults",
+      "kind": "storage",
+      "pallet": "ConditionalLedger",
+      "item": "Vaults",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u64",
+        "value": "conditional_ledger_core::VaultInfo{escrowed:u128,branches:[conditional_ledger_core::BranchSupply{usdc:u128,scalar_sets:u128,gate_sets:[u128;2]};2],state:futarchy_primitives::VaultStateenum[Open=0|Resolved=1(futarchy_primitives::Branchenum[Accept=0|Reject=1])|ScalarSettled=2{winner:futarchy_primitives::Branchenum[Accept=0|Reject=1],s:futarchy_primitives::FixedU64(u64)}|Voided=3],gate_outcomes:[Optionenum[None=0|Some=1(bool)];2],spec:u16}"
+      }
+    },
+    {
+      "id": "storage.ledger.baseline_vaults",
+      "kind": "storage",
+      "pallet": "ConditionalLedger",
+      "item": "BaselineVaults",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u32",
+        "value": "conditional_ledger_core::BaselineVaultInfo{escrowed:u128,sets:u128,state:conditional_ledger_core::BaselineStateenum[Open=0|Settled=1(futarchy_primitives::FixedU64(u64))]}"
+      }
+    },
+    {
+      "id": "storage.ledger.positions",
+      "kind": "storage",
+      "pallet": "ConditionalLedger",
+      "item": "Positions",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat",
+          "Blake2_128Concat"
+        ],
+        "key": "(futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}],sp_core::crypto::AccountId32([u8;32]))",
+        "value": "u128"
+      }
+    },
+    {
+      "id": "storage.ledger.position_totals",
+      "kind": "storage",
+      "pallet": "ConditionalLedger",
+      "item": "PositionTotals",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}]",
+        "value": "u128"
+      }
+    },
+    {
+      "id": "storage.execution_guard.queue",
+      "kind": "storage",
+      "pallet": "ExecutionGuard",
+      "item": "Queue",
+      "query": "prefix",
+      "required": true,
+      "blocked_by": "A11 pallet-execution-guard runtime wiring",
+      "citation": "02 §7.4"
+    },
+    {
+      "id": "storage.execution_guard.ratifications",
+      "kind": "storage",
+      "pallet": "ExecutionGuard",
+      "item": "Ratifications",
+      "query": "prefix",
+      "required": true,
+      "blocked_by": "A11 pallet-execution-guard runtime wiring",
+      "citation": "02 §7.4"
+    },
+    {
+      "id": "storage.execution_guard.execution_records",
+      "kind": "storage",
+      "pallet": "ExecutionGuard",
+      "item": "ExecutionRecords",
+      "query": "value",
+      "required": true,
+      "blocked_by": "A11 pallet-execution-guard runtime wiring",
+      "citation": "02 §7.4"
+    },
+    {
+      "id": "storage.welfare.snapshots",
+      "kind": "storage",
+      "pallet": "Welfare",
+      "item": "Snapshots",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "(u32,u16)",
+        "value": "pallet_welfare::pallet::StoredSnapshot{epoch:u32,spec_version:u16,s_pillar:futarchy_primitives::FixedU64(u64),c_onchain:futarchy_primitives::FixedU64(u64),c_attested:futarchy_primitives::FixedU64(u64),p_pillar:futarchy_primitives::FixedU64(u64),a_pillar:futarchy_primitives::FixedU64(u64),gate_s:futarchy_primitives::FixedU64(u64),gate_c:futarchy_primitives::FixedU64(u64),welfare:futarchy_primitives::FixedU64(u64),components:bounded_collections::bounded_vec::BoundedVec(Vec<welfare_core::ComponentValue{id:u16,value:futarchy_primitives::FixedU64(u64)}>)}"
+      }
+    },
+    {
+      "id": "storage.welfare.metric_specs",
+      "kind": "storage",
+      "pallet": "Welfare",
+      "item": "MetricSpecs",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u16",
+        "value": "bounded_collections::bounded_vec::BoundedVec(Vec<welfare_core::MetricSpec{id:u16,version:u16,pillar:welfare_core::Pillarenum[S=0|COnchain=1|CAttested=2|P=3|A=4],weight:futarchy_primitives::FixedU64(u64),epsilon_floor:futarchy_primitives::FixedU64(u64),activation_epoch:u32,source:welfare_core::SourceClassenum[Onchain=0|RelayDerived=1|Attested=2],formula_ref:[u8;32],units:[u8;16],repr:[u8;16],cadence_blocks:u32,sanity_min:futarchy_primitives::FixedU64(u64),sanity_max:futarchy_primitives::FixedU64(u64),has_normalization_rule:bool,has_missing_data_rule:bool,has_gaming_vectors:bool,has_challenge_procedure:bool,prior_bounds:[futarchy_primitives::FixedU64(u64);12]}>)"
+      }
+    },
+    {
+      "id": "storage.welfare.gate_breach_flags",
+      "kind": "storage",
+      "pallet": "Welfare",
+      "item": "GateBreachFlags",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u32",
+        "value": "welfare_core::GateBreachFlags{s_breached:bool,c_breached:bool,day_bitmap:[u32;2]}"
+      }
+    },
+    {
+      "id": "storage.guardian.members",
+      "kind": "storage",
+      "pallet": "Guardian",
+      "item": "Members",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.4 guardian membership",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "[[u8;32];7]"
+      }
+    },
+    {
+      "id": "storage.guardian.allowances",
+      "kind": "storage",
+      "pallet": "Guardian",
+      "item": "Allowances",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.4 guardian allowances",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "pallet_guardian::pallet::AllowanceState{delay_used_this_epoch:u8,force_rerun_used_this_epoch:u8,pause_window_start:u32,pause_used_in_window:u8}"
+      }
+    },
+    {
+      "id": "storage.system.account",
+      "kind": "storage",
+      "pallet": "System",
+      "item": "Account",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "sp_core::crypto::AccountId32([u8;32])",
+        "value": "frame_system::AccountInfo{nonce:u32,consumers:u32,providers:u32,sufficients:u32,data:pallet_balances::types::AccountData{free:u128,reserved:u128,frozen:u128,flags:pallet_balances::types::ExtraFlags(u128)}}"
+      }
+    },
+    {
+      "id": "storage.foreign_assets.account",
+      "kind": "storage",
+      "pallet": "ForeignAssets",
+      "item": "Account",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4; 02 §8",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat",
+          "Blake2_128Concat"
+        ],
+        "key": "(staging_xcm::v5::location::Location{parents:u8,interior:staging_xcm::v5::junctions::Junctionsenum[Here=0|X1=1([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];1])|X2=2([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];2])|X3=3([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];3])|X4=4([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];4])|X5=5([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];5])|X6=6([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];6])|X7=7([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];7])|X8=8([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];8])]},sp_core::crypto::AccountId32([u8;32]))",
+        "value": "pallet_assets::types::AssetAccount{balance:u128,status:pallet_assets::types::AccountStatusenum[Liquid=0|Frozen=1|Blocked=2],reason:pallet_assets::types::ExistenceReasonenum[Consumer=0|Sufficient=1|DepositHeld=2(u128)|DepositRefunded=3|DepositFrom=4(sp_core::crypto::AccountId32([u8;32]),u128)],extra:()}"
+      },
+      "blocked_by": "SQ-101 (B4 follow-up)"
+    },
+    {
+      "id": "storage.identity.parachain_id",
+      "kind": "storage",
+      "pallet": "ParachainInfo",
+      "item": "ParachainId",
+      "query": "value",
+      "required": true,
+      "citation": "02 §8",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "polkadot_parachain_primitives::primitives::Id(u32)"
+      }
+    },
+    {
+      "id": "storage.identity.usdc_asset",
+      "kind": "storage",
+      "pallet": "ForeignAssets",
+      "item": "Asset",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §8",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "staging_xcm::v5::location::Location{parents:u8,interior:staging_xcm::v5::junctions::Junctionsenum[Here=0|X1=1([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];1])|X2=2([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];2])|X3=3([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];3])|X4=4([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];4])|X5=5([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];5])|X6=6([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];6])|X7=7([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];7])|X8=8([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];8])]}",
+        "value": "pallet_assets::types::AssetDetails{owner:sp_core::crypto::AccountId32([u8;32]),issuer:sp_core::crypto::AccountId32([u8;32]),admin:sp_core::crypto::AccountId32([u8;32]),freezer:sp_core::crypto::AccountId32([u8;32]),supply:u128,deposit:u128,min_balance:u128,is_sufficient:bool,accounts:u32,sufficients:u32,approvals:u32,status:pallet_assets::types::AssetStatusenum[Live=0|Frozen=1|Destroying=2]}"
+      },
+      "blocked_by": "SQ-101 (B4 follow-up)",
+      "exact_key": "0x30e64a56026f4b5e3c2d196283a9a17dd34371a193a751eea5883e9553457b2e484550ecc01d89e5e7bb33be1915aaef010300a10f043205e514",
+      "expected": {
+        "min_balance": 10000
+      }
+    },
+    {
+      "id": "storage.identity.usdc_metadata",
+      "kind": "storage",
+      "pallet": "ForeignAssets",
+      "item": "Metadata",
+      "query": "prefix",
+      "required": true,
+      "blocked_by": "SQ-101 (B4 follow-up)",
+      "citation": "02 §8",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "staging_xcm::v5::location::Location{parents:u8,interior:staging_xcm::v5::junctions::Junctionsenum[Here=0|X1=1([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];1])|X2=2([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];2])|X3=3([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];3])|X4=4([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];4])|X5=5([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];5])|X6=6([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];6])|X7=7([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];7])|X8=8([staging_xcm::v5::junction::Junctionenum[Parachain=0(Compact<u32>)|AccountId32=1{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],id:[u8;32]}|AccountIndex64=2{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],index:Compact<u64>}|AccountKey20=3{network:Optionenum[None=0|Some=1(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])],key:[u8;20]}|PalletInstance=4(u8)|GeneralIndex=5(Compact<u128>)|GeneralKey=6{length:u8,data:[u8;32]}|OnlyChild=7|Plurality=8{id:xcm::v3::junction::BodyIdenum[Unit=0|Moniker=1([u8;4])|Index=2(Compact<u32>)|Executive=3|Technical=4|Legislative=5|Judicial=6|Defense=7|Administration=8|Treasury=9],part:xcm::v3::junction::BodyPartenum[Voice=0|Members=1{count:Compact<u32>}|Fraction=2{nom:Compact<u32>,denom:Compact<u32>}|AtLeastProportion=3{nom:Compact<u32>,denom:Compact<u32>}|MoreThanProportion=4{nom:Compact<u32>,denom:Compact<u32>}]}|GlobalConsensus=9(staging_xcm::v5::junction::NetworkIdenum[ByGenesis=0([u8;32])|ByFork=1{block_number:u64,block_hash:[u8;32]}|Polkadot=2|Kusama=3|Ethereum=7{chain_id:Compact<u64>}|BitcoinCore=8|BitcoinCash=9|PolkadotBulletin=10])];8])]}",
+        "value": "pallet_assets::types::AssetMetadata{deposit:u128,name:bounded_collections::bounded_vec::BoundedVec(Vec<u8>),symbol:bounded_collections::bounded_vec::BoundedVec(Vec<u8>),decimals:u8,is_frozen:bool}"
+      },
+      "exact_key": "0x30e64a56026f4b5e3c2d196283a9a17db5f3822e35ca2f31ce3526eab1363fd2484550ecc01d89e5e7bb33be1915aaef010300a10f043205e514",
+      "expected": {
+        "decimals": 6
+      }
+    },
+    {
+      "id": "properties.chain_identity",
+      "kind": "properties",
+      "required": true,
+      "citation": "02 §8",
+      "expected": {
+        "ss58Format": 7777,
+        "tokenDecimals": 12,
+        "tokenSymbol": "VIT"
+      }
+    },
+    {
+      "id": "constant.identity.ss58_prefix",
+      "kind": "constant",
+      "pallet": "System",
+      "constant": "SS58Prefix",
+      "required": true,
+      "citation": "02 §8",
+      "layout": {
+        "type": "u16",
+        "value": "0x611e"
+      }
+    },
+    {
+      "id": "constant.identity.vit_existential_deposit",
+      "kind": "constant",
+      "pallet": "Balances",
+      "constant": "ExistentialDeposit",
+      "required": true,
+      "citation": "02 §8",
+      "layout": {
+        "type": "u128",
+        "value": "0x00e40b54020000000000000000000000"
+      }
+    },
+    {
+      "id": "constant.identity.contract_version",
+      "kind": "constant",
+      "pallet": "Constitution",
+      "constant": "INTEGRATION_CONTRACT_VERSION",
+      "required": true,
+      "citation": "02 §8; 02 §13",
+      "layout": {
+        "type": "u32",
+        "value": "0x03000000"
+      }
+    },
+    {
+      "id": "constant.ledger.min_split",
+      "kind": "constant",
+      "pallet": "ConditionalLedger",
+      "constant": "MinSplit",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u128",
+        "value": "0x10270000000000000000000000000000"
+      }
+    },
+    {
+      "id": "constant.ledger.position_deposit",
+      "kind": "constant",
+      "pallet": "ConditionalLedger",
+      "constant": "PositionDeposit",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u128",
+        "value": "0xa0860100000000000000000000000000"
+      }
+    },
+    {
+      "id": "constant.ledger.max_positions_per_account",
+      "kind": "constant",
+      "pallet": "ConditionalLedger",
+      "constant": "MaxPositionsPerAccount",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x40000000"
+      }
+    },
+    {
+      "id": "constant.ledger.min_transfer",
+      "kind": "constant",
+      "pallet": "ConditionalLedger",
+      "constant": "MinTransfer",
+      "required": true,
+      "blocked_by": "B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.market.min_trade",
+      "kind": "constant",
+      "pallet": "Market",
+      "constant": "MinTrade",
+      "required": true,
+      "blocked_by": "B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.market.max_trade_ratio",
+      "kind": "constant",
+      "pallet": "Market",
+      "constant": "MaxTradeRatio",
+      "required": true,
+      "blocked_by": "B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.market.max_live_markets",
+      "kind": "constant",
+      "pallet": "Market",
+      "constant": "MaxLiveMarkets",
+      "required": true,
+      "blocked_by": "B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.epoch.max_intake_queue",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "MaxIntakeQueue",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.epoch.max_live_proposals",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "MaxLiveProposals",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.epoch.recent_cohorts",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "RecentCohortSummariesBound",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.epoch.books_per_proposal",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "MaxBooksPerProposal",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.epoch.phase_offsets",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "PhaseOffsets",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.execution_guard.descriptor_lead_time",
+      "kind": "constant",
+      "pallet": "ExecutionGuard",
+      "constant": "DescriptorLeadTime",
+      "required": true,
+      "blocked_by": "A11 pallet-execution-guard runtime wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.market.gate_p_max",
+      "kind": "constant",
+      "pallet": "Market",
+      "constant": "GatePMax",
+      "required": true,
+      "blocked_by": "B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.market.gate_eps",
+      "kind": "constant",
+      "pallet": "Market",
+      "constant": "GateEps",
+      "required": true,
+      "blocked_by": "B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.epoch.intake_rate_limit",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "MaxIntakePerAccountPerEpoch",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.decision.window_floor",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "DecisionWindowFloor",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.decision.trailing_floor",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "DecisionTrailingFloor",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.decision.extension",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "DecisionExtension",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.decision.delta_floors",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "DecisionDeltaFloors",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.decision.sigma_floors",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "DecisionSigmaFloors",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.decision.coverage_floor",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "DecisionCoverageFloor",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.decision.v_min_floors",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "DecisionVMinFloors",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.execution_guard.timelock_floor",
+      "kind": "constant",
+      "pallet": "ExecutionGuard",
+      "constant": "ExecutionTimelockFloor",
+      "required": true,
+      "blocked_by": "A11 pallet-execution-guard runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.execution_guard.grace_floor",
+      "kind": "constant",
+      "pallet": "ExecutionGuard",
+      "constant": "ExecutionGraceFloor",
+      "required": true,
+      "blocked_by": "A11 pallet-execution-guard runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.epoch.length_floor",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "MinEpochLength",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "constant.epoch.slots_bounds",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "EpochSlotsBounds",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring; B2 metadata constants wiring",
+      "citation": "02 §9"
+    },
+    {
+      "id": "event.ledger.split",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "Split",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.merged",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "Merged",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.scalar_split",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "ScalarSplit",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "branch",
+            "type": "futarchy_primitives::Branchenum[Accept=0|Reject=1]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.scalar_merged",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "ScalarMerged",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "branch",
+            "type": "futarchy_primitives::Branchenum[Accept=0|Reject=1]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.position_transferred",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "PositionTransferred",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "position",
+            "type": "futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.vault_resolved",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "VaultResolved",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "branch",
+            "type": "futarchy_primitives::Branchenum[Accept=0|Reject=1]"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.redeemed",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "Redeemed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.scalar_settlement_set",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "ScalarSettlementSet",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "branch",
+            "type": "futarchy_primitives::Branchenum[Accept=0|Reject=1]"
+          },
+          {
+            "name": "s",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.scalar_redeemed",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "ScalarRedeemed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "side",
+            "type": "futarchy_primitives::ScalarSideenum[Long=0|Short=1]"
+          },
+          {
+            "name": "payout",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.scalar_pair_redeemed",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "ScalarPairRedeemed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.gate_settled",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "GateSettled",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "branch",
+            "type": "futarchy_primitives::Branchenum[Accept=0|Reject=1]"
+          },
+          {
+            "name": "gate",
+            "type": "futarchy_primitives::GateTypeenum[Survival=0|Security=1]"
+          },
+          {
+            "name": "outcome",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.vault_voided",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "VaultVoided",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.void_redeemed",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "VoidRedeemed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "kind",
+            "type": "futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          },
+          {
+            "name": "payout",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.ledger.vault_reaped",
+      "kind": "event",
+      "pallet": "ConditionalLedger",
+      "event": "VaultReaped",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "residue",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.market.traded",
+      "kind": "event",
+      "pallet": "Market",
+      "event": "Traded",
+      "required": true,
+      "citation": "02 §5; 02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "market",
+            "type": "u64"
+          },
+          {
+            "name": "who",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "side",
+            "type": "futarchy_primitives::TradeSideenum[BuyLong=0|BuyShort=1|SellLong=2|SellShort=3]"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          },
+          {
+            "name": "cost",
+            "type": "u128"
+          },
+          {
+            "name": "p_after",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.market.observed",
+      "kind": "event",
+      "pallet": "Market",
+      "event": "Observed",
+      "required": true,
+      "citation": "02 §5; 02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "market",
+            "type": "u64"
+          },
+          {
+            "name": "o_t",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.market.created",
+      "kind": "event",
+      "pallet": "Market",
+      "event": "MarketCreated",
+      "required": true,
+      "citation": "02 §5; 02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "market",
+            "type": "u64"
+          },
+          {
+            "name": "kind",
+            "type": "futarchy_primitives::MarketKindenum[DecisionAccept=0|DecisionReject=1|GateS_Adopt=2|GateS_Reject=3|GateC_Adopt=4|GateC_Reject=5|Baseline=6]"
+          },
+          {
+            "name": "pid",
+            "type": "Optionenum[None=0|Some=1(u64)]"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "b",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.market.closed",
+      "kind": "event",
+      "pallet": "Market",
+      "event": "MarketClosed",
+      "required": true,
+      "citation": "02 §5; 02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "market",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.market.reaped",
+      "kind": "event",
+      "pallet": "Market",
+      "event": "MarketReaped",
+      "required": true,
+      "citation": "02 §5; 02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "market",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.epoch.proposal_submitted",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "ProposalSubmitted",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.proposal_withdrawn",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "ProposalWithdrawn",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.screening_started",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "ScreeningStarted",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.proposal_cancelled",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "ProposalCancelled",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.proposal_qualified",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "ProposalQualified",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.proposal_deferred",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "ProposalDeferred",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.markets_opened",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "MarketsOpened",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.decision_extended",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "DecisionExtended",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.proposal_queued",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "ProposalQueued",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.proposal_rejected",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "ProposalRejected",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.proposal_delayed",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "ProposalDelayed",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.rerun_scheduled",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "RerunScheduled",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.rerun_opened",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "RerunOpened",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.mandate_expired",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "MandateExpired",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.measurement_started",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "MeasurementStarted",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.cohort_settled",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "CohortSettled",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.proposal_force_rejected",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "ProposalForceRejected",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.epoch.intake_slashed",
+      "kind": "event",
+      "pallet": "Epoch",
+      "event": "IntakeSlashed",
+      "required": true,
+      "blocked_by": "A8 pallet-epoch runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.execution_guard.executed",
+      "kind": "event",
+      "pallet": "ExecutionGuard",
+      "event": "Executed",
+      "required": true,
+      "blocked_by": "A11 pallet-execution-guard runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.execution_guard.execution_failed",
+      "kind": "event",
+      "pallet": "ExecutionGuard",
+      "event": "ExecutionFailed",
+      "required": true,
+      "blocked_by": "A11 pallet-execution-guard runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.execution_guard.ratified",
+      "kind": "event",
+      "pallet": "ExecutionGuard",
+      "event": "Ratified",
+      "required": true,
+      "blocked_by": "A11 pallet-execution-guard runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.execution_guard.upgrade_authorized",
+      "kind": "event",
+      "pallet": "ExecutionGuard",
+      "event": "UpgradeAuthorized",
+      "required": true,
+      "blocked_by": "A11 pallet-execution-guard runtime wiring",
+      "citation": "02 §6"
+    },
+    {
+      "id": "event.oracle.reporter_registered",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "ReporterRegistered",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "who",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "stake",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.reported",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "Reported",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "component",
+            "type": "u16"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "round",
+            "type": "u8"
+          },
+          {
+            "name": "reporter",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "value",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          },
+          {
+            "name": "evidence_hash",
+            "type": "[u8;32]"
+          },
+          {
+            "name": "bond",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.challenged",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "Challenged",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "component",
+            "type": "u16"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "round",
+            "type": "u8"
+          },
+          {
+            "name": "challenger",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "counter_value",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          },
+          {
+            "name": "evidence_hash",
+            "type": "[u8;32]"
+          },
+          {
+            "name": "bond",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.round_escalated",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "RoundEscalated",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "component",
+            "type": "u16"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "round",
+            "type": "u8"
+          },
+          {
+            "name": "new_bond",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.recompute_proven",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "RecomputeProven",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "component",
+            "type": "u16"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "value",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          },
+          {
+            "name": "prover",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.adjudication_requested",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "AdjudicationRequested",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "component",
+            "type": "u16"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "referendum",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.adjudicated",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "Adjudicated",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "component",
+            "type": "u16"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "value",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.component_settled",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "ComponentSettled",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "component",
+            "type": "u16"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "value",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          },
+          {
+            "name": "path",
+            "type": "oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|Neutral=3]"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.neutral_settlement",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "NeutralSettlement",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "component",
+            "type": "u16"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "carried_value",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          },
+          {
+            "name": "flagged_epochs",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.window_acknowledged",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "WindowAcknowledged",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "component",
+            "type": "u16"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "round",
+            "type": "u8"
+          },
+          {
+            "name": "watchtower",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.window_extended",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "WindowExtended",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "component",
+            "type": "u16"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "round",
+            "type": "u8"
+          },
+          {
+            "name": "new_deadline",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.quorum_failed",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "QuorumFailed",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "component",
+            "type": "u16"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "round",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.reporter_slashed",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "ReporterSlashed",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "who",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          },
+          {
+            "name": "offense",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.reporter_ejected",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "ReporterEjected",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "who",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.watchtower_registered",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "WatchtowerRegistered",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "who",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "stake",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.watchtower_inactive",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "WatchtowerInactive",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "who",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.watchtower_slashed",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "WatchtowerSlashed",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "who",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.reserve_probe_sent",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "ReserveProbeSent",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "query_id",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.reserve_probe_result",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "ReserveProbeResult",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": [
+          {
+            "name": "query_id",
+            "type": "u64"
+          },
+          {
+            "name": "passed",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.oracle.reserve_unhealthy",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "ReserveUnhealthy",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": []
+      }
+    },
+    {
+      "id": "event.oracle.reserve_recovered",
+      "kind": "event",
+      "pallet": "Oracle",
+      "event": "ReserveRecovered",
+      "required": true,
+      "citation": "02 §6; 02 §7.2",
+      "layout": {
+        "fields": []
+      }
+    },
+    {
+      "id": "event.registry.incident_filed",
+      "kind": "event",
+      "pallet": "IncidentRegistry",
+      "event": "IncidentFiled",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "filing_id",
+            "type": "u32"
+          },
+          {
+            "name": "who",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "class",
+            "type": "registry_core::FilingClassenum[S1=0|S2=1|S3=2|Scope=3(u8)]"
+          },
+          {
+            "name": "evidence_hash",
+            "type": "[u8;32]"
+          },
+          {
+            "name": "bond",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.registry.milestone_filed",
+      "kind": "event",
+      "pallet": "MilestoneRegistry",
+      "event": "MilestoneFiled",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "filing_id",
+            "type": "u32"
+          },
+          {
+            "name": "who",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "class",
+            "type": "registry_core::FilingClassenum[S1=0|S2=1|S3=2|Scope=3(u8)]"
+          },
+          {
+            "name": "points",
+            "type": "u16"
+          },
+          {
+            "name": "evidence_hash",
+            "type": "[u8;32]"
+          },
+          {
+            "name": "bond",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.registry.incident_challenged",
+      "kind": "event",
+      "pallet": "IncidentRegistry",
+      "event": "IncidentChallenged",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "filing_id",
+            "type": "u32"
+          },
+          {
+            "name": "challenger",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "evidence_hash",
+            "type": "[u8;32]"
+          },
+          {
+            "name": "bond",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.registry.milestone_challenged",
+      "kind": "event",
+      "pallet": "MilestoneRegistry",
+      "event": "MilestoneChallenged",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "filing_id",
+            "type": "u32"
+          },
+          {
+            "name": "challenger",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "evidence_hash",
+            "type": "[u8;32]"
+          },
+          {
+            "name": "bond",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.registry.incident_upheld",
+      "kind": "event",
+      "pallet": "IncidentRegistry",
+      "event": "IncidentUpheld",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "filing_id",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.registry.incident_rejected",
+      "kind": "event",
+      "pallet": "IncidentRegistry",
+      "event": "IncidentRejected",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "filing_id",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.registry.milestone_accepted",
+      "kind": "event",
+      "pallet": "MilestoneRegistry",
+      "event": "MilestoneAccepted",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "filing_id",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.registry.milestone_rejected",
+      "kind": "event",
+      "pallet": "MilestoneRegistry",
+      "event": "MilestoneRejected",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "filing_id",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.registry.filing_bond_slashed.incident",
+      "kind": "event",
+      "pallet": "IncidentRegistry",
+      "event": "FilingBondSlashed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "filing_id",
+            "type": "u32"
+          },
+          {
+            "name": "loser",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          },
+          {
+            "name": "challenger_share",
+            "type": "u128"
+          },
+          {
+            "name": "insurance_share",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.registry.filing_bond_slashed.milestone",
+      "kind": "event",
+      "pallet": "MilestoneRegistry",
+      "event": "FilingBondSlashed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "filing_id",
+            "type": "u32"
+          },
+          {
+            "name": "loser",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "amount",
+            "type": "u128"
+          },
+          {
+            "name": "challenger_share",
+            "type": "u128"
+          },
+          {
+            "name": "insurance_share",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.registry.epoch_closed.incident",
+      "kind": "event",
+      "pallet": "IncidentRegistry",
+      "event": "RegistryEpochClosed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "kind",
+            "type": "registry_core::RegistryKindenum[Incident=0|Milestone=1]"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "aggregate",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.registry.epoch_closed.milestone",
+      "kind": "event",
+      "pallet": "MilestoneRegistry",
+      "event": "RegistryEpochClosed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "kind",
+            "type": "registry_core::RegistryKindenum[Incident=0|Milestone=1]"
+          },
+          {
+            "name": "epoch",
+            "type": "u32"
+          },
+          {
+            "name": "aggregate",
+            "type": "futarchy_primitives::FixedU64(u64)"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.guardian.action",
+      "kind": "event",
+      "pallet": "Guardian",
+      "event": "GuardianAction",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "action_id",
+            "type": "u32"
+          },
+          {
+            "name": "power",
+            "type": "guardian_core::GuardianPowerenum[PauseIntake=0{until:u32}|DelayOnce=1{pid:u64}|ForceRerun=2{pid:u64}|ActivatePlaybook=3{id:guardian_core::PlaybookIdenum[Depeg=0|Migration=1|OracleVoid=2|HaltIntake=3|Reserve=4|LedgerFreeze=5],trigger:guardian_core::PlaybookTriggerenum[DepegMedian=0|MigrationHalt=1|OracleDeadlock=2|GateBreach=3|DeadMan=4|VoidInFlight=5|ReserveHealth=6|LedgerDrift=7],expiry:u32}|SuspendOnGate=4]"
+          },
+          {
+            "name": "target",
+            "type": "guardian_core::ActionTarget{pid:Optionenum[None=0|Some=1(u64)],playbook:Optionenum[None=0|Some=1(guardian_core::PlaybookIdenum[Depeg=0|Migration=1|OracleVoid=2|HaltIntake=3|Reserve=4|LedgerFreeze=5])]}"
+          },
+          {
+            "name": "justification_hash",
+            "type": "[u8;32]"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.guardian.force_rerun",
+      "kind": "event",
+      "pallet": "Guardian",
+      "event": "ForceRerun",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "justification_hash",
+            "type": "[u8;32]"
+          },
+          {
+            "name": "window_end",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.guardian.playbook_activated",
+      "kind": "event",
+      "pallet": "Guardian",
+      "event": "PlaybookActivated",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "id",
+            "type": "guardian_core::PlaybookIdenum[Depeg=0|Migration=1|OracleVoid=2|HaltIntake=3|Reserve=4|LedgerFreeze=5]"
+          },
+          {
+            "name": "trigger",
+            "type": "guardian_core::PlaybookTriggerenum[DepegMedian=0|MigrationHalt=1|OracleDeadlock=2|GateBreach=3|DeadMan=4|VoidInFlight=5|ReserveHealth=6|LedgerDrift=7]"
+          },
+          {
+            "name": "expiry",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.guardian.playbook_renewed",
+      "kind": "event",
+      "pallet": "Guardian",
+      "event": "PlaybookRenewed",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "id",
+            "type": "guardian_core::PlaybookIdenum[Depeg=0|Migration=1|OracleVoid=2|HaltIntake=3|Reserve=4|LedgerFreeze=5]"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.guardian.playbook_expired",
+      "kind": "event",
+      "pallet": "Guardian",
+      "event": "PlaybookExpired",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "id",
+            "type": "guardian_core::PlaybookIdenum[Depeg=0|Migration=1|OracleVoid=2|HaltIntake=3|Reserve=4|LedgerFreeze=5]"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.guardian.review_scheduled",
+      "kind": "event",
+      "pallet": "Guardian",
+      "event": "ReviewScheduled",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "action",
+            "type": "u32"
+          },
+          {
+            "name": "referendum",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.system.code_updated",
+      "kind": "event",
+      "pallet": "System",
+      "event": "CodeUpdated",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": []
+      }
+    },
+    {
+      "id": "event.system.upgrade_authorized",
+      "kind": "event",
+      "pallet": "System",
+      "event": "UpgradeAuthorized",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "code_hash",
+            "type": "primitive_types::H256([u8;32])"
+          },
+          {
+            "name": "check_version",
+            "type": "bool"
+          }
+        ]
+      }
+    }
+  ]
+}

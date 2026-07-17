@@ -21,6 +21,16 @@ jobs:
       - name: Rust workspace, runtime wasm, and try-runtime gates
         run: tools/ci/rust-workspace-gates.sh
 
+  supply-chain:
+    name: Supply chain
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Check lockfiles and RustSec advisories
+        run: tools/ci/supply-chain-gates.sh
+
   reference-model:
     name: Reference model
     runs-on: ubuntu-latest
@@ -31,8 +41,15 @@ jobs:
           python-version: '3.12'
       - name: Run reference model tests
         run: PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
-      - name: Run deploy validator tests
-        run: python3 -m unittest discover -s tools/deploy/tests
+      - name: Run tooling tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests; do
+            if [[ -d "$suite" ]]; then
+              python3 -m unittest discover -s "$suite"
+            fi
+          done
       - name: Check generated vector corpus
         run: python3 tools/reference-model/generate-vectors.py --check
       - name: Check normative LMSR documentation table

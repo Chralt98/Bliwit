@@ -1,0 +1,49 @@
+[advisories]
+ignore = [
+    # hickory-proto 0.24.4/0.25.2: pinned by stable2603 libp2p-dns/libp2p-mdns and litep2p; the fix is >=0.26.1, not lockfile-compatible. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0119",
+    # hickory-proto 0.25.2: pinned by stable2603 litep2p 0.13.3; upstream lists no patched 0.25 release. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0118",
+    # ring 0.16.20: pinned through stable2603 libp2p's rcgen 0.11.3; the fix is >=0.17.12, not lockfile-compatible. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2025-0009",
+    # rustls-webpki 0.101.7: pinned by stable2603 libp2p-tls 0.5.0; the fix is >=0.103.12, not lockfile-compatible. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0098",
+    # rustls-webpki 0.101.7: pinned by stable2603 libp2p-tls 0.5.0; the fix is >=0.103.12, not lockfile-compatible. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0099",
+    # rustls-webpki 0.101.7: pinned by stable2603 libp2p-tls 0.5.0; the fix is >=0.103.13, not lockfile-compatible. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0104",
+    # tracing-subscriber 0.3.19: stable2603 sc-tracing 45.0.0 requires exactly =0.3.19, so Cargo rejects the >=0.3.20 fix as a lockfile-only update. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2025-0055",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2025-0118",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; the affected range excludes <29 but no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0006",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0020",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0021",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0085",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0086",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0087",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0088",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0089",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0091",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0092",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0093",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0094",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0095",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0096",
+    # wasmtime 35.0.0: pinned by stable2603 sc-executor-wasmtime 0.44.0; no patched 35.x exists. Remove at the next stable2603 maintenance bump.
+    "RUSTSEC-2026-0114",
+]

@@ -7,7 +7,8 @@ if [[ -z "${LIBCLANG_PATH:-}" ]] && command -v llvm-config >/dev/null 2>&1; then
   export LIBCLANG_PATH="$(llvm-config --libdir)"
 fi
 
-# cargo-audit is deliberately routed to milestone B8; this gate still enforces the lockfile.
+# Networked RustSec checks run in supply-chain-gates.sh; this offline-friendly
+# workspace gate still enforces the committed lockfile on every cargo command.
 member_count=$(cargo metadata --locked --no-deps --format-version=1 | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["workspace_members"]))')
 
 if [[ "$member_count" == "0" ]]; then

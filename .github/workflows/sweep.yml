@@ -1,0 +1,41 @@
+name: Fixed-point full differential sweep
+
+on:
+  pull_request:
+    paths:
+      - 'crates/futarchy-fixed/**'
+      - 'crates/futarchy-primitives/**'
+      - 'reference-model/src/**'
+      - 'tools/reference-model/generate-vectors.py'
+      - '.github/workflows/sweep.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'crates/futarchy-fixed/**'
+      - 'crates/futarchy-primitives/**'
+      - 'reference-model/src/**'
+      - 'tools/reference-model/generate-vectors.py'
+      - '.github/workflows/sweep.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  full-sweep:
+    name: Full 10M-point exp/ln/cost sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Generate the full deterministic reference sweep
+        run: python3 tools/reference-model/generate-vectors.py --sweep-out release-work/sweep
+      - name: Check every shard through futarchy-fixed
+        env:
+          BLEAVIT_SWEEP_DIR: release-work/sweep
+          BLEAVIT_SWEEP_REQUIRE_FULL: '1'
+        run: cargo test -p futarchy-fixed --release --locked --test sweep -- --ignored --nocapture
