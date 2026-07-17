@@ -8295,6 +8295,47 @@ fn view_execution_queue_reuses_guard_projection_and_fails_closed() {
 }
 
 #[test]
+fn unavailable_prize_keeps_the_base_contest_floor_and_never_slashes_the_proposer() {
+    // Codex PR #100 P1 regression. B2 unified the grade adapter and the
+    // `decision_stats` view onto one contest-floor helper, but made it void the
+    // floor when `in_cap_prize` is unavailable. SQ-173 leaves the prize
+    // unbacked for EVERY non-TREASURY class, so every PARAM/CODE/META proposal
+    // would have graded non-decision-grade, extended once, then landed on
+    // `Reject(NotDecisionGrade)` — slashing 10% of the proposer's intake bond
+    // for an input the chain, not the proposer, is missing.
+    //
+    // A missing prize is a security-sizing input gap: `decide` already fails it
+    // at the sizing step (`in_cap_prize.ok_or(BadDecisionInput)`), an error that
+    // leaves the proposal in place and retryable. Grading must stay meaningful
+    // and keep the base `dec.v_min` floor (05 §5.2; 08 §5.3).
+    development_ext().execute_with(|| {
+        let params =
+            <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+        let proposal = empty_param_proposal(9_310, account(31), H256::repeat_byte(9), 1);
+
+        // Precondition: this is exactly the SQ-173 state the bug tripped on.
+        assert_eq!(
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::in_cap_prize(&proposal),
+            None,
+            "SQ-173: a PARAM prize proxy is unbacked — the premise of this regression",
+        );
+
+        let param_index = crate::configs::proposal_class_index(ProposalClass::Param);
+        assert_eq!(
+            crate::configs::effective_decision_contest_floor(&proposal, &params),
+            params.v_min[param_index],
+            "an unbacked prize must keep the base dec.v_min floor, not void the grade",
+        );
+        assert_ne!(
+            params.v_min[param_index], 0,
+            "the base floor must remain a real, enforceable contest requirement",
+        );
+    });
+}
+
+#[test]
 fn view_welfare_current_returns_latest_finalized_breached_snapshot() {
     use futarchy_primitives::FixedU64;
     use pallet_welfare::{MetricSpec, Pillar, SourceClass};

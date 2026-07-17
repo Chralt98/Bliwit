@@ -1456,19 +1456,34 @@ pub(crate) fn proposal_class_index(class: futarchy_primitives::ProposalClass) ->
 }
 
 /// Exact Ask-scaled contest floor enforced per decision book (05 §5.2; 08
-/// §5.3; 13 `dec.v_min`). Returning `None` is fail-closed for an unavailable
-/// prize proxy or checked `2P` overflow; both the grade adapter and
-/// `FutarchyApi::decision_stats` call this helper.
+/// §5.3; 13 `dec.v_min`): `max(dec.v_min(class), 2P)`. Both the grade adapter
+/// and `FutarchyApi::decision_stats` call this helper, so the view can never
+/// report a floor the grade does not enforce.
+///
+/// An **unavailable** prize proxy (SQ-173 leaves `in_cap_prize` unbacked for
+/// every non-TREASURY class) keeps the base `dec.v_min` floor rather than
+/// voiding the grade. The distinction is economic, not cosmetic: a missing
+/// prize is a security-sizing *input* gap, not evidence that the book lacked
+/// coverage or contest depth, and `decide` already fails such a proposal at
+/// the sizing step (`in_cap_prize.ok_or(BadDecisionInput)`) — an error that
+/// leaves the proposal in place, retryable once the prize is backed. Voiding
+/// the grade instead would reach `Reject(NotDecisionGrade)` first and slash
+/// 10% of the proposer's intake bond (06 §4; 08 §7) for an input the chain,
+/// not the proposer, is missing.
+///
+/// The `2P` doubling saturates: it can only raise the floor, never wrap it
+/// down into a permissive value.
 pub(crate) fn effective_decision_contest_floor(
     proposal: &futarchy_primitives::Proposal<AccountId>,
     params: &pallet_epoch::CoreEpochParams,
-) -> Option<Balance> {
+) -> Balance {
     let base = params.v_min[proposal_class_index(proposal.class)];
-    <RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<AccountId>>::in_cap_prize(
+    match <RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<AccountId>>::in_cap_prize(
         proposal,
-    )
-    .and_then(|prize| prize.checked_mul(2))
-    .map(|scaled| base.max(scaled))
+    ) {
+        Some(prize) => base.max(prize.saturating_mul(2)),
+        None => base,
+    }
 }
 
 fn contest_floor_for_grade(
@@ -1485,7 +1500,7 @@ fn contest_floor_for_grade(
                 .then_some(())
                 .and_then(|()| pallet_epoch::Proposals::<Runtime>::get(proposal))
                 .filter(|proposal| proposal.class == class && proposal.decide_at == end)
-                .and_then(|proposal| effective_decision_contest_floor(&proposal, params))
+                .map(|proposal| effective_decision_contest_floor(&proposal, params))
         }
         pallet_market::core_market::BookKind::Gate { proposal, .. } => {
             matches!(role, pallet_epoch::BookRole::Gate)
@@ -1508,7 +1523,7 @@ fn contest_floor_for_grade(
                             .markets
                             .is_some_and(|markets| markets.baseline == market)
                 })
-                .filter_map(|proposal| effective_decision_contest_floor(&proposal, params))
+                .map(|proposal| effective_decision_contest_floor(&proposal, params))
                 .max()
         }
     }
