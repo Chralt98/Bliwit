@@ -1,0 +1,11 @@
+# Intentional weight-regression acknowledgements.
+#
+# Format (one function/removal per line):
+# <repo-relative-weight-path> <function>: <non-empty justification>
+# <repo-relative-weight-path> *: <non-empty whole-file-removal justification>
+#
+# Example (keep commented unless the regression is intentional):
+# runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
+# runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
+#
+# Empty state: this file contains comments only.

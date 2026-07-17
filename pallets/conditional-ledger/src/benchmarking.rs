@@ -7,12 +7,22 @@ use frame_benchmarking::v2::*;
 use frame_support::traits::{fungibles::Mutate, EnsureOrigin, Get};
 use frame_system::RawOrigin;
 use futarchy_primitives::{Balance, Branch, FixedU64, GateType, ProposalId, ScalarSide};
+use sp_runtime::traits::AccountIdConversion;
 
 const UNIT: Balance = 1_000_000;
 const SEED_AMT: Balance = 1_000 * UNIT;
 
 fn fund<T: Config>(who: &T::AccountId, amount: Balance) {
     let _ = <T::Collateral as Mutate<T::AccountId>>::mint_into(T::UsdcAssetId::get(), who, amount);
+}
+
+fn fund_sovereign_reserve<T: Config>() {
+    // Custody payouts use `Preservation::Preserve`: the protocol sovereign must
+    // remain an asset account after paying the measured claimant. Production
+    // custody naturally carries unrelated vault escrow; this isolated fixture
+    // supplies the same keep-alive reserve without changing ledger accounting.
+    let sovereign = T::PalletId::get().into_account_truncating();
+    fund::<T>(&sovereign, SEED_AMT);
 }
 
 fn market_origin<T: Config>() -> T::RuntimeOrigin {
@@ -30,6 +40,7 @@ fn seeded_vault<T: Config>(pid: ProposalId, caller: &T::AccountId) {
     Pallet::<T>::create_vault(market_origin::<T>(), pid, 0).expect("create vault");
     fund::<T>(caller, SEED_AMT.saturating_mul(4));
     Pallet::<T>::split(RawOrigin::Signed(caller.clone()).into(), pid, SEED_AMT).expect("split");
+    fund_sovereign_reserve::<T>();
 }
 
 fn seeded_baseline<T: Config>(epoch: futarchy_primitives::EpochId, caller: &T::AccountId) {
@@ -37,6 +48,31 @@ fn seeded_baseline<T: Config>(epoch: futarchy_primitives::EpochId, caller: &T::A
     fund::<T>(caller, SEED_AMT.saturating_mul(4));
     Pallet::<T>::split_baseline(RawOrigin::Signed(caller.clone()).into(), epoch, SEED_AMT)
         .expect("split baseline");
+    fund_sovereign_reserve::<T>();
+}
+
+fn seeded_vault_reap_batch<T: Config>(pid: ProposalId) {
+    Pallet::<T>::create_vault(market_origin::<T>(), pid, 0).expect("create vault");
+    // Each split creates two position entries. Fifty distinct owners therefore
+    // put exactly the 13 §4 `ledger.reap_batch = 100` entries on the prefixes
+    // this measured sweep walks, while remaining below the per-account cap.
+    for index in 0..(T::ReapBatch::get() / 2) {
+        let who: T::AccountId = account("dust", index, 0);
+        fund::<T>(&who, SEED_AMT.saturating_mul(2));
+        Pallet::<T>::split(RawOrigin::Signed(who).into(), pid, SEED_AMT).expect("split");
+    }
+    fund_sovereign_reserve::<T>();
+}
+
+fn seeded_baseline_reap_batch<T: Config>(epoch: futarchy_primitives::EpochId) {
+    Pallet::<T>::create_baseline_vault(market_origin::<T>(), epoch).expect("create baseline");
+    for index in 0..(T::ReapBatch::get() / 2) {
+        let who: T::AccountId = account("base-dust", index, 0);
+        fund::<T>(&who, SEED_AMT.saturating_mul(2));
+        Pallet::<T>::split_baseline(RawOrigin::Signed(who).into(), epoch, SEED_AMT)
+            .expect("split baseline");
+    }
+    fund_sovereign_reserve::<T>();
 }
 
 #[benchmarks]
@@ -340,7 +376,7 @@ mod benchmarks {
     #[benchmark]
     fn sweep_dust() {
         let caller: T::AccountId = whitelisted_caller();
-        seeded_vault::<T>(1, &caller);
+        seeded_vault_reap_batch::<T>(1);
         Pallet::<T>::void(resolve_origin::<T>(), 1).unwrap();
         // Force reap-eligibility by back-dating the terminal block.
         VaultTerminalAt::<T>::insert(
@@ -348,22 +384,30 @@ mod benchmarks {
             frame_system::pallet_prelude::BlockNumberFor::<T>::from(0u32),
         );
         frame_system::Pallet::<T>::set_block_number(T::ArchiveDelay::get() + 10u32.into());
+        T::BenchmarkHelper::prime_keeper_rebate();
         #[extrinsic_call]
         _(RawOrigin::Signed(caller.clone()), 1);
+        T::BenchmarkHelper::assert_keeper_rebate_paid(
+            futarchy_primitives::keeper::CrankClass::General,
+        );
     }
 
     #[benchmark]
     fn sweep_dust_baseline() {
         let caller: T::AccountId = whitelisted_caller();
-        seeded_baseline::<T>(7, &caller);
+        seeded_baseline_reap_batch::<T>(7);
         Pallet::<T>::settle_baseline(settle_origin::<T>(), 7, FixedU64(500_000_000)).unwrap();
         BaselineTerminalAt::<T>::insert(
             7,
             frame_system::pallet_prelude::BlockNumberFor::<T>::from(0u32),
         );
         frame_system::Pallet::<T>::set_block_number(T::ArchiveDelay::get() + 10u32.into());
+        T::BenchmarkHelper::prime_keeper_rebate();
         #[extrinsic_call]
         _(RawOrigin::Signed(caller.clone()), 7);
+        T::BenchmarkHelper::assert_keeper_rebate_paid(
+            futarchy_primitives::keeper::CrankClass::General,
+        );
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);

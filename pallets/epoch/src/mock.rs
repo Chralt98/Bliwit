@@ -276,6 +276,9 @@ parameter_types! {
     pub static ActiveMetricSpecVersion: MetricSpecVersion = 1;
     pub static TreasuryGateRequired: bool = false;
     pub static PreimageLen: Option<u32> = Some(32);
+    pub static PreimageNoted: bool = true;
+    pub static PreimageRequests: Vec<(H256, u32)> = Vec::new();
+    pub static PreimageRequestFails: bool = false;
     pub static QueueReject: Option<RejectReason> = None;
     pub static RetryExhausted: bool = false;
     pub static WelfareScore: FixedU64 = FixedU64(500_000_000);
@@ -439,8 +442,40 @@ impl ConstitutionAccess<AccountId32> for TestConstitution {
 
 pub struct TestPreimage;
 impl PreimageAccess for TestPreimage {
-    fn len(_hash: H256) -> Option<u32> {
-        PreimageLen::get()
+    fn len(hash: H256) -> Option<u32> {
+        (PreimageNoted::get()
+            || PreimageRequests::get()
+                .iter()
+                .any(|(candidate, count)| *candidate == hash && *count > 0))
+        .then(PreimageLen::get)
+        .flatten()
+    }
+    fn request(hash: H256) -> frame_support::dispatch::DispatchResult {
+        if PreimageRequestFails::get() || Self::len(hash).is_none() {
+            return Err(DispatchError::Other("mock preimage request failed"));
+        }
+        PreimageRequests::mutate(|requests| {
+            if let Some((_, count)) = requests
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == hash)
+            {
+                *count = count.saturating_add(1);
+            } else {
+                requests.push((hash, 1));
+            }
+        });
+        Ok(())
+    }
+    fn unrequest(hash: H256) {
+        PreimageRequests::mutate(|requests| {
+            if let Some((_, count)) = requests
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == hash)
+            {
+                *count = count.saturating_sub(1);
+            }
+            requests.retain(|(_, count)| *count > 0);
+        });
     }
 }
 
@@ -561,6 +596,7 @@ pub struct TestBenchmarkHelper;
 
 #[cfg(feature = "runtime-benchmarks")]
 impl BenchmarkHelper<RuntimeOrigin, AccountId32> for TestBenchmarkHelper {
+    fn prime_submit_epoch(_: EpochId) {}
     fn constitutional_values_origin() -> RuntimeOrigin {
         RuntimeOrigin::signed(constitutional_values())
     }
@@ -582,7 +618,13 @@ impl BenchmarkHelper<RuntimeOrigin, AccountId32> for TestBenchmarkHelper {
         now: BlockNumber,
         epoch: EpochId,
     ) -> Proposal<AccountId32> {
-        proposal(id, who, ProposalState::Submitted, epoch, now)
+        let mut proposal = proposal(id, who, ProposalState::Submitted, epoch, now);
+        // The assembled benchmark helper notes the matching distinct 64 KiB
+        // preimages. Keep the generic mock benchmark at the same committed
+        // length and distinct-per-id hash shape.
+        proposal.payload_len = futarchy_primitives::kernel::MAX_BYTES;
+        PreimageLen::set(Some(futarchy_primitives::kernel::MAX_BYTES));
+        proposal
     }
     fn prime_decision(pid: ProposalId, epoch: EpochId, gates: bool) -> MarketSet {
         MarketGrade::set(true);
@@ -590,6 +632,7 @@ impl BenchmarkHelper<RuntimeOrigin, AccountId32> for TestBenchmarkHelper {
         AttestationQuorate::set(true);
         markets(pid, epoch, gates)
     }
+    fn prime_guard_enqueue(_pid: ProposalId) {}
     fn prime_settlement(_epoch: EpochId) {
         WelfareScore::set(FixedU64(500_000_000));
     }
@@ -621,6 +664,9 @@ pub fn reset_doubles() {
     ActiveMetricSpecVersion::set(1);
     TreasuryGateRequired::set(false);
     PreimageLen::set(Some(32));
+    PreimageNoted::set(true);
+    PreimageRequests::set(Vec::new());
+    PreimageRequestFails::set(false);
     QueueReject::set(None);
     RetryExhausted::set(false);
     WelfareScore::set(FixedU64(500_000_000));
@@ -652,6 +698,23 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
 
 pub fn set_block(block: BlockNumber) {
     System::set_block_number(block.into());
+}
+
+pub fn preimage_request_count(hash: H256) -> u32 {
+    PreimageRequests::get()
+        .into_iter()
+        .find_map(|(candidate, count)| (candidate == hash).then_some(count))
+        .unwrap_or(0)
+}
+
+/// Model `pallet_preimage::unnote_preimage`: a noted payload cannot be
+/// removed while any consumer owns a request reference.
+pub fn try_unnote_preimage(hash: H256) -> bool {
+    if preimage_request_count(hash) > 0 {
+        return false;
+    }
+    PreimageNoted::set(false);
+    true
 }
 
 pub fn last_epoch_event() -> Option<Event<Test>> {

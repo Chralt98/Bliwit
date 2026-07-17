@@ -206,16 +206,68 @@ impl_runtime_apis! {
 
     #[cfg(feature = "runtime-benchmarks")]
     impl frame_benchmarking::Benchmark<Block> for Runtime {
-        fn benchmark_metadata(_: bool) -> (
+        fn benchmark_metadata(extra: bool) -> (
             Vec<frame_benchmarking::BenchmarkList>,
             Vec<frame_support::traits::StorageInfo>,
         ) {
-            (Vec::new(), crate::AllPalletsWithSystem::storage_info())
+            // The `list_benchmarks!` expansion references every construct_runtime
+            // pallet alias, so the crate namespace is imported wholesale here.
+            #[allow(clippy::wildcard_imports)]
+            use crate::*;
+            use cumulus_pallet_session_benchmarking::Pallet as SessionBench;
+            use frame_benchmarking::BenchmarkList;
+            use frame_system_benchmarking::Pallet as SystemBench;
+
+            let mut list = Vec::<BenchmarkList>::new();
+            list_benchmarks!(list, extra);
+            (list, crate::AllPalletsWithSystem::storage_info())
         }
+
         fn dispatch_benchmark(
-            _: frame_benchmarking::BenchmarkConfig,
+            config: frame_benchmarking::BenchmarkConfig,
         ) -> Result<Vec<frame_benchmarking::BenchmarkBatch>, String> {
-            Err(String::from("B5 owns executable runtime benchmarks"))
+            // Same rationale as `benchmark_metadata`: the `add_benchmarks!`
+            // expansion references every construct_runtime pallet alias.
+            #[allow(clippy::wildcard_imports)]
+            use crate::*;
+            use cumulus_pallet_session_benchmarking::Pallet as SessionBench;
+            use frame_benchmarking::{BenchmarkBatch, BenchmarkError};
+            use frame_support::traits::{TrackedStorageKey, WhitelistedStorageKeys};
+            use frame_system_benchmarking::Pallet as SystemBench;
+
+            impl frame_system_benchmarking::Config for Runtime {
+                fn setup_set_code_requirements(
+                    code: &Vec<u8>,
+                ) -> Result<(), BenchmarkError> {
+                    ParachainSystem::initialize_for_set_code_benchmark(code.len() as u32);
+                    Ok(())
+                }
+                fn verify_set_code() {
+                    System::assert_last_event(
+                        cumulus_pallet_parachain_system::Event::<Runtime>::ValidationFunctionStored
+                            .into(),
+                    );
+                }
+            }
+            impl cumulus_pallet_session_benchmarking::Config for Runtime {
+                fn generate_session_keys_and_proof(
+                    owner: Self::AccountId,
+                ) -> (Self::Keys, Vec<u8>) {
+                    use parity_scale_codec::Encode;
+                    let keys = SessionKeys::generate(&owner.encode(), None);
+                    (keys.keys, keys.proof.encode())
+                }
+            }
+
+            let whitelist: Vec<TrackedStorageKey> =
+                crate::AllPalletsWithSystem::whitelisted_storage_keys();
+            let mut batches = Vec::<BenchmarkBatch>::new();
+            let params = (&config, &whitelist);
+            add_benchmarks!(params, batches);
+            if batches.is_empty() {
+                return Err(String::from("benchmark not found for this pallet"));
+            }
+            Ok(batches)
         }
     }
 }

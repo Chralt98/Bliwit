@@ -132,6 +132,9 @@ impl pallet_guardian::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
             ledger_drift: true,
         });
     }
+    fn prime_maintenance_epoch(epoch: futarchy_primitives::EpochId) {
+        CurrentEpochValue::set(epoch);
+    }
 }
 
 /// Deterministic council of seven distinct members.

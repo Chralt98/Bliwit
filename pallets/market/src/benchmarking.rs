@@ -97,8 +97,12 @@ mod benchmarks {
         seeded_decision::<T>(1);
         let now = frame_system::Pallet::<T>::block_number();
         frame_system::Pallet::<T>::set_block_number(now.saturating_add(100u32.into()));
+        <T as Config>::BenchmarkHelper::prime_keeper_rebate();
         #[extrinsic_call]
         _(RawOrigin::Signed(caller.clone()), 1);
+        <T as Config>::BenchmarkHelper::assert_keeper_rebate_paid(
+            futarchy_primitives::keeper::CrankClass::General,
+        );
         assert!(
             Markets::<T>::get(1)
                 .expect("book exists")
@@ -117,8 +121,12 @@ mod benchmarks {
             now.saturating_add(<T as Config>::ArchiveDelay::get())
                 .saturating_add(1u32.into()),
         );
+        <T as Config>::BenchmarkHelper::prime_keeper_rebate();
         #[extrinsic_call]
         _(RawOrigin::Signed(caller.clone()), 1);
+        <T as Config>::BenchmarkHelper::assert_keeper_rebate_paid(
+            futarchy_primitives::keeper::CrankClass::General,
+        );
         assert!(!Markets::<T>::contains_key(1));
     }
 

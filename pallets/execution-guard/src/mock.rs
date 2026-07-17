@@ -114,7 +114,11 @@ pub mod pallet_test_dispatch {
     use super::{EpochCall, WrapperKind};
     use crate::CallDomain;
     use frame_support::pallet_prelude::*;
-    use frame_support::{traits::EnsureOrigin, weights::Weight};
+    use frame_support::{
+        dispatch::{DispatchResultWithPostInfo, Pays, PostDispatchInfo},
+        traits::EnsureOrigin,
+        weights::Weight,
+    };
     use frame_system::pallet_prelude::*;
     use futarchy_primitives::BlockNumber;
 
@@ -179,6 +183,20 @@ pub mod pallet_test_dispatch {
             }
         }
 
+        /// Declares 1,000 ref-time but reports a lower actual weight so the
+        /// guard tests exercise real PostDispatchInfo accumulation/refunds.
+        #[pallet::call_index(3)]
+        #[pallet::weight(Weight::from_parts(1_000, 100))]
+        pub fn set_value_weighted(origin: OriginFor<T>, value: u32) -> DispatchResultWithPostInfo {
+            T::FutarchyOrigin::ensure_origin(origin)?;
+            Value::<T>::put(value);
+            Self::deposit_event(Event::ValueSet(value));
+            Ok(PostDispatchInfo {
+                actual_weight: Some(Weight::from_parts(400, 40)),
+                pays_fee: Pays::Yes,
+            })
+        }
+
         /// A mock runtime-call carrier for every closed-wrapper variant. It is
         /// never trusted for recursion: `MockClassifier` projects it to the
         /// reviewed pallet-origins model before dispatch.
@@ -234,6 +252,7 @@ parameter_types! {
     pub static EpochTerminal: Vec<ProposalId> = Vec::new();
     pub static EpochPayloads: Vec<(ProposalId, H256)> = Vec::new();
     pub static PreimageData: Vec<(H256, Vec<u8>)> = Vec::new();
+    pub static PreimageFetchRequests: Vec<(H256, u32)> = Vec::new();
     pub static Unpinned: Vec<H256> = Vec::new();
     pub static AttestationArtifact: Option<(u32, H256)> = None;
     pub static AttestationPresent: bool = true;
@@ -330,12 +349,24 @@ pub struct TestPreimages;
 
 impl Preimages for TestPreimages {
     fn len(hash: H256) -> Option<u32> {
-        Self::fetch(hash).and_then(|bytes| u32::try_from(bytes.len()).ok())
-    }
-    fn fetch(hash: H256) -> Option<Vec<u8>> {
         PreimageData::get()
             .into_iter()
-            .find_map(|(candidate, bytes)| (candidate == hash).then_some(bytes))
+            .find_map(|(candidate, bytes)| {
+                (candidate == hash)
+                    .then(|| u32::try_from(bytes.len()).ok())
+                    .flatten()
+            })
+    }
+    fn fetch(hash: H256, expected_len: u32) -> Option<Vec<u8>> {
+        PreimageFetchRequests::mutate(|requests| requests.push((hash, expected_len)));
+        if expected_len > MAX_PAYLOAD_BYTES {
+            return None;
+        }
+        PreimageData::get()
+            .into_iter()
+            .find_map(|(candidate, bytes)| {
+                (candidate == hash && bytes.len() == expected_len as usize).then_some(bytes)
+            })
     }
     fn unpin(hash: H256) -> frame_support::dispatch::DispatchResult {
         PreimageData::mutate(|items| items.retain(|(candidate, _)| *candidate != hash));
@@ -449,9 +480,10 @@ impl pallet_origins::SafetyClassifier for MockClassifier {
         use pallet_origins::{BoxedCall, FilterCall};
         match call {
             RuntimeCall::TestDispatch(pallet_test_dispatch::Call::set_value { .. })
-            | RuntimeCall::TestDispatch(pallet_test_dispatch::Call::fail_after_write { .. }) => {
-                FilterCall::Leaf(pallet_origins::CallDomain::Param)
-            }
+            | RuntimeCall::TestDispatch(pallet_test_dispatch::Call::fail_after_write { .. })
+            | RuntimeCall::TestDispatch(pallet_test_dispatch::Call::set_value_weighted {
+                ..
+            }) => FilterCall::Leaf(pallet_origins::CallDomain::Param),
             RuntimeCall::TestDispatch(pallet_test_dispatch::Call::wrapped { kind, leaf }) => {
                 let leaf = FilterCall::Leaf(model_domain(*leaf));
                 let boxed = || BoxedCall::new(leaf.clone());
@@ -473,6 +505,15 @@ impl pallet_origins::SafetyClassifier for MockClassifier {
             }
             RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
                 FilterCall::Leaf(pallet_origins::CallDomain::InternalRoot)
+            }
+            #[cfg(feature = "runtime-benchmarks")]
+            RuntimeCall::System(frame_system::Call::remark { remark })
+                if remark.first() == Some(&0xb5) =>
+            {
+                // The production runtime classifies System remarks as Public.
+                // Keep that benchmark-only fixture recognizable without
+                // widening the mock's I-10 arbitrary-System regression.
+                FilterCall::Leaf(pallet_origins::CallDomain::Public)
             }
             RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { .. }) => {
                 FilterCall::Leaf(pallet_origins::CallDomain::InternalRoot)
@@ -605,6 +646,15 @@ impl BatchDispatcher<RuntimeCall> for TestDispatcher {
             .map_err(|error| error.error)
     }
 
+    fn dispatch_with_class_origin_post_info(
+        call: RuntimeCall,
+        class: ProposalClass,
+    ) -> frame_support::dispatch::DispatchResultWithPostInfo {
+        let origin = pallet_origins::ClassOrigin::from_proposal_class(class)
+            .ok_or(DispatchError::BadOrigin)?;
+        call.dispatch_bypass_filter(RuntimeOrigin::from(pallet_origins::Origin::from(origin)))
+    }
+
     fn dispatch_authorize_upgrade(code_hash: H256) -> frame_support::dispatch::DispatchResult {
         UpgradeDispatchOrigins::mutate(|origins| origins.push(UpgradeDispatchOrigin::Root));
         let call = RuntimeCall::System(frame_system::Call::authorize_upgrade {
@@ -662,14 +712,16 @@ fn benchmark_enqueue(
     domains: Vec<CallDomain>,
     attestation_id: Option<u32>,
     ratify_ref: Option<u32>,
-) {
+) -> H256 {
     let (payload_hash, payload_len) = put_preimage(&calls);
     commit_payload(pid, payload_hash);
     let mut item = queued_item(pid, class, payload_hash, payload_len, domains);
     item.meters_declared = benchmark_meters(pid);
     item.attestation_id = attestation_id;
     item.ratify_ref = ratify_ref;
-    let _ = ExecutionGuard::enqueue(RuntimeOrigin::signed(epoch_account()), item, false);
+    ExecutionGuard::enqueue(RuntimeOrigin::signed(epoch_account()), item, false)
+        .expect("benchmark queue fixture must be admissible");
+    payload_hash
 }
 
 #[cfg(feature = "runtime-benchmarks")]
@@ -708,6 +760,40 @@ fn benchmark_fill_records() {
 }
 
 #[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_envelopes() {
+    let blocked = (0..MAX_BLOCKED_METERS_BOUND)
+        .map(|index| {
+            let mut meter = [0xff; 8];
+            meter[4..8].copy_from_slice(&index.to_le_bytes());
+            meter
+        })
+        .collect::<Vec<_>>();
+    if let Ok(blocked) = StoredBlockedMeters::try_from(blocked) {
+        BlockedMeters::<Test>::put(blocked);
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_upgrade_history(now: BlockNumber) {
+    let spacing = CodeSpacing::get();
+    let count = MAX_EXECUTION_RECORDS as BlockNumber;
+    let history = (0..count)
+        .map(|index| {
+            (
+                now.saturating_sub(spacing.saturating_mul(count.saturating_sub(index))),
+                spacing,
+            )
+        })
+        .collect::<Vec<_>>();
+    if let Ok(history) = StoredUpgradeSpacingHistory::try_from(history) {
+        UpgradeSpacingHistory::<Test>::put(history.clone());
+        if let Some((authorized_at, _)) = history.last() {
+            LastUpgradeAuthorized::<Test>::put(*authorized_at);
+        }
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
 fn benchmark_fill_ratifications() {
     let mut pid = 30_000;
     for _ in 0..MAX_RATIFICATIONS_BOUND {
@@ -729,6 +815,44 @@ fn benchmark_fill_ratifications() {
 }
 
 #[cfg(feature = "runtime-benchmarks")]
+fn benchmark_execute_calls(artifact: H256, call_count: u32) -> Vec<RuntimeCall> {
+    let mut calls = vec![authorize_call(artifact)];
+    calls.extend((1..call_count).map(|index| {
+        let mut remark = vec![index as u8; 4_000];
+        remark[0] = 0xb5;
+        RuntimeCall::System(frame_system::Call::remark { remark })
+    }));
+    if call_count > 1 {
+        let target = MAX_PAYLOAD_BYTES as usize;
+        loop {
+            let encoded_len = calls.encode().len();
+            match encoded_len.cmp(&target) {
+                core::cmp::Ordering::Equal => break,
+                core::cmp::Ordering::Less => {
+                    let RuntimeCall::System(frame_system::Call::remark { remark }) = calls
+                        .last_mut()
+                        .expect("benchmark multi-call payload has a final remark")
+                    else {
+                        unreachable!("benchmark multi-call payload ends in a System remark")
+                    };
+                    remark.resize(remark.len().saturating_add(target - encoded_len), 0xff);
+                }
+                core::cmp::Ordering::Greater => {
+                    let RuntimeCall::System(frame_system::Call::remark { remark }) = calls
+                        .last_mut()
+                        .expect("benchmark multi-call payload has a final remark")
+                    else {
+                        unreachable!("benchmark multi-call payload ends in a System remark")
+                    };
+                    remark.truncate(remark.len().saturating_sub(encoded_len - target));
+                }
+            }
+        }
+    }
+    calls
+}
+
+#[cfg(feature = "runtime-benchmarks")]
 impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
     fn ratify_origin() -> RuntimeOrigin {
         RuntimeOrigin::from(pallet_origins::Origin::ConstitutionalValues)
@@ -747,22 +871,39 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         );
         benchmark_fill_queue();
         benchmark_fill_records();
+        benchmark_fill_envelopes();
         benchmark_fill_ratifications();
     }
-    fn prime_execute(pid: ProposalId) {
-        benchmark_enqueue(
-            pid,
-            ProposalClass::Param,
-            (0..MAX_CALLS)
-                .map(|value| param_call(value as u32))
-                .collect(),
-            vec![CallDomain::Param],
-            None,
-            None,
+    fn prime_execute(pid: ProposalId, calls: u32) {
+        let artifact = [0x42; 32];
+        AttestationArtifact::set(Some((7, artifact)));
+        let domains = if calls > 1 {
+            vec![CallDomain::Public, CallDomain::InternalRootAuthorizeUpgrade]
+        } else {
+            vec![CallDomain::InternalRootAuthorizeUpgrade]
+        };
+        System::set_block_number(
+            u64::from(CodeSpacing::get()).saturating_mul(MAX_EXECUTION_RECORDS as u64 + 1),
         );
+        let _payload_hash = benchmark_enqueue(
+            pid,
+            ProposalClass::Code,
+            benchmark_execute_calls(artifact, calls),
+            domains,
+            Some(7),
+            Some(pid as u32),
+        );
+        ExecutionGuard::ratify(
+            RuntimeOrigin::from(pallet_origins::Origin::ConstitutionalValues),
+            pid,
+            pid as u32,
+        )
+        .expect("benchmark Code queue ratification must succeed");
         benchmark_fill_queue();
         benchmark_fill_records();
+        benchmark_fill_envelopes();
         run_to_maturity(pid);
+        benchmark_fill_upgrade_history(System::block_number().saturated_into());
     }
     fn prime_failed(pid: ProposalId) {
         benchmark_enqueue(
@@ -775,6 +916,7 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         );
         benchmark_fill_queue();
         benchmark_fill_records();
+        benchmark_fill_envelopes();
         run_to_maturity(pid);
         set_dispatch_failure(true);
         let _ = ExecutionGuard::execute(RuntimeOrigin::signed(keeper()), pid);
@@ -784,8 +926,10 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
                 .saturating_add(1),
         );
     }
-    fn prime_pending_upgrade(code: &[u8]) {
-        let hash = hash(code);
+    fn prime_pending_upgrade(bytes: u32) -> Vec<u8> {
+        let mut code = b"benchmark-runtime-v2".to_vec();
+        code.resize(bytes as usize, 0);
+        let hash = hash(&code);
         AttestationArtifact::set(Some((7, hash)));
         benchmark_enqueue(
             1,
@@ -797,6 +941,7 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         );
         benchmark_fill_queue();
         benchmark_fill_records();
+        benchmark_fill_envelopes();
         let _ = ExecutionGuard::ratify(
             RuntimeOrigin::from(pallet_origins::Origin::ConstitutionalValues),
             1,
@@ -807,6 +952,7 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         System::set_block_number(
             System::block_number().saturating_add(DESCRIPTOR_LEAD_TIME.into()),
         );
+        code
     }
     fn prime_stale(pid: ProposalId) {
         benchmark_enqueue(
@@ -819,6 +965,7 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         );
         benchmark_fill_queue();
         benchmark_fill_records();
+        benchmark_fill_envelopes();
         CurrentSpecName::<Test>::put(spec(99));
     }
 }
@@ -881,6 +1028,7 @@ pub fn reset_statics() {
     EpochTerminal::set(Vec::new());
     EpochPayloads::set(Vec::new());
     PreimageData::set(Vec::new());
+    PreimageFetchRequests::set(Vec::new());
     Unpinned::set(Vec::new());
     AttestationArtifact::set(None);
     AttestationPresent::set(true);
@@ -941,6 +1089,10 @@ pub fn param_call(value: u32) -> RuntimeCall {
 
 pub fn failing_call(value: u32) -> RuntimeCall {
     RuntimeCall::TestDispatch(pallet_test_dispatch::Call::fail_after_write { value })
+}
+
+pub fn weighted_call(value: u32) -> RuntimeCall {
+    RuntimeCall::TestDispatch(pallet_test_dispatch::Call::set_value_weighted { value })
 }
 
 pub fn wrapped_call(kind: WrapperKind, leaf: CallDomain) -> RuntimeCall {

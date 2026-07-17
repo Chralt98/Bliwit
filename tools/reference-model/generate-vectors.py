@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 import argparse
+import hashlib
 import json
+import multiprocessing
+import os
+import random
 import sys
-from decimal import Decimal
+from decimal import Decimal, getcontext
 from pathlib import Path
 
 sys.path.insert(
@@ -21,6 +25,7 @@ from bleavit_reference_model.ledger import (
     Vault,
 )
 from bleavit_reference_model.lmsr import (
+    WORK_PREC,
     cost,
     fmt,
     marginal_price_long,
@@ -46,6 +51,11 @@ from bleavit_reference_model.treasury import (
 )
 from bleavit_reference_model.twap import TwapAccumulator
 from bleavit_reference_model.welfare import full_pipeline, settlement_score
+
+SWEEP_SCHEMA = "bleavit.reference-model.v3"
+SWEEP_MASTER_SEED = 0xB1EA_5EED_256B_0001
+SWEEP_SEED_STEP = 0x9E37_79B9_7F4A_7C15
+SWEEP_STRUCTURED_ROWS = 20
 
 DECISION_SCENARIOS = [
     {"name": "adopt", "inputs": {}},
@@ -445,6 +455,241 @@ def _transcendental_corpus():
     }
 
 
+def _sweep_seed(shard_index):
+    """Derive a stable 64-bit seed from the master seed and shard index."""
+    return (
+        SWEEP_MASTER_SEED
+        + (shard_index + 1) * SWEEP_SEED_STEP
+    ) & ((1 << 64) - 1)
+
+
+def _sweep_row(function, input_raw):
+    q64 = 1 << 64
+    value = Decimal(input_raw) / Decimal(q64)
+    reference = {
+        "exp2": ref_exp2,
+        "log2": ref_log2,
+        "ln": ref_ln,
+    }[function]
+    return {
+        "f": function,
+        "in": input_raw,
+        "out": raw_64x64_nearest(reference(value)),
+    }
+
+
+def _sweep_cost_row(q_l_raw, q_s_raw, b_raw):
+    q64 = 1 << 64
+    q_l = Decimal(q_l_raw) / Decimal(q64)
+    q_s = Decimal(q_s_raw) / Decimal(q64)
+    b = Decimal(b_raw) / Decimal(q64)
+    return {
+        "f": "cost",
+        "q_l": q_l_raw,
+        "q_s": q_s_raw,
+        "b": b_raw,
+        "out": raw_64x64_nearest(cost(b, q_l, q_s)),
+    }
+
+
+def _structured_sweep_inputs():
+    """Edges repeated once in every shard (04 §4 dense/domain coverage)."""
+    q64 = 1 << 64
+    alternating_a = 0xAAAAAAAA_AAAAAAAA
+    alternating_5 = 0x55555555_55555555
+    return [
+        ("exp2", q64 - 1),
+        ("exp2", alternating_a),
+        ("exp2", alternating_5),
+        ("exp2", 0xFFFFFFFF_00000000),
+        ("exp2", 0x00000000_FFFFFFFF),
+        ("exp2", 0xF0F0F0F0_F0F0F0F0),
+        ("exp2", (63 << 64) | (q64 - 1)),
+        ("exp2", (63 << 64) | alternating_a),
+        ("exp2", (63 << 64) | alternating_5),
+        ("log2", 1 << 64),
+        ("log2", 1 << 127),
+        ("log2", (1 << 128) - 1),
+        ("ln", 1 << 64),
+        ("ln", 1 << 127),
+        ("ln", (1 << 128) - 1),
+        ("cost", 0, 0, 1 << 64),
+        ("cost", 1 << 64, 0, 1 << 64),
+        ("cost", 48 << 64, 0, 1 << 64),
+        ("cost", 0, 48 << 64, 1 << 64),
+        ("cost", 1_048_000_000 << 64, 1_000_000_000 << 64, 1_000_000 << 64),
+    ]
+
+
+def _random_cost_row(rng):
+    """Sample an LMSR state over realistic b magnitudes and the full domain."""
+    q64 = 1 << 64
+    decade = rng.getrandbits(4) % 9
+    lower = 10**decade
+    b_units = lower + (rng.getrandbits(32) % (9 * lower))
+    b_raw = b_units << 64
+    common_ratio_raw = rng.getrandbits(71) % (101 * q64)
+    domain_ratio_raw = rng.getrandbits(70) % (48 * q64 + 1)
+    common = b_raw * common_ratio_raw // q64
+    difference = b_raw * domain_ratio_raw // q64
+    if rng.getrandbits(1):
+        q_l_raw, q_s_raw = common + difference, common
+    else:
+        q_l_raw, q_s_raw = common, common + difference
+    return _sweep_cost_row(q_l_raw, q_s_raw, b_raw)
+
+
+def _generate_sweep_shard(task):
+    """Generate one shard; safe to call in a multiprocessing worker."""
+    shard_index, rows, output_dir = task
+    # Decimal contexts are process-local. Keep input conversion at the same
+    # 100-digit precision as the function-local reference oracle contexts.
+    getcontext().prec = WORK_PREC
+    rng = random.Random(_sweep_seed(shard_index))
+    structured = _structured_sweep_inputs()
+    if rows < len(structured):
+        raise ValueError(
+            f"shard {shard_index} has {rows} rows; "
+            f"at least {len(structured)} are required for structured edges"
+        )
+
+    random_rows = rows - len(structured)
+    counts = {
+        "exp2_frac": random_rows * 55 // 100,
+        "exp2_wide": random_rows * 15 // 100,
+        "log2": random_rows * 10 // 100,
+        "ln": random_rows * 10 // 100,
+    }
+    counts["cost"] = random_rows - sum(counts.values())
+
+    def generated_rows():
+        for row in structured:
+            if row[0] == "cost":
+                yield _sweep_cost_row(*row[1:])
+            else:
+                yield _sweep_row(*row)
+        for _ in range(counts["exp2_frac"]):
+            yield _sweep_row("exp2", rng.getrandbits(64))
+        for _ in range(counts["exp2_wide"]):
+            whole = 1 + (rng.getrandbits(8) % 63)
+            yield _sweep_row(
+                "exp2", (whole << 64) | rng.getrandbits(64)
+            )
+        for function in ("log2", "ln"):
+            for _ in range(counts[function]):
+                bits = 65 + (rng.getrandbits(8) % 64)
+                input_raw = (1 << (bits - 1)) | rng.getrandbits(bits - 1)
+                yield _sweep_row(function, input_raw)
+        for _ in range(counts["cost"]):
+            yield _random_cost_row(rng)
+
+    relative_path = f"shards/sweep-{shard_index:03d}.json"
+    shard_path = Path(output_dir) / relative_path
+    temporary_path = shard_path.with_suffix(".json.tmp")
+    digest = hashlib.sha256()
+
+    def write_bytes(handle, data):
+        handle.write(data)
+        digest.update(data)
+
+    with temporary_path.open("wb") as handle:
+        header = (
+            f'{{"schema":"{SWEEP_SCHEMA}","shard":{shard_index},'
+            '"rows":[\n'
+        ).encode("ascii")
+        write_bytes(handle, header)
+        for row_index, row in enumerate(generated_rows()):
+            line = json.dumps(
+                row, separators=(",", ":"), ensure_ascii=True
+            ).encode("ascii")
+            if row_index + 1 != rows:
+                line += b","
+            write_bytes(handle, line + b"\n")
+        write_bytes(handle, b"]}\n")
+    temporary_path.replace(shard_path)
+    return {
+        "file": relative_path,
+        "rows": rows,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def generate_sweep(output_dir, points, shards, workers):
+    """Emit the deterministic, content-addressed release sweep corpus."""
+    if points < 1:
+        raise ValueError("--sweep-points must be positive")
+    if shards < 1:
+        raise ValueError("--sweep-shards must be positive")
+    if workers < 1:
+        raise ValueError("--sweep-workers must be positive")
+    if points < shards * SWEEP_STRUCTURED_ROWS:
+        raise ValueError(
+            f"--sweep-points must allow all {SWEEP_STRUCTURED_ROWS} structured edges in every shard"
+        )
+
+    output_dir = Path(output_dir)
+    shard_dir = output_dir / "shards"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    base_rows, extra_rows = divmod(points, shards)
+    tasks = [
+        (
+            shard_index,
+            base_rows + (1 if shard_index < extra_rows else 0),
+            str(output_dir),
+        )
+        for shard_index in range(shards)
+    ]
+    expected_shards = {
+        f"sweep-{shard_index:03d}.json" for shard_index in range(shards)
+    }
+    stale_shards = sorted(
+        path.name
+        for path in shard_dir.glob("sweep-*")
+        if path.name not in expected_shards
+    )
+    if stale_shards:
+        raise ValueError(
+            "sweep output contains stale shard files: "
+            + ", ".join(stale_shards)
+        )
+    process_count = min(workers, shards)
+    with multiprocessing.Pool(processes=process_count) as pool:
+        shard_entries = pool.map(_generate_sweep_shard, tasks)
+
+    manifest = {
+        "schema": SWEEP_SCHEMA,
+        "kind": "transcendental-sweep",
+        "seed": f"0x{SWEEP_MASTER_SEED:016X}",
+        "points": points,
+        "generator": "tools/reference-model/generate-vectors.py",
+        "exp2_relative_bound": "2**-63",
+        "primitive_abs_ulp_bound": 2,
+        "composed_cost_abs_ulp_bound": 8,
+        "distribution": {
+            "random_rows": {
+                "exp2_frac": "55%",
+                "exp2_wide": "15%",
+                "log2": "10%",
+                "ln": "10%",
+                "cost": "10% (including integer remainder)",
+            },
+            "structured_rows_per_shard": SWEEP_STRUCTURED_ROWS,
+            "structured_edges": (
+                "all-ones/alternating fractions, top-octave values, and LMSR domain edges"
+            ),
+            "shard_seed": (
+                "(master + (shard + 1) * 0x9E3779B97F4A7C15) mod 2**64"
+            ),
+        },
+        "shards": shard_entries,
+    }
+    manifest_path = output_dir / "sweep-manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def build():
     samples = []
     for ql, qs in [
@@ -548,7 +793,45 @@ def main():
     parser.add_argument(
         "--out", default="reference-model/fixtures/vectors.json"
     )
+    parser.add_argument("--sweep-out")
+    parser.add_argument("--sweep-points", type=int)
+    parser.add_argument("--sweep-shards", type=int)
+    parser.add_argument("--sweep-workers", type=int)
     args = parser.parse_args()
+    if args.sweep_out is not None:
+        if args.check or args.out != "reference-model/fixtures/vectors.json":
+            parser.error("--sweep-out cannot be combined with --check or --out")
+        try:
+            generate_sweep(
+                args.sweep_out,
+                (
+                    args.sweep_points
+                    if args.sweep_points is not None
+                    else 10_000_000
+                ),
+                (
+                    args.sweep_shards
+                    if args.sweep_shards is not None
+                    else 100
+                ),
+                (
+                    args.sweep_workers
+                    if args.sweep_workers is not None
+                    else os.cpu_count() or 1
+                ),
+            )
+        except ValueError as error:
+            parser.error(str(error))
+        return
+    if any(
+        option is not None
+        for option in (
+            args.sweep_points,
+            args.sweep_shards,
+            args.sweep_workers,
+        )
+    ):
+        parser.error("sweep-only options require --sweep-out")
     text = json.dumps(build(), sort_keys=True, indent=2) + "\n"
     path = Path(args.out)
     if args.check:

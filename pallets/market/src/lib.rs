@@ -25,6 +25,17 @@ mod mock;
 #[cfg(test)]
 mod tests;
 
+/// Runtime fixture hooks for rebate-bearing market benchmarks. Mock runtimes
+/// may keep the defaults; the assembled runtime primes the treasury payout.
+#[cfg(feature = "runtime-benchmarks")]
+pub trait BenchmarkHelper {
+    fn prime_keeper_rebate() {}
+    fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl BenchmarkHelper for () {}
+
 #[frame_support::pallet]
 pub mod pallet {
     use crate::weights::WeightInfo;
@@ -78,6 +89,10 @@ pub mod pallet {
 
         /// Classifies observations made inside a proposal decision window.
         type InDecisionWindow: frame_support::traits::Contains<MarketId>;
+
+        /// Cross-pallet keeper-rebate fixture used only by runtime benchmarks.
+        #[cfg(feature = "runtime-benchmarks")]
+        type BenchmarkHelper: crate::BenchmarkHelper;
     }
 
     #[pallet::pallet]

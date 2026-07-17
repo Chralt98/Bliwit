@@ -182,6 +182,8 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     fn treasury_origin() -> RuntimeOrigin;
     /// A funded keeper/recipient account for Signed calls.
     fn account(seed: u8) -> AccountId;
+    fn prime_keeper_rebate() {}
+    fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
 
 #[frame_support::pallet]

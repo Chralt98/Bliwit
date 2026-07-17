@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
@@ -60,6 +61,17 @@ NETWORKS = {
 }
 RELAY_SPEC_PATH = "zombienet/specs/out/paseo-local.json"
 CHOPSTICKS_GENESIS = "zombienet/specs/out/bleavit-drill-raw.json"
+G1_DRILLS = {
+    "04-dead-man.zndsl",
+    "05-coretime-renewal-under-dead-man.zndsl",
+    "08-expedited-code-under-freeze.zndsl",
+    "09-three-unattended-epochs.zndsl",
+}
+# The two well-known raw runtime override keys: `:code` and `:heappages`.
+FORBIDDEN_IMPORT_STORAGE_KEYS = {
+    "0x3a636f6465",
+    "0x3a686561707061676573",
+}
 NETWORK_HEADER = re.compile(r"^Network:\s*(\S+)\s*$", re.MULTILINE)
 JS_REFERENCE = re.compile(r"\bjs-script\s+(\S+)")
 ENDPOINT = re.compile(r"\b(?:https?|wss?)://[^\s\"'<>`)]+", re.IGNORECASE)
@@ -206,6 +218,113 @@ def validate_inventory(root: Path, failures: list[str]) -> None:
             failures.append(f"{citation}: scenario step card is missing: {path.with_suffix('.md').name}")
 
 
+def validate_suites_manifest(root: Path, failures: list[str]) -> None:
+    path = root / "tools" / "env" / "suites.json"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        failures.append(f"15 §4.7; 02 §11: cannot parse suites.json: {error}")
+        return
+    if not isinstance(document, dict):
+        failures.append("15 §4.7; 02 §11: suites.json must contain an object")
+        return
+    if document.get("schema") != "bleavit.env-suites.v1":
+        failures.append(
+            "15 §4.7; 02 §11: suites.json schema must be bleavit.env-suites.v1"
+        )
+    suites = document.get("suites")
+    if not isinstance(suites, list):
+        failures.append("15 §4.7; 02 §11: suites.json suites must be an array")
+        return
+
+    expected = {
+        **{
+            f"zombienet/drills/{name}": "zombienet"
+            for name in REQUIRED_DRILLS
+        },
+        **{
+            f"chopsticks/scenarios/{name}": "chopsticks"
+            for name in REQUIRED_SCENARIOS
+        },
+        "chopsticks/bleavit.yml": "chopsticks",
+    }
+    identifiers: set[str] = set()
+    manifest_paths: set[str] = set()
+    for index, row in enumerate(suites):
+        label = f"suites.json suites[{index}]"
+        if not isinstance(row, dict):
+            failures.append(f"15 §4.7; 02 §11: {label} must be an object")
+            continue
+        identifier = row.get("id")
+        relative = row.get("path")
+        kind = row.get("kind")
+        tier = row.get("tier")
+        timeout = row.get("timeout_seconds")
+        if not isinstance(identifier, str) or not identifier:
+            failures.append(f"15 §4.7; 02 §11: {label}.id must be a non-empty string")
+        elif identifier in identifiers:
+            failures.append(
+                f"15 §4.7; 02 §11: duplicate suites.json id {identifier!r}"
+            )
+        else:
+            identifiers.add(identifier)
+        if kind not in {"zombienet", "chopsticks"}:
+            failures.append(f"15 §4.7; 02 §11: {label}.kind is invalid")
+        if tier not in {"release", "g1"}:
+            failures.append(f"15 §4.7; 02 §11: {label}.tier is invalid")
+        if type(timeout) is not int or timeout <= 0:
+            failures.append(
+                f"15 §4.7; 02 §11: {label}.timeout_seconds must be a positive integer"
+            )
+        if not isinstance(relative, str) or not relative:
+            failures.append(f"15 §4.7; 02 §11: {label}.path must be a non-empty string")
+            continue
+        if relative in manifest_paths:
+            failures.append(
+                f"15 §4.7; 02 §11: suites.json has a duplicate path: {relative}"
+            )
+        manifest_paths.add(relative)
+        suite_path = root / relative
+        if not suite_path.is_file():
+            failures.append(
+                f"15 §4.7; 02 §11: suites.json path does not exist: {relative}"
+            )
+        expected_kind = expected.get(relative)
+        if expected_kind is None:
+            failures.append(
+                f"15 §4.7; 02 §11: suites.json points outside the required inventory: {relative}"
+            )
+        elif kind != expected_kind:
+            failures.append(
+                f"15 §4.7; 02 §11: suites.json path {relative} must have kind {expected_kind}"
+            )
+        if expected_kind is not None:
+            expected_tier = (
+                "g1"
+                if relative.startswith("zombienet/drills/")
+                and Path(relative).name in G1_DRILLS
+                else "release"
+            )
+            if tier != expected_tier:
+                failures.append(
+                    f"15 §4.7; 02 §11: suites.json path {relative} must have tier "
+                    f"{expected_tier}, found {tier!r}"
+                )
+
+    missing = sorted(set(expected) - manifest_paths)
+    extra = sorted(manifest_paths - set(expected))
+    if missing:
+        failures.append(
+            "15 §4.7; 02 §11: suites.json is missing required path(s): "
+            + ", ".join(missing)
+        )
+    if extra:
+        failures.append(
+            "15 §4.7; 02 §11: suites.json has extra path(s): "
+            + ", ".join(extra)
+        )
+
+
 def validate_networks(root: Path, failures: list[str]) -> None:
     directory = root / "zombienet" / "networks"
     parsed: dict[str, dict[str, Any]] = {}
@@ -305,6 +424,7 @@ def validate_chopsticks(root: Path, failures: list[str]) -> None:
     paths = [root / "chopsticks" / "bleavit.yml"] + [
         root / "chopsticks" / "scenarios" / name for name in REQUIRED_SCENARIOS
     ]
+    databases: dict[Path, Path] = {}
     for path in paths:
         if not path.is_file():
             continue
@@ -317,6 +437,44 @@ def validate_chopsticks(root: Path, failures: list[str]) -> None:
                 f"02 §11: {path.relative_to(root)} genesis must be "
                 f"{CHOPSTICKS_GENESIS!r}, found {genesis!r}"
             )
+        if "wasm-override" in config:
+            failures.append(
+                f"02 §11: {path.relative_to(root)} must not define active wasm-override"
+            )
+        database = config.get("db")
+        valid_database = False
+        resolved_database: Path | None = None
+        if isinstance(database, str) and database:
+            pure = PurePosixPath(database)
+            if (
+                not pure.is_absolute()
+                and ".." not in pure.parts
+                and "\\" not in database
+                and pure.parts[:2] == ("chopsticks", ".state")
+                and len(pure.parts) >= 3
+            ):
+                state_root = (root / "chopsticks" / ".state").resolve()
+                resolved_database = (root / Path(*pure.parts)).resolve()
+                try:
+                    resolved_database.relative_to(state_root)
+                    valid_database = resolved_database != state_root
+                except ValueError:
+                    pass
+        if not valid_database or resolved_database is None:
+            failures.append(
+                f"02 §11: {path.relative_to(root)} db must be repository-relative "
+                "under chopsticks/.state/"
+            )
+        else:
+            previous = databases.get(resolved_database)
+            if previous is not None:
+                failures.append(
+                    "02 §11: Chopsticks db paths must be unique; "
+                    f"{previous.relative_to(root)} and {path.relative_to(root)} both use "
+                    f"{database}"
+                )
+            else:
+                databases[resolved_database] = path
         if config.get("mock-signature-host") is not True:
             failures.append(
                 f"15 §4.7: {path.relative_to(root)} must enable mock-signature-host"
@@ -338,6 +496,11 @@ def validate_chopsticks(root: Path, failures: list[str]) -> None:
             if not isinstance(key, str) or re.fullmatch(r"0x(?:[0-9a-fA-F]{2})+", key) is None:
                 failures.append(
                     f"02 §11: {path.relative_to(root)} import-storage[{index}] has an invalid key"
+                )
+            elif key.casefold() in FORBIDDEN_IMPORT_STORAGE_KEYS:
+                failures.append(
+                    f"02 §11: {path.relative_to(root)} import-storage[{index}] must not "
+                    f"inject reserved runtime key {key}"
                 )
             if value is not None and (
                 not isinstance(value, str)
@@ -439,6 +602,7 @@ def validate(root: Path) -> list[str]:
     failures: list[str] = []
     root = root.resolve()
     validate_inventory(root, failures)
+    validate_suites_manifest(root, failures)
     validate_networks(root, failures)
     validate_drills(root, failures)
     validate_chopsticks(root, failures)

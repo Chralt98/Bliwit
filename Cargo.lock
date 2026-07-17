@@ -1230,8 +1230,11 @@ dependencies = [
 name = "bleavit-runtime"
 version = "0.1.0"
 dependencies = [
+ "bleavit-xcm",
+ "conditional-ledger-core",
  "cumulus-pallet-aura-ext",
  "cumulus-pallet-parachain-system",
+ "cumulus-pallet-session-benchmarking",
  "cumulus-pallet-xcm",
  "cumulus-pallet-xcmp-queue",
  "cumulus-primitives-aura",
@@ -1245,9 +1248,11 @@ dependencies = [
  "frame-metadata-hash-extension",
  "frame-support",
  "frame-system",
+ "frame-system-benchmarking",
  "frame-system-rpc-runtime-api",
  "frame-try-runtime",
  "futarchy-primitives",
+ "market-core",
  "origins-core",
  "pallet-asset-tx-payment",
  "pallet-assets",
@@ -1259,6 +1264,7 @@ dependencies = [
  "pallet-conditional-ledger",
  "pallet-constitution",
  "pallet-conviction-voting",
+ "pallet-epoch",
  "pallet-execution-guard",
  "pallet-futarchy-treasury",
  "pallet-guardian",

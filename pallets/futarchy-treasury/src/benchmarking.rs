@@ -189,9 +189,13 @@ mod benches {
         t.coretime_quotes.push((1000, 100_000 * USDC));
         Pallet::<T>::seed(&t);
         let keeper: T::AccountId = T::BenchmarkHelper::account(1);
+        T::BenchmarkHelper::prime_keeper_rebate();
 
         #[extrinsic_call]
         _(RawOrigin::Signed(keeper), 1000);
+        T::BenchmarkHelper::assert_keeper_rebate_paid(
+            futarchy_primitives::keeper::CrankClass::General,
+        );
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);

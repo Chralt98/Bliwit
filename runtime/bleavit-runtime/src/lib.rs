@@ -4,11 +4,63 @@
 
 extern crate alloc;
 
+/// B5 (15 §4.5): the runtime-level benchmark registry — every runtime pallet
+/// with a `frame-benchmarking` harness, iterated by `list_benchmarks!` /
+/// `add_benchmarks!` in `apis.rs`. Deliberately absent: `pallet_xcm`,
+/// `cumulus_pallet_xcm` and the XCM executor legs (production XCM config and
+/// its weights are B4 — the surface is fail-closed today), `pallet_aura` /
+/// `pallet_authorship` / `cumulus_pallet_aura_ext` / `staging_parachain_info`
+/// (no dispatchables and no benchmark harness upstream), and
+/// `pallet_transaction_payment` / `pallet_asset_tx_payment` (no benchmarkable
+/// calls; their tx-extension costs are carried by the extrinsic base weight).
+#[cfg(feature = "runtime-benchmarks")]
+mod benches {
+    frame_benchmarking::define_benchmarks!(
+        // Substrate/system set.
+        [frame_system, SystemBench::<Runtime>]
+        [pallet_balances, Balances]
+        [pallet_timestamp, Timestamp]
+        [pallet_assets, ForeignAssets]
+        [pallet_utility, Utility]
+        [pallet_proxy, Proxy]
+        [pallet_multisig, Multisig]
+        [pallet_preimage, Preimage]
+        [pallet_scheduler, Scheduler]
+        [pallet_referenda, Referenda]
+        [pallet_conviction_voting, ConvictionVoting]
+        [pallet_sudo, Sudo]
+        [pallet_migrations, Migrations]
+        // Parachain set.
+        [pallet_session, SessionBench::<Runtime>]
+        [pallet_collator_selection, CollatorSelection]
+        [pallet_message_queue, MessageQueue]
+        [cumulus_pallet_parachain_system, ParachainSystem]
+        [cumulus_pallet_xcmp_queue, XcmpQueue]
+        // Futarchy pallets (Track A).
+        [pallet_origins, Origins]
+        [pallet_constitution, Constitution]
+        [pallet_conditional_ledger, ConditionalLedger]
+        [pallet_market, Market]
+        [pallet_welfare, Welfare]
+        [pallet_oracle, Oracle]
+        [pallet_registry, IncidentRegistry]
+        [pallet_registry, MilestoneRegistry]
+        [pallet_futarchy_treasury, FutarchyTreasury]
+        [pallet_guardian, Guardian]
+        [pallet_attestor, Attestor]
+        [pallet_epoch, Epoch]
+        [pallet_execution_guard, ExecutionGuard]
+    );
+}
+
 mod apis;
 mod classifier;
 mod configs;
 mod genesis;
+pub mod weights;
 
+#[cfg(test)]
+mod pov_budgets;
 #[cfg(test)]
 mod tests;
 
@@ -35,17 +87,14 @@ pub type Balance = futarchy_primitives::Balance;
 pub type Nonce = u32;
 pub type Hash = sp_core::H256;
 pub type BlockNumber = futarchy_primitives::BlockNumber;
-pub type AssetId = u32;
+pub type AssetId = staging_xcm::latest::Location;
 pub type Address = MultiAddress<AccountId, ()>;
 pub type Header = generic::Header<BlockNumber, BlakeTwo256>;
 
-/// USDC is the local `ForeignAssets` id corresponding to GeneralIndex(1337).
-pub const USDC_ASSET_ID: AssetId = 1337;
-/// Compact identity commitment retained from the B1 model and pinned by 02 §8.
-pub const USDC_LOCATION: [u8; 32] = [
-    1, 0, 0, 0, 232, 3, 0, 0, 50, 0, 0, 0, 57, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0,
-];
+pub use bleavit_xcm::identity::usdc_location;
+/// The 02 §8 SCALE encoding pinned by the release surface manifest.
+pub const USDC_LOCATION_ENCODED: [u8; 10] =
+    [0x01, 0x03, 0x00, 0xa1, 0x0f, 0x04, 0x32, 0x05, 0xe5, 0x14];
 pub const FEE_VIT_USDC_RATE_KEY: futarchy_primitives::ParamKey = *b"fee.vit_usdc\0\0\0\0";
 
 pub const MILLISECS_PER_BLOCK: u64 = kernel::MILLISECS_PER_BLOCK;
@@ -167,8 +216,8 @@ construct_runtime!(
         FutarchyTreasury: pallet_futarchy_treasury = 58,
         Guardian: pallet_guardian = 59,
         Attestor: pallet_attestor = 60,
-        // A8 slot: `Epoch: pallet_epoch = 61` once its production FRAME shell
-        // lands (pallet indices are SCALE-frozen — never renumber the above).
+        // Frozen custom-pallet slots (02 §7; never renumber).
+        Epoch: pallet_epoch = 61,
         ExecutionGuard: pallet_execution_guard = 62,
     }
 );

@@ -317,6 +317,19 @@ impl pallet_welfare::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
     fn metric_governance_origin() -> RuntimeOrigin {
         RuntimeOrigin::signed(governance_acc())
     }
+    fn prime_finalized_epoch(epoch: EpochId) {
+        CurrentEpochValue::set(epoch.saturating_add(1));
+    }
+    fn prime_metric_inputs(count: u16) {
+        let inputs = (1..=count)
+            .map(|id| ComponentValue {
+                id,
+                value: FixedU64(ONE),
+            })
+            .collect::<Vec<_>>();
+        OnchainInput::set(inputs.clone());
+        DailyInput::set(inputs);
+    }
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {

@@ -858,6 +858,8 @@ pub mod kernel {
     /// both use; the registry uses the frozen floor (07 §7 "72 h ... frozen
     /// constant"), never a live-amended value.
     pub const ORC_WINDOW_BLOCKS: u32 = 43_200;
+    /// Class-4 oracle report window after the measurement epoch closes (07 §5(1)).
+    pub const ORC_REPORT_WINDOW_BLOCKS: u32 = 2 * BLOCKS_PER_DAY;
     pub const MAX_NESTED_LEVELS: u32 = 4;
     pub const MAX_NESTED_CALLS: u32 = 16;
     pub const MAX_CALLS: u32 = 16;
@@ -873,7 +875,7 @@ pub mod kernel {
     /// prevent the recursion); an over-deep adversarial preimage decodes to
     /// `BadPreimage` (G-1 status quo), never a stack-overflow trap/abort. This
     /// is the decode-bomb hardening surfaced by the 15 §4.5 decode-fuzz work
-    /// (S2); see PLAN.md · Decision log (SQ-135).
+    /// (S2); see PLAN.md · Decision log (SQ-153).
     pub const MAX_PAYLOAD_DECODE_DEPTH: u32 = 256;
     /// Maximum aggregate payload dispatch weight as a fraction of the block
     /// limit (`prop.max_weight`, 13 §2). The ratio form avoids re-encoding the

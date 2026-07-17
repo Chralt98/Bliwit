@@ -146,6 +146,8 @@ impl pallet_conditional_ledger::Config for Test {
     type PalletId = LedgerPalletId;
     type KeeperRebate = TestKeeperRebate;
     type WeightInfo = ();
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = ();
 }
 
 /// The ledger's sovereign account (custodies escrow + deposits).

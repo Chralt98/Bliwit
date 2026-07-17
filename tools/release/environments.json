@@ -1,0 +1,31 @@
+{
+  "schema": "bleavit.environments.v1",
+  "environments": [
+    {
+      "id": "dev",
+      "chain_spec": "bleavit-dev.json",
+      "live": false,
+      "required": true
+    },
+    {
+      "id": "local",
+      "chain_spec": "bleavit-local.json",
+      "live": false,
+      "required": true
+    },
+    {
+      "id": "paseo",
+      "chain_spec": "bleavit-paseo.json",
+      "live": false,
+      "required": false,
+      "bootnodes": "deploy/chain-specs/bootnodes.paseo.json"
+    },
+    {
+      "id": "polkadot",
+      "chain_spec": "bleavit-polkadot.json",
+      "live": false,
+      "required": false,
+      "bootnodes": "deploy/chain-specs/bootnodes.polkadot.json"
+    }
+  ]
+}
