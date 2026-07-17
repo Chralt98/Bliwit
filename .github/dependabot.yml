@@ -1,0 +1,93 @@
+version: 2
+
+updates:
+  # Haupt-Rust-Workspace:
+  # konservativ, weil die Polkadot-/FRAME-Versionen bewusst exakt gepinnt sind.
+  - package-ecosystem: "cargo"
+    directory: "/"
+
+    schedule:
+      interval: "monthly"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+
+    open-pull-requests-limit: 2
+    versioning-strategy: "increase-if-necessary"
+
+    # Reguläre Versionsupdates nur für direkte Patch-Updates.
+    # Sicherheitsupdates werden dadurch nicht eingeschränkt.
+    allow:
+      - dependency-type: "direct"
+        update-types:
+          - "version-update:semver-patch"
+
+    # Mehrere verfügbare Patch-Updates in einem PR zusammenfassen.
+    groups:
+      root-rust-patches:
+        applies-to: "version-updates"
+        patterns:
+          - "*"
+        update-types:
+          - "patch"
+
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Separater Keeper-Workspace:
+  # darf etwas häufiger und weitergehend aktualisiert werden.
+  - package-ecosystem: "cargo"
+    directory: "/keeper"
+
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+
+    open-pull-requests-limit: 3
+    versioning-strategy: "increase-if-necessary"
+
+    # Minor- und Patch-Updates, aber keine automatischen Major-Updates.
+    allow:
+      - dependency-type: "direct"
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+
+    groups:
+      keeper-rust-minor-and-patch:
+        applies-to: "version-updates"
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+    commit-message:
+      prefix: "chore(deps)"
+
+  # Verwendete GitHub Actions aktuell halten.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Europe/Berlin"
+
+    open-pull-requests-limit: 3
+
+    # Minor- und Patch-Updates zusammenfassen.
+    # Major-Updates erscheinen weiterhin als separate PRs.
+    groups:
+      actions-minor-and-patch:
+        applies-to: "version-updates"
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
+
+    commit-message:
+      prefix: "chore(actions)"
