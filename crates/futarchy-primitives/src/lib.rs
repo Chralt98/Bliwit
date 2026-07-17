@@ -862,6 +862,19 @@ pub mod kernel {
     pub const MAX_NESTED_CALLS: u32 = 16;
     pub const MAX_CALLS: u32 = 16;
     pub const MAX_BYTES: u32 = 64 * 1024;
+    /// SCALE-decode recursion backstop for the execution guard's
+    /// preimage-sourced batch decode (`decode_batch`, 09 §1.2). A spec-valid
+    /// payload nests at most `MAX_NESTED_LEVELS` wrapper levels (06 §3.3), each
+    /// costing a small constant number of `Decode` recursion frames (the enum
+    /// variant plus its inner `Vec`/`Box`), so this limit sits far above any
+    /// legitimate call yet well below the stack budget — matching substrate's
+    /// conventional 256 extrinsic decode-depth limit. It bounds the *decode*
+    /// (the `MAX_NESTED_LEVELS` filter bound is a post-decode check and cannot
+    /// prevent the recursion); an over-deep adversarial preimage decodes to
+    /// `BadPreimage` (G-1 status quo), never a stack-overflow trap/abort. This
+    /// is the decode-bomb hardening surfaced by the 15 §4.5 decode-fuzz work
+    /// (S2); see PLAN.md · Decision log (SQ-135).
+    pub const MAX_PAYLOAD_DECODE_DEPTH: u32 = 256;
     /// Maximum aggregate payload dispatch weight as a fraction of the block
     /// limit (`prop.max_weight`, 13 §2). The ratio form avoids re-encoding the
     /// same kernel value as an execution-guard arithmetic literal.

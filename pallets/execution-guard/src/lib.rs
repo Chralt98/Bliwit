@@ -218,7 +218,7 @@ pub mod pallet {
         keeper::{CrankClass, KeeperRebateSink},
         DispatchOutcomeCode, ExecutionRecord, RejectReason, INTEGRATION_CONTRACT_VERSION,
     };
-    use parity_scale_codec::{Compact, Decode, DecodeWithMemTracking, Encode};
+    use parity_scale_codec::{Compact, Decode, DecodeLimit, DecodeWithMemTracking, Encode};
     use sp_runtime::{traits::Hash as HashT, SaturatedConversion, TryRuntimeError};
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
@@ -1365,10 +1365,21 @@ pub mod pallet {
                 .map_err(|_| Error::<T>::BadPreimage)?
                 .0;
             ensure!(call_count <= MAX_CALLS_BOUND, Error::<T>::TooManyCalls);
+            // Depth-limit the recursive decode of the preimage-sourced batch: the
+            // element type `RuntimeCall` nests (utility.batch/proxy/multisig/sudo),
+            // and the `call_count` guard above bounds only the *outer* count, not
+            // nesting depth. Without this, an adversarial hash-committed preimage
+            // encoding one deeply-nested call (≤ MAX_BYTES) would recurse in
+            // `Decode` until the wasm stack-height trap / native stack abort —
+            // a G-1 violation in audit-scope-A code. `decode_all_with_depth_limit`
+            // also enforces full-consumption (replacing the trailing-bytes check).
+            // Over-deep input fails closed to `BadPreimage`. (15 §4.5 / SQ-135.)
             let mut input = bytes;
-            let calls =
-                RuntimeBatch::<T>::decode(&mut input).map_err(|_| Error::<T>::BadPreimage)?;
-            ensure!(input.is_empty(), Error::<T>::BadPreimage);
+            let calls = RuntimeBatch::<T>::decode_all_with_depth_limit(
+                futarchy_primitives::kernel::MAX_PAYLOAD_DECODE_DEPTH,
+                &mut input,
+            )
+            .map_err(|_| Error::<T>::BadPreimage)?;
             Ok(calls)
         }
 

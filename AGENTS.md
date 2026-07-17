@@ -119,6 +119,7 @@ per milestone):
 |---|---|
 | Rust | `tools/ci/rust-workspace-gates.sh` (runs `cargo fmt --all -- --check` · `cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace` · runtime release/`runtime-benchmarks`/`try-runtime` builds + the try-runtime-enabled runtime suite (B6; the 15 §4.7 snapshot `try-runtime-cli` leg lands with B7/B8) · `no_std` build) |
 | Runtime crates | `try-state` green in test envs; benchmarks compile; no new `unwrap`/`expect`/`panic!`/`unsafe` in runtime code |
+| Fuzzing (15 §4.5) | `tools/ci/fuzz-gates.sh` (CI job `fuzz`, nightly-pinned separate `fuzz/` workspace): fmt/clippy/oracle-unit-tests · `cargo fuzz build` each target · corpus regression (`-runs=0`) · a short random smoke (`FUZZ_SMOKE_SECONDS`, default 30). Long campaigns/distillation/sanitizer matrices are B8 |
 | Reference model | `PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests`; vector freshness via `python3 tools/reference-model/generate-vectors.py --check`; normative LMSR documentation-table agreement via `python3 tools/reference-model/check-doc-table.py` (04 §5; 15 §4.4) |
 | Frontend (once scaffolded) | lint · typecheck · unit tests · build; dependency-cruiser firewall clean |
 | Docs | every relative link in living documents resolves |
@@ -147,6 +148,7 @@ per milestone):
 | `reference-model/` | scaffold (M3) | Placeholder root for independent Python executable spec + vector corpus |
 | `frontend/` | scaffold (Track F) | Placeholder root for monorepo per 10 §10 (`apps/web`, `packages/*`, `tools/*`) |
 | `zombienet/`, `chopsticks/`, `tools/env/` | B7 done | Test-environment definitions — release artifacts, not private fixtures (15 §4.7; 02 §11): zombienet relay+para(+AH/Coretime) topologies + the 09 §7.1 drill suite (`.zndsl` + js helpers), chopsticks forked-state scenario configs for every upgrade path and all six 06 §6.2 playbooks, pinned tooling (`tools/env/pins.env` single-homes the zombienet/chopsticks/polkadot-sdk/paseo-CSG pins) + fetch/generate scripts and the structural validator (`tools/env/validate-environments.py`, CI job `environments`). Execution of the suites against published artifacts is B8/G1 |
+| `fuzz/` | S2 done | `bleavit-fuzz` — cargo-fuzz (libFuzzer) targets for the three 15 §4.5 areas: `payload_scale_decode` (execution-guard `Payload` decode + guard invariants), `nested_wrapper_filter` (SafetyFilter I-10/I-11 differential vs an independent 06 §3.3 oracle, incl. `proxy_announced`/`as_multi_threshold_1`), `lmsr_trade_paths` (market-core I-12 drain bound over Decision/Gate/Baseline books). A **separate nightly-pinned cargo workspace** (root `exclude = ["keeper", "fuzz"]`, own `rust-toolchain.toml`): libFuzzer + nightly must never perturb the runtime workspace's `=`-exact stable2603 pins — the `keeper/` precedent. Curated seed corpora under `fuzz/corpus/`; `tools/ci/fuzz-gates.sh` (CI job `fuzz`) runs fmt/clippy/oracle-tests + build + corpus-regression + a short random smoke. Long campaigns/distillation are B8 |
 
 ## Changing the specification
 

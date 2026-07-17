@@ -21,6 +21,23 @@ jobs:
       - name: Rust workspace, runtime wasm, and try-runtime gates
         run: tools/ci/rust-workspace-gates.sh
 
+  fuzz:
+    name: Fuzzing (15 §4.5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2025-11-24
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.12.0 --locked
+      - name: Run invariant fuzz gates
+        run: tools/ci/fuzz-gates.sh
+
   reference-model:
     name: Reference model
     runs-on: ubuntu-latest

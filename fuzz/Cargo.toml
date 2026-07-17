@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = ["."]
+
+[package]
+name = "bleavit-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+license = "GPL-3.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = "1.4.1"
+execution-guard-core = { path = "../crates/execution-guard-core" }
+futarchy-fixed = { path = "../crates/futarchy-fixed" }
+futarchy-primitives = { path = "../crates/futarchy-primitives" }
+libfuzzer-sys = "0.4.13"
+market-core = { path = "../crates/market-core" }
+origins-core = { path = "../crates/origins-core" }
+parity-scale-codec = { version = "3.7.5", features = ["derive", "max-encoded-len"] }
+
+[[bin]]
+name = "payload_scale_decode"
+path = "fuzz_targets/payload_scale_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nested_wrapper_filter"
+path = "fuzz_targets/nested_wrapper_filter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lmsr_trade_paths"
+path = "fuzz_targets/lmsr_trade_paths.rs"
+test = false
+doc = false
+bench = false

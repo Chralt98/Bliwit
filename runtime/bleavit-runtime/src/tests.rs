@@ -1070,6 +1070,63 @@ fn nesting_budget_accepts_the_limit_and_fails_closed_beyond_it() {
     assert!(!RuntimeBaseCallFilter::contains(&oversized));
 }
 
+/// Decode-bomb hardening (15 §4.5, SQ-135): the execution guard decodes
+/// preimage-sourced batches (`decode_batch`) whose element type `RuntimeCall`
+/// nests recursively. Without a depth limit an adversarial hash-committed
+/// preimage of one deeply-nested call (≤ `MAX_BYTES`) would recurse in `Decode`
+/// until the wasm stack-height trap / native stack abort — a G-1 violation in
+/// audit-scope-A code. `MAX_PAYLOAD_DECODE_DEPTH` bounds the decode so an
+/// over-deep batch fails closed to a decode error rather than trapping, while a
+/// spec-legal shallow batch still decodes.
+#[test]
+fn deep_preimage_batch_decode_fails_closed_at_the_depth_limit() {
+    use parity_scale_codec::DecodeLimit;
+
+    // Construct + encode the over-deep call on a large-stack helper thread:
+    // building/encoding it recurses, but the depth-limited decode under test
+    // does not (it bails at the limit before recursing that far).
+    let deep_bytes = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let mut nested = remark();
+            for _ in 0..(kernel::MAX_PAYLOAD_DECODE_DEPTH as usize + 200) {
+                nested = RuntimeCall::Utility(pallet_utility::Call::batch {
+                    calls: vec![nested],
+                });
+            }
+            // A `RuntimeBatch` (BoundedVec<RuntimeCall, 16>) SCALE-encodes as a
+            // one-element vector carrying the deeply-nested call.
+            vec![nested].encode()
+        })
+        .expect("spawn deep-encode thread")
+        .join()
+        .expect("encode deep call");
+
+    let over_deep = pallet_execution_guard::RuntimeBatch::<Runtime>::decode_all_with_depth_limit(
+        kernel::MAX_PAYLOAD_DECODE_DEPTH,
+        &mut &deep_bytes[..],
+    );
+    assert!(
+        over_deep.is_err(),
+        "an over-deep preimage batch must fail closed at the depth limit, not trap"
+    );
+
+    // A legitimately shallow batch (within the `MAX_NESTED_LEVELS` filter bound)
+    // still decodes cleanly through the same depth-limited path.
+    let shallow_bytes = vec![RuntimeCall::Utility(pallet_utility::Call::batch {
+        calls: vec![remark()],
+    })]
+    .encode();
+    assert!(
+        pallet_execution_guard::RuntimeBatch::<Runtime>::decode_all_with_depth_limit(
+            kernel::MAX_PAYLOAD_DECODE_DEPTH,
+            &mut &shallow_bytes[..],
+        )
+        .is_ok(),
+        "a spec-legal shallow batch must still decode"
+    );
+}
+
 #[test]
 fn upgrade_filter_requires_internal_root_and_a_mature_pending_descriptor() {
     let authorize = RuntimeCall::System(frame_system::Call::authorize_upgrade {
