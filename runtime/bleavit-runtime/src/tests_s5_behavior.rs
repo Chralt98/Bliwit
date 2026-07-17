@@ -4,7 +4,10 @@ use alloc::{boxed::Box, collections::BTreeSet, format, string::String, vec, vec:
 
 use frame_support::{
     dispatch::GetDispatchInfo,
-    traits::{tokens::fungibles::Create, Contains},
+    traits::{
+        tokens::fungibles::{Create, Inspect},
+        Contains,
+    },
     weights::Weight,
 };
 use futarchy_primitives::{currency, kernel};
@@ -12,7 +15,10 @@ use origins_core::{BoxedCall, CallDomain, Origin as ClassOrigin, RuntimeCall as 
 use pallet_origins::{SafetyClassifier, SafetyFilter};
 use parity_scale_codec::Encode;
 use sp_keyring::Sr25519Keyring;
-use sp_runtime::{traits::Dispatchable, MultiAddress};
+use sp_runtime::{
+    traits::{AccountIdConversion, Dispatchable},
+    MultiAddress,
+};
 
 use crate::{
     classifier::{is_values_enactment_leaf, BleavitSafetyClassifier, RuntimeBaseCallFilter},
@@ -712,6 +718,45 @@ fn matching_origin(domain: CallDomain) -> Option<ClassOrigin> {
     }
 }
 
+fn epoch_privileged_calls() -> [(String, RuntimeCall, CallDomain); 5] {
+    [
+        (
+            String::from("Epoch.set_next_epoch_length"),
+            RuntimeCall::Epoch(pallet_epoch::Call::set_next_epoch_length {}),
+            CallDomain::ConstitutionalValues,
+        ),
+        (
+            String::from("Epoch.delay_once"),
+            RuntimeCall::Epoch(pallet_epoch::Call::delay_once {
+                pid: Default::default(),
+                justification_hash: Default::default(),
+            }),
+            CallDomain::GuardianHold,
+        ),
+        (
+            String::from("Epoch.veto_upheld"),
+            RuntimeCall::Epoch(pallet_epoch::Call::veto_upheld {
+                pid: Default::default(),
+            }),
+            CallDomain::GuardianHold,
+        ),
+        (
+            String::from("Epoch.force_reject_process_hold"),
+            RuntimeCall::Epoch(pallet_epoch::Call::force_reject_process_hold {
+                pid: Default::default(),
+            }),
+            CallDomain::GuardianHold,
+        ),
+        (
+            String::from("Epoch.void_cohort"),
+            RuntimeCall::Epoch(pallet_epoch::Call::void_cohort {
+                epoch: Default::default(),
+            }),
+            CallDomain::EmergencyPlaybook,
+        ),
+    ]
+}
+
 #[test]
 fn every_non_public_inventory_row_is_behaviorally_exercised() {
     let mut covered = BTreeSet::new();
@@ -758,6 +803,29 @@ fn every_non_public_inventory_row_is_behaviorally_exercised() {
             .into_iter()
             .all(core::convert::identity));
         covered.insert((String::from("Constitution"), String::from("set_param")));
+
+        // 05 §2.1/§3.2 and 06 §3.2: pin the concrete runtime constructors for
+        // every non-Public Epoch leaf, including both custom-origin domains.
+        for (name, call, domain) in epoch_privileged_calls() {
+            assert_eq!(
+                BleavitSafetyClassifier::project(&call),
+                FilterCall::Leaf(domain),
+                "classifier domain drift for {name}"
+            );
+            assert!(!SafetyFilter::<BleavitSafetyClassifier>::contains(&call));
+            assert_eq!(
+                RuntimeBaseCallFilter::contains(&call),
+                is_values_enactment_leaf(&call),
+                "origin-blind admission drift for {name}"
+            );
+            for origin in all_class_origins() {
+                assert_eq!(
+                    RuntimeBaseCallFilter::contains_for(origin, &call),
+                    Some(origin) == matching_origin(domain),
+                    "authority mismatch: {origin:?} -> {name} ({domain:?})"
+                );
+            }
+        }
     });
 
     upgrade_ext().execute_with(|| {
@@ -781,7 +849,7 @@ fn every_non_public_inventory_row_is_behaviorally_exercised() {
         ));
     });
 
-    // `amend_registry` is the contested SQ-135 conditional: 06 §2.1, 06 §3.2,
+    // `amend_registry` is the contested SQ-150 conditional: 06 §2.1, 06 §3.2,
     // and 13 rule 7 currently support incompatible policies. Its alternative
     // behavioral pins remain isolated in the ignored regressions below.
     let contested_scope = (String::from("Constitution"), String::from("amend_registry"));
@@ -930,8 +998,8 @@ fn privileged_wrappers_follow_same_origin_recursion_and_proxyish_denial() {
     // 06 §3.3's explicit rows make utility batch/with-weight and sudo recurse
     // with the SAME custom origin; proxy/multisig alone add the privileged-call
     // denial, and authority-changing/best-effort/scheduler/sudo_as shapes are
-    // denied outright. This remediation follows that plain SQ-137 reading;
-    // the broader user confirmation tracked by SQ-137 remains pending, and any
+    // denied outright. This remediation follows that plain SQ-152 reading;
+    // the broader user confirmation tracked by SQ-152 remains pending, and any
     // later ratification must preserve I-11.
     development_ext().execute_with(|| {
         let metadata = RuntimeMetadataModel::load();
@@ -1000,9 +1068,9 @@ fn privileged_wrappers_follow_same_origin_recursion_and_proxyish_denial() {
 }
 
 #[test]
-#[ignore = "SQ-135 (contested: 06 §2.1 authorizes CV amend_registry within meta-bounds; 06 §3.2 exclusive columns + 13 rule 7 read against; I-8 crossing real today)"]
+#[ignore = "SQ-150 (contested: 06 §2.1 authorizes CV amend_registry within meta-bounds; 06 §3.2 exclusive columns + 13 rule 7 read against; I-8 crossing real today)"]
 fn sq_135_constitutional_values_can_amend_meta_scoped_registry_rows() {
-    // CONTESTED (SQ-135): 06 §2.1 expressly authorizes ConstitutionalValues
+    // CONTESTED (SQ-150): 06 §2.1 expressly authorizes ConstitutionalValues
     // `amend_registry` within meta-bounds, supporting today's pallet behavior.
     // Against that, 06 §3.2's exclusive columns and 13 rule 7 assign
     // non-kernel rows to FutarchyMeta and refuse kernel-bounded amendments.
@@ -1016,15 +1084,15 @@ fn sq_135_constitutional_values_can_amend_meta_scoped_registry_rows() {
         let result = call.dispatch(pallet_origins::Origin::ConstitutionalValues.into());
         assert!(
             matches!(result, Err(error) if error.error == sp_runtime::DispatchError::BadOrigin),
-            "SQ-135 crossing: ConstitutionalValues amended non-kernel key {key:?}: {result:?}"
+            "SQ-150 crossing: ConstitutionalValues amended non-kernel key {key:?}: {result:?}"
         );
     });
 }
 
 #[test]
-#[ignore = "SQ-135 (contested: 06 §2.1 authorizes CV amend_registry within meta-bounds; 06 §3.2 exclusive columns + 13 rule 7 read against; I-8 crossing real today)"]
+#[ignore = "SQ-150 (contested: 06 §2.1 authorizes CV amend_registry within meta-bounds; 06 §3.2 exclusive columns + 13 rule 7 read against; I-8 crossing real today)"]
 fn sq_135_candidate_amend_registry_scope_matrix_is_not_enforced() {
-    // CONTESTED (SQ-135): this expected matrix is ONE CANDIDATE POLICY from
+    // CONTESTED (SQ-150): this expected matrix is ONE CANDIDATE POLICY from
     // reading 06 §3.2's exclusive Meta column together with 13 rule 7:
     // non-kernel rows are Meta-amendable and kernel-bounded rows are denied.
     // It is not "the" matrix: 06 §2.1 expressly authorizes CV amendments within
@@ -1046,21 +1114,21 @@ fn sq_135_candidate_amend_registry_scope_matrix_is_not_enforced() {
             assert_eq!(
                 BleavitSafetyClassifier::project(&call),
                 FilterCall::Leaf(expected_domain),
-                "SQ-135 candidate projection ignores the scope of {key:?}"
+                "SQ-150 candidate projection ignores the scope of {key:?}"
             );
             assert!(
                 !is_values_enactment_leaf(&call),
-                "SQ-135 candidate values membership ignores the scope of {key:?}"
+                "SQ-150 candidate values membership ignores the scope of {key:?}"
             );
             assert!(
                 !RuntimeBaseCallFilter::contains(&call),
-                "SQ-135 candidate bare admission ignores the scope of {key:?}"
+                "SQ-150 candidate bare admission ignores the scope of {key:?}"
             );
             for origin in all_class_origins() {
                 assert_eq!(
                     RuntimeBaseCallFilter::contains_for(origin, &call),
                     matching_origin(expected_domain) == Some(origin),
-                    "SQ-135 candidate: {origin:?} has the wrong authority over amend_registry({key:?})"
+                    "SQ-150 candidate: {origin:?} has the wrong authority over amend_registry({key:?})"
                 );
             }
         }
@@ -1087,8 +1155,6 @@ fn all_inventory_and_param_calls(metadata: &RuntimeMetadataModel) -> Vec<(String
     );
     calls
 }
-
-const SQ_136_FOREIGN_ASSETS_CREATE: &str = "ForeignAssets.create";
 
 fn inventory_derived_values_enactment_calls(
     metadata: &RuntimeMetadataModel,
@@ -1134,7 +1200,7 @@ fn inventory_derived_values_enactment_set_is_exact_and_cannot_be_laundered() {
             .map(|(name, _)| name.clone())
             .collect();
 
-        // SQ-135's `amend_registry` conditional is deliberately outside this
+        // SQ-150's `amend_registry` conditional is deliberately outside this
         // active comparison universe: its policy is contested independently.
         // Every ordinary inventory leaf/denial plus every live set_param class
         // remains eligible to expose an unexpected values-set addition.
@@ -1164,13 +1230,10 @@ fn inventory_derived_values_enactment_set_is_exact_and_cannot_be_laundered() {
             .map(|(name, _)| name)
             .collect();
 
-        // Exactly one production exception is pinned: SQ-136's genuine
-        // fail-closed omission. No second missing or extra membership may hide
-        // behind it.
         let missing: BTreeSet<_> = expected.difference(&actual).cloned().collect();
-        assert_eq!(
-            missing,
-            BTreeSet::from([String::from(SQ_136_FOREIGN_ASSETS_CREATE)])
+        assert!(
+            missing.is_empty(),
+            "missing values-enactment leaves: {missing:?}"
         );
         let extra: BTreeSet<_> = actual.difference(&expected).cloned().collect();
         assert!(
@@ -1179,15 +1242,12 @@ fn inventory_derived_values_enactment_set_is_exact_and_cannot_be_laundered() {
         );
 
         for (name, call) in expected_calls {
-            let is_sq_136_exception = name == SQ_136_FOREIGN_ASSETS_CREATE;
-            assert_eq!(
+            assert!(
                 is_values_enactment_leaf(&call),
-                !is_sq_136_exception,
                 "independently derived values membership drift: {name}"
             );
-            assert_eq!(
+            assert!(
                 RuntimeBaseCallFilter::contains(&call),
-                !is_sq_136_exception,
                 "bare values admission drift: {name}"
             );
             assert!(
@@ -1209,25 +1269,82 @@ fn inventory_derived_values_enactment_set_is_exact_and_cannot_be_laundered() {
 }
 
 #[test]
-#[ignore = "SQ-136 (genuine fail-closed reachability defect): ForeignAssets.create is CV-gated but absent from values enactment"]
-fn sq_136_foreign_assets_create_cannot_reenter_the_filter_from_the_values_scheduler() {
-    // SQ-136 is a genuine fail-closed reachability defect: the independently
-    // pinned inventory and pallet origin both say ConstitutionalValues, but
-    // omission from `is_values_enactment_leaf` makes the origin-blind scheduler
-    // dispatch fail before the pallet can enforce its CV origin. The severity
-    // is unreachability, not authority widening.
+fn values_domain_leaves_including_foreign_assets_create_are_scheduler_admissible() {
+    // SQ-151: every inventory-derived values leaf clears the origin-blind
+    // scheduler filter while retaining its origin-aware authority check.
     development_ext().execute_with(|| {
         let metadata = RuntimeMetadataModel::load();
         for (name, call) in inventory_derived_values_enactment_calls(&metadata) {
             assert!(
                 is_values_enactment_leaf(&call),
-                "SQ-136: values-domain leaf is absent from scheduler admission: {name}"
+                "values-domain leaf is absent from scheduler admission: {name}"
             );
             assert!(
                 RuntimeBaseCallFilter::contains(&call),
-                "SQ-136: values-domain leaf is filtered before its origin check: {name}"
+                "values-domain leaf is filtered before its origin check: {name}"
             );
+            let FilterCall::Leaf(domain) = BleavitSafetyClassifier::project(&call) else {
+                panic!("values-domain inventory leaf projected as a wrapper: {name}");
+            };
+            let origin = matching_origin(domain)
+                .unwrap_or_else(|| panic!("values-domain leaf has no matching origin: {name}"));
+            assert!(
+                RuntimeBaseCallFilter::contains_for(origin, &call),
+                "values-domain leaf does not reach its origin check: {name}"
+            );
+            for (wrapper, wrapped) in generated_closed_wrapper_compositions(call) {
+                assert!(
+                    !RuntimeBaseCallFilter::contains(&wrapped),
+                    "values-domain leaf escaped bare-only admission via {wrapper}({name})"
+                );
+            }
         }
+    });
+}
+
+#[test]
+fn foreign_assets_create_reaches_and_retains_its_constitutional_origin_check() {
+    development_ext().execute_with(|| {
+        let asset_id = USDC_ASSET_ID
+            .checked_add(1)
+            .expect("test asset id must fit the runtime AssetId");
+        let create = RuntimeCall::ForeignAssets(pallet_assets::Call::create {
+            id: asset_id,
+            admin: MultiAddress::Id(account(78)),
+            min_balance: currency::USDC_CENT,
+        });
+
+        assert!(is_values_enactment_leaf(&create));
+        assert!(RuntimeBaseCallFilter::contains(&create));
+        assert!(RuntimeBaseCallFilter::contains_for(
+            ClassOrigin::ConstitutionalValues,
+            &create
+        ));
+
+        let asset_owner = crate::configs::LedgerPalletId::get().into_account_truncating();
+        crate::Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            MultiAddress::Id(asset_owner),
+            currency::VIT,
+        )
+        .expect("the configured asset owner must be funded for its creation deposit");
+
+        let signed_result = create
+            .clone()
+            .dispatch(RuntimeOrigin::signed(account(79)));
+        assert!(
+            matches!(&signed_result, Err(error) if error.error == sp_runtime::DispatchError::BadOrigin),
+            "signed ForeignAssets.create must reach and fail CreateOrigin, got {signed_result:?}"
+        );
+        assert!(!ForeignAssets::asset_exists(asset_id));
+
+        let values_result =
+            create.dispatch(pallet_origins::Origin::ConstitutionalValues.into());
+        assert!(
+            values_result.is_ok(),
+            "ConstitutionalValues ForeignAssets.create must pass the base filter and CreateOrigin: {values_result:?}"
+        );
+        assert!(ForeignAssets::asset_exists(asset_id));
     });
 }
 
@@ -1415,7 +1532,7 @@ fn i8_inventory_is_disjoint_except_for_the_contested_sq_135_crossing() {
 }
 
 #[test]
-#[ignore = "SQ-135 (contested: 06 §2.1 authorizes CV amend_registry within meta-bounds; 06 §3.2 exclusive columns + 13 rule 7 read against; I-8 crossing real today)"]
+#[ignore = "SQ-150 (contested: 06 §2.1 authorizes CV amend_registry within meta-bounds; 06 §3.2 exclusive columns + 13 rule 7 read against; I-8 crossing real today)"]
 fn sq_135_i8_full_inventory_values_and_belief_scopes_overlap() {
     // CONTESTED policy, real crossing: regardless of whether 06 §2.1's CV
     // authorization or the 06 §3.2-exclusive/13-rule-7 reading ultimately

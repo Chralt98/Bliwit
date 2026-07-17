@@ -1040,7 +1040,9 @@ fn usdc_admin_and_fee_posture_is_fail_closed() {
         beneficiary: MultiAddress::Id(account(2)),
         amount: currency::USDC_CENT,
     });
-    assert!(!RuntimeBaseCallFilter::contains(&create));
+    // SQ-151: the bare scheduler leaf must clear the origin-blind base filter;
+    // the pallet's CreateOrigin remains the independent authority check.
+    assert!(RuntimeBaseCallFilter::contains(&create));
     assert!(RuntimeBaseCallFilter::contains_for(
         ClassOrigin::ConstitutionalValues,
         &create

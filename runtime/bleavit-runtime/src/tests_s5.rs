@@ -88,6 +88,12 @@ macro_rules! treatment {
     (leaf oracle_resolution) => {
         ExpectedTreatment::Leaf(CallDomain::OracleResolution)
     };
+    (leaf guardian_hold) => {
+        ExpectedTreatment::Leaf(CallDomain::GuardianHold)
+    };
+    (leaf emergency_playbook) => {
+        ExpectedTreatment::Leaf(CallDomain::EmergencyPlaybook)
+    };
     (leaf internal_root) => {
         ExpectedTreatment::Leaf(CallDomain::InternalRoot)
     };
@@ -224,6 +230,12 @@ inventory! {
     "Attestor" {
         leaf values => ["set_members", "resolve_challenge"];
         leaf public => ["attest", "challenge_attestation"];
+    }
+    "Epoch" {
+        leaf public => ["submit", "withdraw", "tick", "decide", "settle_cohort", "mark_executed", "mark_failed_executed", "retry_exhausted_to_measurement", "expire_or_stale_queue"];
+        leaf values => ["set_next_epoch_length"];
+        leaf guardian_hold => ["delay_once", "veto_upheld", "force_reject_process_hold"];
+        leaf emergency_playbook => ["void_cohort"];
     }
     "ExecutionGuard" {
         leaf values => ["ratify"];
