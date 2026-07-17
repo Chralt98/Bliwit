@@ -24,9 +24,7 @@
       "kind": "zombienet",
       "path": "zombienet/drills/03-keeper-loss.zndsl",
       "tier": "release",
-      "gated_on": [
-        "B9 topology wiring"
-      ],
+      "gated_on": [],
       "timeout_seconds": 1800,
       "spec": "15 §4.7; 09 §7.1"
     },
@@ -36,7 +34,7 @@
       "path": "zombienet/drills/04-dead-man.zndsl",
       "tier": "g1",
       "gated_on": [
-        "A8"
+        "B10 dead-man detector (the A8/A11 freeze surfaces are wired; no runtime caller of note_dead_man_engaged yet)"
       ],
       "timeout_seconds": 100000,
       "spec": "15 §4.7; 09 §7.1; 13 §2"
@@ -47,7 +45,8 @@
       "path": "zombienet/drills/05-coretime-renewal-under-dead-man.zndsl",
       "tier": "g1",
       "gated_on": [
-        "A8"
+        "B10 dead-man detector (the A8/A11 freeze surfaces are wired; no runtime caller of note_dead_man_engaged yet)",
+        "B10 coretime renewal staging for the 09 §7.1 exit form (quote-noting seam + class-origin ops.coretime funding + RenewalDispatch wiring; until then the helper's exemption-reachability form proves freeze traversal only, not a renewal)"
       ],
       "timeout_seconds": 100000,
       "spec": "09 §4/§7.1"
@@ -57,7 +56,10 @@
       "kind": "zombienet",
       "path": "zombienet/drills/06-pb-migration.zndsl",
       "tier": "release",
-      "gated_on": [],
+      "gated_on": [
+        "09 §3.2 migration-control surface (SQ-231): no migrations.force_failure/retry exists, so the MigrationHalt trigger can never go live in a drill and guardian playbook activation correctly refuses (TriggerInactive)",
+        "guardian playbook effect substrate (B1b SQ-176/SQ-144-effects): ActivatePlaybook's downstream effect dispatcher returns Err(\"guardian downstream effect is not represented on chain\") outside benchmarks, so the fifth approval fails even once the trigger is live"
+      ],
       "timeout_seconds": 1800,
       "spec": "09 §3.2/§7.1"
     },
@@ -67,8 +69,7 @@
       "path": "zombienet/drills/07-xcm-reserve-transfer.zndsl",
       "tier": "release",
       "gated_on": [
-        "SQ-101",
-        "B4 runtime wiring"
+        "B10 production XCM composition (SQ-101's Location re-key landed, but AssetTransactor, Barrier, IsReserve, IsTeleporter, OriginConverter and the sender side are all fail-closed () today, and spec_version is still 1 — the helper's B4-readiness gate keys on both)"
       ],
       "timeout_seconds": 1800,
       "spec": "15 §4.7; 09 §6.1"
@@ -89,9 +90,7 @@
       "kind": "zombienet",
       "path": "zombienet/drills/09-three-unattended-epochs.zndsl",
       "tier": "g1",
-      "gated_on": [
-        "A8"
-      ],
+      "gated_on": [],
       "timeout_seconds": 6001000,
       "spec": "15 §4.7; 09 §7.1; 13 §1"
     },

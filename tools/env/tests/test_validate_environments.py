@@ -52,6 +52,26 @@ class ValidateEnvironmentsTests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         self.assert_fails_with("parachain ids must be")
 
+    def test_keeper_rpc_port_mismatch_is_release_blocking(self) -> None:
+        path = self.root / "zombienet" / "networks" / "bleavit-local.toml"
+        text = path.read_text(encoding="utf-8").replace(
+            "rpc_port = 19944", "rpc_port = 19945", 1
+        )
+        path.write_text(text, encoding="utf-8")
+        self.assert_fails_with("rpc_port must match the keeper node URL")
+
+    def test_keeper_duplicate_shadowing_arg_is_release_blocking(self) -> None:
+        # The wrapper parses last-value-wins, so an appended duplicate URL would
+        # silently redirect the keeper; a subset check would accept it.
+        path = self.root / "zombienet" / "networks" / "bleavit-local.toml"
+        text = path.read_text(encoding="utf-8").replace(
+            '"--keeper-signer-uri=//Alice"]',
+            '"--keeper-signer-uri=//Alice", "--keeper-node-url=ws://127.0.0.1:19945"]',
+            1,
+        )
+        path.write_text(text, encoding="utf-8")
+        self.assert_fails_with("no duplicates or extras")
+
     def test_missing_hrmp_direction_is_release_blocking(self) -> None:
         path = self.root / "zombienet" / "networks" / "bleavit-xcm.toml"
         text = path.read_text(encoding="utf-8").replace(

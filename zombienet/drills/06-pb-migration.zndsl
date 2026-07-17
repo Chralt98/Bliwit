@@ -1,11 +1,9 @@
-# 15 §4.7; 09 §3.2/§7.1 — forced failure, bounded retry, forward rollback.
-Description: Manufacture a failed migration and exercise both PB-MIGRATION recovery branches.
+Description: Manufacture a failed migration and exercise both PB-MIGRATION recovery branches (15 §4.7; 09 §3.2/§7.1).
 Network: ./zombienet/networks/bleavit-local.toml
+Creds: config
 
 bleavit-collator-1: reports block height is at least 10 within 300 seconds
 bleavit-collator-1: js-script ./js/pb-migration.js with "force-failure" within 180 seconds
 bleavit-collator-1: js-script ./js/pb-migration.js with "retry" within 180 seconds
 bleavit-collator-1: js-script ./js/pb-migration.js with "force-failure" within 180 seconds
-# The helper uses the real guardian propose_action + four approve_action calls;
-# B6 must bind the dispatched Migration playbook effect to rollback initiation.
 bleavit-collator-1: js-script ./js/pb-migration.js with "rollback" within 300 seconds

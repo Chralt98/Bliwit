@@ -1,16 +1,16 @@
-# 15 §4.7; 09 §7.1 — keeper-loss window and chain-liveness assertion.
-Description: The B9 keeper is paused for an offline window while parachain block production remains live.
+Description: The B9 keeper is paused for an offline window while parachain block production remains live (15 §4.7; 09 §7.1).
 Network: ./zombienet/networks/bleavit-local.toml
+Creds: config
 
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "capture,keeper-precondition" within 30 seconds
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "assert,keeper-precondition,2" within 120 seconds
-# The precondition converts the absent B9 process into an explicit, stable
-# failure before the DSL attempts process control.
 bleavit-collator-1: js-script ./js/keeper-precondition.js within 30 seconds
+keeper: reports bleavit_keeper_connected is at least 1 within 120 seconds
 keeper: pause
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "capture,keeper-paused" within 30 seconds
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "assert,keeper-paused,2" within 120 seconds
 keeper: resume
 keeper: is up within 120 seconds
+keeper: reports bleavit_keeper_connected is at least 1 within 120 seconds
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "capture,keeper-resumed" within 30 seconds
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "assert,keeper-resumed,2" within 120 seconds

@@ -43,6 +43,15 @@ try:
 except (ImportError, ModuleNotFoundError):
     HAS_WEBSOCKETS_SYNC = False
 
+try:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _socket_probe:
+        _socket_probe.bind(("127.0.0.1", 0))
+    HAS_LOCAL_SOCKETS = True
+except OSError:
+    HAS_LOCAL_SOCKETS = False
+
+HAS_CHOPSTICKS_TEST_SUPPORT = HAS_WEBSOCKETS_SYNC and HAS_LOCAL_SOCKETS
+
 
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -315,6 +324,10 @@ class RunEvidenceTests(unittest.TestCase):
             self.root / "target" / "release" / "bleavit-node",
             "#!/bin/sh\nexit 0\n",
         )
+        self._write_executable(
+            self.root / "keeper" / "target" / "release" / "bleavit-keeper",
+            "#!/bin/sh\nexit 0\n",
+        )
 
         self.fake_chopsticks = self.root / "support" / "fake-chopsticks.py"
         self.fake_chopsticks.write_text(
@@ -539,7 +552,10 @@ class RunEvidenceTests(unittest.TestCase):
         self.assertIn("01-smoke, 03-keeper-loss", output)
         self.assert_no_evidence()
 
-    @unittest.skipUnless(HAS_WEBSOCKETS_SYNC, "websockets.sync requires websockets 15.x")
+    @unittest.skipUnless(
+        HAS_CHOPSTICKS_TEST_SUPPORT,
+        "Chopsticks tests require websockets 15.x and local sockets",
+    )
     def test_default_chopsticks_release_run_skips_gated_scenarios(self) -> None:
         result = self.run_runner("--kind", "chopsticks", "--tier", "release")
 
@@ -583,6 +599,47 @@ class RunEvidenceTests(unittest.TestCase):
         self.assertTrue(self.invocations.is_file())
         self.assertEqual(self.read_report_rows()["01-smoke"]["result"], "pass")
         self.assert_no_evidence()
+
+    def test_fixed_zombienet_port_must_be_free(self) -> None:
+        try:
+            listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            listener.bind(("127.0.0.1", 0))
+        except OSError as error:
+            self.skipTest(f"local socket bind unavailable: {error}")
+        self.addCleanup(listener.close)
+        port = int(listener.getsockname()[1])
+        topology = self.root / "zombienet" / "networks" / "bleavit-local.toml"
+        topology.write_text(
+            topology.read_text(encoding="utf-8") + f"rpc_port = {port}\n",
+            encoding="utf-8",
+        )
+        suite = next(
+            suite
+            for suite in RUNNER.load_manifest(self.root)
+            if suite.identifier == "01-smoke"
+        )
+
+        with self.assertRaisesRegex(RUNNER.EvidenceError, "already occupied"):
+            RUNNER.require_free_zombienet_ports(self.root, [suite])
+
+    def test_fixed_port_detection_sees_underscored_and_hex_integers(self) -> None:
+        # A formatting-only change (TOML underscore/hex integer spelling) must
+        # not hide a pinned port from the duplicate/bind checks.
+        topology = self.root / "zombienet" / "networks" / "bleavit-local.toml"
+        topology.write_text(
+            topology.read_text(encoding="utf-8")
+            + "p2p_port = 19_944\nws_port = 0x4DE8\n",
+            encoding="utf-8",
+        )
+        suite = next(
+            suite
+            for suite in RUNNER.load_manifest(self.root)
+            if suite.identifier == "01-smoke"
+        )
+        # 19_944 and 0x4DE8 both decode to 19944, colliding with the pinned
+        # keeper rpc_port — the duplicate check must see them.
+        with self.assertRaisesRegex(RUNNER.EvidenceError, "assigned to both"):
+            RUNNER.require_free_zombienet_ports(self.root, [suite])
 
     def test_gated_suite_is_skipped_then_attempted_when_included(self) -> None:
         suites_path = self.root / "tools" / "env" / "suites.json"
@@ -763,7 +820,10 @@ class RunEvidenceTests(unittest.TestCase):
         )
         self.assertFalse(state.exists())
 
-    @unittest.skipUnless(HAS_WEBSOCKETS_SYNC, "websockets.sync requires websockets 15.x")
+    @unittest.skipUnless(
+        HAS_CHOPSTICKS_TEST_SUPPORT,
+        "Chopsticks tests require websockets 15.x and local sockets",
+    )
     def test_chopsticks_storage_mismatch_fails_suite(self) -> None:
         result = self.run_runner(
             "--kind",
@@ -775,7 +835,10 @@ class RunEvidenceTests(unittest.TestCase):
         self.assertEqual(self.read_report_rows()["base"]["result"], "fail")
         self.assert_no_evidence()
 
-    @unittest.skipUnless(HAS_WEBSOCKETS_SYNC, "websockets.sync requires websockets 15.x")
+    @unittest.skipUnless(
+        HAS_CHOPSTICKS_TEST_SUPPORT,
+        "Chopsticks tests require websockets 15.x and local sockets",
+    )
     def test_chopsticks_live_code_mismatch_fails_suite(self) -> None:
         result = self.run_runner(
             "--kind",
@@ -836,7 +899,10 @@ class RunEvidenceTests(unittest.TestCase):
                 finally:
                     path.write_text(original, encoding="utf-8")
 
-    @unittest.skipUnless(HAS_WEBSOCKETS_SYNC, "websockets.sync requires websockets 15.x")
+    @unittest.skipUnless(
+        HAS_CHOPSTICKS_TEST_SUPPORT,
+        "Chopsticks tests require websockets 15.x and local sockets",
+    )
     def test_occupied_chopsticks_port_fails_suite(self) -> None:
         config = (self.root / "chopsticks" / "bleavit.yml").read_text(
             encoding="utf-8"
@@ -899,7 +965,10 @@ class RunEvidenceTests(unittest.TestCase):
         self.assertIn("chopsticks/.state/fixture.sqlite", output)
         self.assert_no_evidence()
 
-    @unittest.skipUnless(HAS_WEBSOCKETS_SYNC, "websockets.sync requires websockets 15.x")
+    @unittest.skipUnless(
+        HAS_CHOPSTICKS_TEST_SUPPORT,
+        "Chopsticks tests require websockets 15.x and local sockets",
+    )
     def test_chopsticks_stale_database_is_removed_before_startup(self) -> None:
         state = self.root / "chopsticks" / ".state"
         state.mkdir()

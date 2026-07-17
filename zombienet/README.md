@@ -23,6 +23,7 @@ Run from the repository root:
 tools/env/fetch-binaries.sh
 tools/env/generate-relay-specs.sh
 cargo build --release -p bleavit-node --locked
+(cd keeper && cargo build --release --locked -p bleavit-keeper)
 zombienet/bin/zombienet -p native spawn zombienet/networks/bleavit-local.toml
 zombienet/bin/zombienet -p native test zombienet/drills/01-smoke.zndsl
 ```
@@ -91,25 +92,37 @@ the final gate.
 | Drill | Spec | Runnable-now assertions | Gated assertions |
 |---|---|---|---|
 | `01-smoke` | 15 §4.7; 02 §11 | Four relay validators and three collators start; para 4242 registers and produces included blocks | none |
-| `02-collator-loss` | 15 §4.7; 09 §7.1 | Three collators boot; pre-fault/post-fault/recovery deltas and native SIGSTOP/SIGCONT steps are live definitions | First native-provider execution confirmation: G1 |
-| `03-keeper-loss` | 15 §4.7; 09 §7.1 | Chain-liveness delta runs before the dependency gate | Keeper reference implementation landed (B9, PR #62); wiring its process as a `keeper` topology node is the open follow-up — until then the helper fails loudly `keeper node absent — gated on B9` |
-| `04-dead-man` | 15 §4.7; 09 §7.1; 13 §2 | Native pause/resume and 4,800-relay-block RPC stall measurement | Freeze engagement/clear, queue, and clock assertions: A8/A11 wiring; first native run: G1 |
-| `05-coretime-renewal-under-dead-man` | 09 §4/§7.1 | XCM topology, relay-block stall measurement, liveness deltas, and the renewal call's **exemption-reachability form**: the dispatch must traverse the staged freeze into treasury logic and fail exactly `RenewalWindowClosed` (09 §4 exemption proven; a filter/freeze rejection fails the drill). Quotes/`ops.coretime` funding are deliberately unstageable from a chain spec or signed call | Full **staged-renewal form** (success + `CoretimeRenewalCalled`, the 09 §7.1 Phase-1 exit form): B1a wiring of the B4 quote-noting seam + the class-origin `fund_budget_line` path; A8/A11 freeze wiring; first native run: G1 |
-| `06-pb-migration` | 09 §3.2/§7.1 | B6 wires the migration controls and ExecutionGuard at slot 62; the forced-failure, retry, and guardian forward-rollback branches are executable | 09 §3.2 still carries a control-surface `[VERIFY]`; first native-provider execution must confirm the committed flow |
-| `07-xcm-reserve-transfer` | 15 §4.7; 09 §6.1 | v5 inputs and decoded source/destination event correlation are complete; bleavit/1 fails before AH debit; the recovery `ClaimAsset` send is dispatched through the local preset's **sudo** so it carries Asset Hub's bare chain origin (a signed send would descend to the signer's account origin and could never match the AH-chain-keyed trap) | B4 executor/router/caps + Location-keyed USDC wiring; AH sudo presence in the generated local preset must be confirmed at first run |
+| `02-collator-loss` | 15 §4.7; 09 §7.1 | **Passed end-to-end 2026-07-18 (G1)**: pre-fault/post-fault/recovery height deltas over real native SIGSTOP/SIGCONT (V-24 confirmed) | none |
+| `03-keeper-loss` | 15 §4.7; 09 §7.1 | **Passed end-to-end 2026-07-18 (G1)**: the real live-mode B9 daemon runs as Zombienet's `keeper` node (exec wrapper → keeper PID receives SIGSTOP/SIGCONT) and survives the pause/resume window; drill-asserted: pause/resume, `is up`, post-resume `bleavit_keeper_connected ≥ 1`, and parachain-height deltas proving collator liveness. Log-verified (not drill-asserted): role detection from live metadata | none |
+| `04-dead-man` | 15 §4.7; 09 §7.1; 13 §2 | Native pause/resume, 4,800-relay-block RPC stall measurement, and the freeze-assertion surfaces (`epoch.deadMan`, `executionGuard.deadManFreeze`, phase-flag bit 6) — the A8/A11 wiring landed, so the helper's metadata gates pass | Engagement itself: **B10** owns the dead-man detector — no runtime path calls `note_dead_man_engaged` yet, so a real stall never raises bit 6; plus the ~8 h real-time stall (g1 tier) |
+| `05-coretime-renewal-under-dead-man` | 09 §4/§7.1 | XCM topology, relay-block stall measurement, liveness deltas, and the renewal call's **exemption-reachability form**: the dispatch must traverse the staged freeze into treasury logic and fail exactly `RenewalWindowClosed` (09 §4 exemption proven; a filter/freeze rejection fails the drill). Quotes/`ops.coretime` funding are deliberately unstageable from a chain spec or signed call | Full **staged-renewal form** (success + `CoretimeRenewalCalled`, the 09 §7.1 Phase-1 exit form): the B4 quote-noting seam + the class-origin `fund_budget_line` path + `RenewalDispatch` wiring (B10) — until staged, a run under a live dead-man proves **freeze traversal only** (exemption-reachability), never a renewal, so the suite gate carries both entries; dead-man **engagement** additionally needs the B10 detector (see drill 04) |
+| `06-pb-migration` | 09 §3.2/§7.1 | First execution (G1, 2026-07-18) proved the guardian machinery live: seven-seat membership read, usable-balance funding, `propose_action` + three `approve_action`s all execute against the real runtime | **SQ-231**: no `migrations.force_failure`/`retry` exists (the 09 §3.2 control-surface `[VERIFY]` is unresolved), so the `MigrationHalt` trigger can never go live in a drill and the fifth, dispatching approval correctly refuses with `TriggerInactive`; **and** the guardian playbook effect substrate (B1b SQ-176/SQ-144-effects) — the downstream effect dispatcher rejects `ActivatePlaybook` outside benchmarks, so the dispatch would fail even with a live trigger |
+| `07-xcm-reserve-transfer` | 15 §4.7; 09 §6.1 | v5 inputs and decoded source/destination event correlation are complete; bleavit/1 fails before AH debit; the recovery `ClaimAsset` send is dispatched through the local preset's **sudo** so it carries Asset Hub's bare chain origin (a signed send would descend to the signer's account origin and could never match the AH-chain-keyed trap) | SQ-101's Location-keyed USDC landed; the remaining gate is **B10**'s production XCM composition — `AssetTransactor`, `Barrier`, `IsReserve`, `IsTeleporter`, `OriginConverter` and the sender side are all fail-closed `()` today — plus the first post-`bleavit/1` spec bump the helper keys on; AH sudo presence in the generated local preset must be confirmed at first run |
 | `08-expedited-code-under-freeze` | 09 §2.1/§3.2/§7.1 | B6 wires ExecutionGuard at slot 62; the receipt-aware authorize → early-reject → 43,200-block wait → apply definition targets that real surface | G1 setup must stage the attested queued proposal and active ledger freeze before the three-day lane runs |
-| `09-three-unattended-epochs` | 15 §4.7; 09 §7.1; 13 §1 | Phase-1 G1 long-soak targets 907,200 blocks (3 × 302,400); not a CI test | `EpochOf.index` assertion: A8 runtime wiring |
+| `09-three-unattended-epochs` | 15 §4.7; 09 §7.1; 13 §1 | Phase-1 G1 long-soak targets 907,200 blocks (3 × 302,400, split into three ≤ 2,000,000 s steps — Zombienet timeouts are 32-bit ms). Each step budgets 302,400 blocks per 2,000,000 s, i.e. assumes the kernel 6 s para-block cadence with ≈ 1.10× margin; confirm the observed local block rate before attempting the soak (a healthy 12 s-cadence chain would fail every step). The `EpochOf.index` assertion is armed (A8 wired) and the topology's `keeper` node supplies the epoch cranks; not a CI test | The ~63-day real-time run itself (SQ-128 holds it at the release-default epoch length) |
 
-NOTE(B7): the pinned `NativeClient` implements `pause`/`resume` with
-`SIGSTOP`/`SIGCONT`. Upstream DSL documentation still describes those commands
-as Podman/Kubernetes-only, so the committed native definitions are correct but
-their first end-to-end confirmation remains a G1 gate.
+NOTE(G1): drill-authoring constraints established by the first real `zndsl`
+executions (2026-07-17). The pinned Zombienet grammar (version:
+`tools/env/pins.env`) accepts **no `#` comment lines** (drill rationale therefore lives in this README, spec
+citations in the `Description:` line) and **requires a `Creds: config` line**
+after `Network:`. All Zombienet timeouts — the toml `[settings] timeout` and
+every DSL `within N seconds` — are converted to 32-bit signed milliseconds, so
+values above 2,147,483 s silently overflow (the original 6,000,000 s network
+timeout collapsed to a 1 ms watchdog); long waits must be split into
+sequential ≤ 2,000,000 s steps as drill 09 does.
 
-NOTE(B7): the current runtime still reserves but does not instantiate `Epoch`;
-B6 now instantiates `ExecutionGuard` at slot 62. Guardian trigger and coretime
-XCM seams that remain unwired are fail-closed. Helpers intentionally fail with
-precise messages when required state or metadata surfaces are absent; supported
-boot/liveness assertions remain live.
+NOTE(B7, confirmed G1): the pinned `NativeClient` implements `pause`/`resume`
+with `SIGSTOP`/`SIGCONT`. Upstream DSL documentation still describes those
+commands as Podman/Kubernetes-only; the first end-to-end native executions
+(drills 02/03, 2026-07-18) confirmed they work against real node and keeper
+PIDs (V-24).
+
+NOTE(B7, updated G1): `Epoch` (61) and `ExecutionGuard` (62) are instantiated
+in the runtime; the drill-blocking absences are now the **B10** surfaces (the
+dead-man detector and the XCM `AssetTransactor`/coretime staging seams) plus
+the 09 §3.2 migration-control surface. Helpers intentionally fail with
+precise messages when required state or metadata surfaces are absent;
+supported boot/liveness assertions remain live.
 
 ## Mandatory closing try-state
 

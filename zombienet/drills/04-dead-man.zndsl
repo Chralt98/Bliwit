@@ -1,18 +1,14 @@
-# 15 §4.7; 09 §7.1; 13 §2 — real-threshold relay-finality dead-man drill.
-Description: Two of four relay validators pause, finality stalls for the kernel threshold, and Bleavit freezes its queue and clock.
+Description: Two of four relay validators pause, finality stalls for the kernel threshold, and Bleavit freezes its queue and clock (15 §4.7; 09 §7.1; 13 §2).
 Network: ./zombienet/networks/bleavit-local.toml
+Creds: config
 
 relay-alice: is up within 120 seconds
 relay-bob: is up within 120 seconds
 relay-charlie: is up within 120 seconds
 relay-dave: is up within 120 seconds
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "capture,dead-man-pre-fault" within 30 seconds
-# Native pause/resume is SIGSTOP/SIGCONT in the pinned source; upstream docs
-# still describe podman/k8s, so first-run confirmation remains a G1 gate.
 relay-charlie: pause
 relay-dave: pause
-# Poll best and finalized relay heads until finality has been stalled for the
-# real 4,800-relay-block kernel threshold. No wall-clock proxy is accepted.
 bleavit-collator-1: js-script ./js/wait-relay-finality-stall.js with "4800" within 90000 seconds
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "assert,dead-man-pre-fault,2" within 120 seconds
 bleavit-collator-1: js-script ./js/assert-dead-man.js with "engaged" within 120 seconds

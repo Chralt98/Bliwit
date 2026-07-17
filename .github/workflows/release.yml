@@ -133,6 +133,9 @@ jobs:
         run: tools/deploy/generate-chain-specs.sh
       - name: Build the release node
         run: cargo build -p bleavit-node --release --locked
+      - name: Build the keeper (separate workspace; the drill topology launches it as node `keeper`)
+        run: cargo build --release --locked -p bleavit-keeper
+        working-directory: keeper
       - name: Fetch pinned environment binaries
         run: tools/env/fetch-binaries.sh
       - name: Generate local relay and parachain specs

@@ -144,6 +144,7 @@ When `metrics_bind` is set, Prometheus text is served at `/metrics` (and `/`). T
 - `bleavit_keeper_stale_decision_window_books{role=...}`
 - `bleavit_keeper_connected`
 - `bleavit_keeper_current_block`
+- `bleavit_process_start_time_seconds` (Zombienet-compatible process liveness)
 
 These daemon rows pair with the chain-side monitoring rows in
 [`12-release-and-operations.md` §6.3](../docs/architecture/12-release-and-operations.md): epoch

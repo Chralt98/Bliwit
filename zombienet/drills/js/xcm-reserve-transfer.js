@@ -346,7 +346,7 @@ async function recovery(api, alice, networkInfo) {
 async function run(nodeName, networkInfo, args) {
   const api = await connect(networkInfo, nodeName);
   await zombie.util.cryptoWaitReady();
-  const keyring = new zombie.Keyring({ type: "sr25519" });
+  const keyring = new zombie.Keyring({ type: "sr25519", ss58Format: api.registry.chainSS58 });
   const alice = keyring.addFromUri("//Alice");
   const leg = args[0];
   if (leg === "setup") return setup(api, alice, networkInfo);

@@ -72,7 +72,7 @@ async function run(nodeName, networkInfo, args) {
   const { wsUri, userDefinedTypes } = networkInfo.nodesByName[nodeName];
   const api = await zombie.connect(wsUri, userDefinedTypes);
   await zombie.util.cryptoWaitReady();
-  const keyring = new zombie.Keyring({ type: "sr25519" });
+  const keyring = new zombie.Keyring({ type: "sr25519", ss58Format: api.registry.chainSS58 });
   const alice = keyring.addFromUri("//Alice");
   const values = args.length === 1 ? String(args[0]).split(",") : args;
   const pid = Number(values[0]);

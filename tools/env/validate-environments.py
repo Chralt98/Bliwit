@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+import os
 import re
 import sys
 from pathlib import Path, PurePosixPath
@@ -69,6 +70,10 @@ NETWORKS = {
 }
 RELAY_SPEC_PATH = "zombienet/specs/out/paseo-local.json"
 CHOPSTICKS_GENESIS = "zombienet/specs/out/bleavit-drill-raw.json"
+KEEPER_COMMAND = "zombienet/scripts/keeper-node.sh"
+KEEPER_NODE_URL = "ws://127.0.0.1:19944"
+KEEPER_PROMETHEUS_PREFIX = "bleavit"
+KEEPER_RPC_PORT = 19944
 G1_DRILLS = {
     "04-dead-man.zndsl",
     "05-coretime-renewal-under-dead-man.zndsl",
@@ -383,6 +388,88 @@ def validate_networks(root: Path, failures: list[str]) -> None:
         collators = bleavit.get("collators") if isinstance(bleavit, dict) else None
         if not isinstance(collators, list) or len(collators) != 3:
             failures.append(f"15 §4.7: {name} must define three Bleavit collators")
+
+        if name == "bleavit-local.toml" and isinstance(relay, dict):
+            nodes = relay.get("nodes")
+            keeper_nodes = (
+                [
+                    node
+                    for node in nodes
+                    if isinstance(node, dict) and node.get("name") == "keeper"
+                ]
+                if isinstance(nodes, list)
+                else []
+            )
+            if len(keeper_nodes) != 1:
+                failures.append(
+                    "15 §4.7; 09 §7.1: bleavit-local.toml must define exactly one "
+                    "relay node named keeper"
+                )
+            else:
+                keeper = keeper_nodes[0]
+                expected_args = {
+                    f"--keeper-node-url={KEEPER_NODE_URL}",
+                    "--keeper-signer-uri=//Alice",
+                }
+                args = keeper.get("args")
+                if keeper.get("validator") is not False:
+                    failures.append(
+                        "15 §4.7: the keeper topology node must be a non-validator"
+                    )
+                if keeper.get("command") != KEEPER_COMMAND:
+                    failures.append(
+                        f"15 §4.7: the keeper topology command must be {KEEPER_COMMAND!r}"
+                    )
+                if keeper.get("substrate_cli_args_version") != 2:
+                    failures.append(
+                        "15 §4.7: the keeper wrapper must pin Substrate CLI args v2"
+                    )
+                if keeper.get("prometheus_prefix") != KEEPER_PROMETHEUS_PREFIX:
+                    failures.append(
+                        "15 §4.7: the keeper Prometheus prefix must match its process metric"
+                    )
+                # Exact-list equality: the wrapper parses last-value-wins, so a
+                # duplicate/extra `--keeper-node-url=...` appended after the
+                # required one would silently shadow it — a subset check would
+                # accept that (adversarial-review catch).
+                actual_args = (
+                    [arg for arg in args if isinstance(arg, str)]
+                    if isinstance(args, list)
+                    else []
+                )
+                if sorted(actual_args) != sorted(expected_args) or (
+                    isinstance(args, list) and len(args) != len(actual_args)
+                ):
+                    failures.append(
+                        "15 §4.7: the keeper topology args must be exactly the local "
+                        "collator RPC binding and the //Alice drill signer (no "
+                        "duplicates or extras — the wrapper parses last-value-wins)"
+                    )
+
+            collator_one = next(
+                (
+                    collator
+                    for collator in (
+                        collators if isinstance(collators, list) else []
+                    )
+                    if isinstance(collator, dict)
+                    and collator.get("name") == "bleavit-collator-1"
+                ),
+                None,
+            )
+            if (
+                not isinstance(collator_one, dict)
+                or collator_one.get("rpc_port") != KEEPER_RPC_PORT
+            ):
+                failures.append(
+                    "15 §4.7: bleavit-collator-1 rpc_port must match the keeper node URL"
+                )
+
+            wrapper = root / KEEPER_COMMAND
+            if not wrapper.is_file() or not os.access(wrapper, os.X_OK):
+                failures.append(
+                    f"15 §4.7: keeper wrapper must exist and be executable: {KEEPER_COMMAND}"
+                )
 
     xcm = parsed.get("bleavit-xcm.toml")
     if xcm is not None:

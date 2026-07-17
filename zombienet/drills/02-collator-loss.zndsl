@@ -1,14 +1,12 @@
-# 15 §4.7; 09 §7.1 — one-of-three collator-loss drill.
-Description: One Bleavit collator is paused while the other two preserve parachain liveness, then it resumes.
+Description: One Bleavit collator is paused while the other two preserve parachain liveness, then it resumes (15 §4.7; 09 §7.1).
 Network: ./zombienet/networks/bleavit-local.toml
+Creds: config
 
 bleavit-collator-1: is up within 180 seconds
 bleavit-collator-2: is up within 180 seconds
 bleavit-collator-3: is up within 180 seconds
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "capture,collator-1-pre-fault" within 30 seconds
 bleavit-collator-2: js-script ./js/assert-chain-liveness.js with "capture,collator-2-pre-fault" within 30 seconds
-# Native pause/resume is SIGSTOP/SIGCONT in the pinned source; upstream docs
-# still describe podman/k8s, so first-run confirmation remains a G1 gate.
 bleavit-collator-1: pause
 bleavit-collator-2: js-script ./js/assert-chain-liveness.js with "assert,collator-2-pre-fault,2" within 120 seconds
 bleavit-collator-1: resume

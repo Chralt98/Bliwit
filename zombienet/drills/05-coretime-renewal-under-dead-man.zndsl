@@ -1,13 +1,10 @@
-# 15 §4.7; 09 §4/§7.1 — freeze-exempt coretime renewal call.
-Description: Under a staged dead-man freeze the permissionless coretime-renewal call remains dispatchable on the XCM topology.
+Description: Under a staged dead-man freeze the permissionless coretime-renewal call remains dispatchable on the XCM topology (15 §4.7; 09 §4/§7.1).
 Network: ./zombienet/networks/bleavit-xcm.toml
+Creds: config
 
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "capture,coretime-pre-fault" within 30 seconds
-# Native pause/resume is SIGSTOP/SIGCONT in the pinned source; upstream docs
-# still describe podman/k8s, so first-run confirmation remains a G1 gate.
 relay-charlie: pause
 relay-dave: pause
-# Real dead-man threshold measured from relay best/finalized RPC heads.
 bleavit-collator-1: js-script ./js/wait-relay-finality-stall.js with "4800" within 90000 seconds
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "assert,coretime-pre-fault,2" within 120 seconds
 bleavit-collator-1: js-script ./js/assert-dead-man.js with "engaged" within 120 seconds

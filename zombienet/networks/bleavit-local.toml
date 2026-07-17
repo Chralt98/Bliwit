@@ -1,9 +1,12 @@
 # Bleavit local drill topology — 15 §4.7; 02 §8/§11; 09 §7.1.
 [settings]
 provider = "native"
-# Accommodates the Phase-1 907,200-block G1 long soak; individual drill steps
-# retain tighter fail-fast bounds.
-timeout = 6000000
+# Zombienet timeouts are converted to 32-bit signed milliseconds, so any value
+# above 2,147,483 s silently overflows (observed: 6,000,000 s collapsed to a
+# 1 ms watchdog on the first G1 execution). The long-soak drill bounds live in
+# per-step `within` clauses (each ≤ 2,000,000 s); this global value only guards
+# network operations.
+timeout = 1000
 node_spawn_timeout = 240
 
 [relaychain]
@@ -28,6 +31,17 @@ validator = true
 name = "relay-dave"
 validator = true
 
+# Zombienet has no auxiliary-process stanza. This non-validator node entry
+# gives the real B9 keeper a managed PID and Prometheus endpoint so drill 03's
+# native SIGSTOP/SIGCONT controls target the daemon itself.
+[[relaychain.nodes]]
+name = "keeper"
+validator = false
+command = "zombienet/scripts/keeper-node.sh"
+substrate_cli_args_version = 2
+prometheus_prefix = "bleavit"
+args = ["--keeper-node-url=ws://127.0.0.1:19944", "--keeper-signer-uri=//Alice"]
+
 [[parachains]]
 id = 4242
 chain_spec_path = "zombienet/specs/out/bleavit-drill.json"
@@ -36,6 +50,7 @@ cumulus_based = true
 [[parachains.collators]]
 name = "bleavit-collator-1"
 command = "target/release/bleavit-node"
+rpc_port = 19944
 
 [[parachains.collators]]
 name = "bleavit-collator-2"

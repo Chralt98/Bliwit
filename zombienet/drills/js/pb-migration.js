@@ -3,7 +3,8 @@ function findEvent(events, section, method) {
   return events.find(({ event }) => event.section === section && event.method === method)?.event;
 }
 
-function submit(call, signer, expected = []) {
+function submit(call, signer, expected = [], label = "") {
+  const context = label || `${call.method.section}.${call.method.method}`;
   return new Promise((resolve, reject) => {
     let unsubscribe;
     let settled = false;
@@ -12,15 +13,16 @@ function submit(call, signer, expected = []) {
       if (unsubscribe) unsubscribe();
       callback();
     };
+    const fail = (error) => reject(new Error(`${context}: ${error}`));
     call.signAndSend(signer, ({ dispatchError, events, status }) => {
       if (dispatchError) {
-        finish(() => reject(new Error(dispatchError.toString())));
+        finish(() => fail(dispatchError.toString()));
       } else if (status.isInBlock) {
         const missing = expected.filter(([section, method]) => !findEvent(events, section, method));
         if (missing.length) {
-          finish(() => reject(new Error(
+          finish(() => fail(
             `in-block receipt missing ${missing.map((entry) => entry.join(".")).join(", ")}`,
-          )));
+          ));
         } else {
           finish(() => resolve(events));
         }
@@ -28,7 +30,7 @@ function submit(call, signer, expected = []) {
     }).then((unsub) => {
       unsubscribe = unsub;
       if (settled) unsubscribe();
-    }).catch((error) => finish(() => reject(error)));
+    }).catch((error) => finish(() => fail(error)));
   });
 }
 
@@ -37,10 +39,16 @@ async function ensureMembershipAndFunding(api, keyring) {
   if (membersValue.isNone) {
     throw new Error("NOTE(B7): injected seven-seat guardian membership is absent");
   }
-  const members = membersValue.unwrap().map((member) => member.toString());
+  // Members is the frame-free core's raw [u8;32] seat array, so it decodes as
+  // bytes, never ss58 — compare raw account keys on both sides.
+  const members = membersValue
+    .unwrap()
+    .map((member) => api.createType("AccountId32", member.toU8a()).toHex());
   const signers = ["//Alice", "//Bob", "//Charlie", "//Dave", "//Eve"]
     .map((uri) => keyring.addFromUri(uri));
-  const missing = signers.filter((signer) => !members.includes(signer.address));
+  const missing = signers.filter(
+    (signer) => !members.includes(api.createType("AccountId32", signer.publicKey).toHex()),
+  );
   if (missing.length) {
     throw new Error(`injected guardian membership omits ${missing.map((s) => s.address).join(", ")}`);
   }
@@ -50,8 +58,12 @@ async function ensureMembershipAndFunding(api, keyring) {
   if (!transfer) throw new Error("balances.transfer_allow_death is absent");
   for (const signer of signers.slice(1)) {
     const account = await api.query.system.account(signer.address);
-    if (account.data.free.toBigInt() < 1_000_000_000_000n) {
-      await submit(transfer(signer.address, 2_000_000_000_000n), alice);
+    // Fees ride the fungible adapter, which cannot touch frozen (vesting-locked)
+    // funds — the genesis-vested guardians have large `free` but zero usable
+    // balance, so gate the top-up on free minus frozen, not free.
+    const usable = account.data.free.toBigInt() - account.data.frozen.toBigInt();
+    if (usable < 1_000_000_000_000n) {
+      await submit(transfer(signer.address, 2_000_000_000_000n), alice, [], `fund ${signer.address}`);
     }
   }
   return signers;
@@ -80,7 +92,7 @@ async function guardianRollbackWorkflow(api, keyring) {
   const action = findEvent(proposed, "guardian", "ActionProposed");
   const actionId = action.data[0].toNumber();
   for (const signer of signers.slice(1, 4)) {
-    await submit(guardian.approveAction(actionId), signer, [["guardian", "ActionApproved"]]);
+    await submit(guardian.approveAction(actionId), signer, [["guardian", "ActionApproved"]], `guardian.approveAction by ${signer.address}`);
   }
   await submit(
     guardian.approveAction(actionId),
@@ -100,7 +112,7 @@ async function run(nodeName, networkInfo, args) {
   const { wsUri, userDefinedTypes } = networkInfo.nodesByName[nodeName];
   const api = await zombie.connect(wsUri, userDefinedTypes);
   await zombie.util.cryptoWaitReady();
-  const keyring = new zombie.Keyring({ type: "sr25519" });
+  const keyring = new zombie.Keyring({ type: "sr25519", ss58Format: api.registry.chainSS58 });
   const alice = keyring.addFromUri("//Alice");
   const branch = args[0];
 

@@ -26,10 +26,30 @@ if [[ "$actual_commit" != "$PASEO_CSG_COMMIT" ]]; then
   exit 1
 fi
 
-CARGO_TARGET_DIR="$generator_target" cargo build \
+# WASM_BUILD_WORKSPACE_HINT: substrate-wasm-builder locates the workspace by
+# walking UP from OUT_DIR (not from the source manifest). With CARGO_TARGET_DIR
+# inside this repository, that walk escapes the Paseo clone and finds Bleavit's
+# Cargo.lock first, so `cargo metadata` runs over the wrong workspace and every
+# paseo runtime build script panics "Failed to find entry for package …". The
+# hint pins the walk to the pinned Paseo workspace (the builder's designed
+# escape hatch for exactly this layout).
+# fast-runtime features (G1, first real execution finding): the relay builds
+# parachain ValidatorGroups only at session boundaries, and the default
+# paseo-local session is 600 blocks (~1 h) — until the first boundary no
+# parachain can be scheduled at all, which starves every drill's assertion
+# window. The pinned Paseo tree's own fast-runtime feature shortens local
+# sessions to 10 blocks (first boundary ≈ block 10), the standard local-net
+# configuration across the ecosystem. The generator's `fast-runtime` feature
+# forwards only to the RELAY runtime, so the coretime and asset-hub system
+# runtimes must be toggled explicitly — otherwise the generated XCM topology
+# carries a relay/parachain TIMESLICE_PERIOD split (20 vs 80), corrupting
+# exactly the 09 §4 coretime drills the topology exists for. Paseo-side
+# runtimes only; no Bleavit runtime byte or 13-owned tunable is affected.
+WASM_BUILD_WORKSPACE_HINT="$cache" CARGO_TARGET_DIR="$generator_target" cargo build \
   --manifest-path "$cache/Cargo.toml" \
   --release \
   --locked \
+  --features "fast-runtime,coretime-paseo-runtime/fast-runtime,asset-hub-paseo-runtime/fast-runtime" \
   -p chain-spec-generator
 
 generator="$generator_target/release/chain-spec-generator"
@@ -59,6 +79,33 @@ generate_json() {
 generate_json paseo-local "$out/paseo-local.json"
 generate_json asset-hub-paseo-local "$out/asset-hub-paseo-local.json"
 generate_json coretime-paseo-local "$out/coretime-paseo-local.json"
+
+# Drill-relay genesis override (G1, first real execution finding): the paseo
+# `local` preset leaves `scheduler_params.num_cores = 0`. ValidatorGroups are
+# built only at session boundaries from the then-active `num_cores`, and the
+# scheduler's `expected_claim_queue_len = min(num_cores, validator_groups)`
+# never polls the zombienet-injected coretime assignments while either factor
+# is 0. Seeding `num_cores = 3` at genesis guarantees the first boundary
+# (block ~10 under fast-runtime above) builds groups with headroom for the
+# largest topology (bleavit-xcm: 4242 + Asset Hub + Coretime; zombienet adds
+# its own per-para bump on top). Relay-side host configuration for the local
+# drill relay only — no 13-owned Bleavit tunable is touched.
+python3 - "$out/paseo-local.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as handle:
+    spec = json.load(handle)
+config = (
+    spec["genesis"]["runtimeGenesis"]["patch"]
+    .setdefault("configuration", {})
+    .setdefault("config", {})
+)
+scheduler = config.setdefault("scheduler_params", {})
+scheduler["num_cores"] = 3
+with open(path, "w") as handle:
+    json.dump(spec, handle, indent=2)
+    handle.write("\n")
+PY
 
 # Reuse the B3-pinned runtime/spec pipeline. The constitution registry is
 # code-owned and cannot be genesis-replaced; the drill patch only repeats the
