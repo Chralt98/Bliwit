@@ -102,6 +102,8 @@ jobs:
           python-version: '3.12'
       - name: Check local Markdown links
         run: python3 tools/ci/check-doc-links.py
+      - name: Check PLAN.md table structure
+        run: python3 tools/ci/check-plan-tables.py
 
   # S1 formal models — 15 §4.1; 03 §11.
   model-checking:

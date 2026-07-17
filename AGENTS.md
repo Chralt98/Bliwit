@@ -131,7 +131,7 @@ per milestone):
 | Tooling suites | `python3 -m unittest discover -s <dir>` over `tools/deploy/tests`, `tools/reference-model/tests`, `tools/release/tests`, `tools/env/tests`, `tools/ci/tests` (the env suite needs `pyyaml==6.0.2` + `websockets==15.0.1`); `python3 tools/env/validate-environments.py` |
 | Release sweep (04 §4 cadence) | full ≥10⁷-point corpus: `python3 tools/reference-model/generate-vectors.py --sweep-out <dir>` then `BLEAVIT_SWEEP_DIR=<dir> BLEAVIT_SWEEP_REQUIRE_FULL=1 cargo test -p futarchy-fixed --release --locked --test sweep -- --ignored`; runs in `release.yml` and on kernel/numerics changes via `sweep.yml` — not per-commit |
 | Frontend (once scaffolded) | lint · typecheck · unit tests · build; dependency-cruiser firewall clean |
-| Docs | every relative link in living documents resolves |
+| Docs | every relative link in living documents resolves; PLAN.md's Markdown tables are structurally well-formed (`python3 tools/ci/check-plan-tables.py` — standing user instruction 2026-07-17: table formatting must never drift/break; also a Stop hook) |
 
 ## Repository layout
 

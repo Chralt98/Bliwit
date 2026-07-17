@@ -30,6 +30,12 @@ Everything above (imported from AGENTS.md) is binding. Below is the Claude-Code-
 - **Stop guard (`guard-readme.sh`)** blocks ending a session if README.md's pinned
   opening (thank-you to Prof. Robin Hanson) or closing (Bon appétit) line has been
   altered (rule R-11, AGENTS.md). Restore the exact wording instead of retrying.
+- **Stop guard (`guard-plan-tables.sh`)** blocks ending a session if any PLAN.md
+  Markdown table is structurally broken (orphaned rows severed from their header by
+  a blank line, wrong cell count, unescaped `|` — GFM splits cells on pipes even
+  inside backticks; escape as `\|`). Standing user instruction (2026-07-17): PLAN.md
+  table formatting must never drift/break. Fix the reported rows (same checker as
+  the docs CI job: `python3 tools/ci/check-plan-tables.py`) instead of retrying.
 
 > There is no longer any write guard on `docs/architecture/`. The spec is editable;
 > change it deliberately per rule R-1 (AGENTS.md · *Changing the specification*).
