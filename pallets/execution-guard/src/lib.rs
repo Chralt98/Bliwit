@@ -47,7 +47,8 @@ use frame_support::{
     BoundedVec,
 };
 use futarchy_primitives::{
-    kernel, BlockNumber, ProposalClass, ProposalId, ResourceId, RuntimeVersionConstraint, H256,
+    kernel, BlockNumber, EpochId, ProposalClass, ProposalId, ResourceId, RuntimeVersionConstraint,
+    H256,
 };
 
 pub use execution_guard_core::{
@@ -119,6 +120,7 @@ pub trait Attestations {
 /// Guardian/playbook projection used at ordered checks 9 and 10.
 pub trait GuardianState {
     fn rerun_held(pid: ProposalId) -> bool;
+    fn gate_suspended() -> bool;
     fn ledger_freeze_active() -> bool;
 }
 
@@ -411,6 +413,12 @@ pub mod pallet {
     #[pallet::storage]
     pub type MigrationHalt<T: Config> = StorageValue<_, bool, ValueQuery>;
 
+    /// Epoch-scoped guardian suspension. It is effective only while the runtime
+    /// projection reports the same current epoch and the hard-gate flag remains
+    /// live (06 §5.2; 09 §1.2 check 9).
+    #[pallet::storage]
+    pub type GateSuspension<T: Config> = StorageValue<_, EpochId, OptionQuery>;
+
     /// Queue-time-frozen expedited-lane bit; kept outside the frozen Queue value.
     #[pallet::storage]
     pub type Expedited<T: Config> = StorageMap<_, Blake2_128Concat, ProposalId, bool, ValueQuery>;
@@ -507,6 +515,7 @@ pub mod pallet {
         MetersBlocked,
         ResourceLockMissing,
         GuardianHold,
+        GateSuspended,
         FreezeActive,
         PayloadTooLarge,
         TooManyCalls,
@@ -791,6 +800,17 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        /// Runtime-internal producer for guardian `suspend_on_gate`.
+        pub fn set_gate_suspension(epoch: EpochId) {
+            GateSuspension::<T>::put(epoch);
+        }
+
+        /// Runtime-internal early-clear hook. Effective suspension is already
+        /// lazy (`current epoch && breach`); this removes stale observability.
+        pub fn clear_gate_suspension() {
+            GateSuspension::<T>::kill();
+        }
+
         /// Internal enqueue endpoint. B1a's A8 adapter constructs `item` from
         /// pallet-epoch's adopted proposal and supplies the epoch-decision
         /// origin; it is not a public extrinsic (I-9).
@@ -1130,6 +1150,7 @@ pub mod pallet {
 
             // (9) guardian hold.
             ensure!(!T::Guardian::rerun_held(pid), Error::<T>::GuardianHold);
+            ensure!(!T::Guardian::gate_suspended(), Error::<T>::GateSuspended);
 
             // (10) gate/freezes. Only the queue-time-frozen expedited lane may
             // treat its triggering ledger/migration freeze as satisfied.
@@ -1557,7 +1578,7 @@ pub mod pallet {
             T::Hashing::hash(bytes).into()
         }
 
-        fn decode_batch(bytes: &[u8]) -> Result<RuntimeBatch<T>, DispatchError> {
+        pub fn decode_batch(bytes: &[u8]) -> Result<RuntimeBatch<T>, DispatchError> {
             let mut prefix = bytes;
             let call_count = Compact::<u32>::decode(&mut prefix)
                 .map_err(|_| Error::<T>::BadPreimage)?
@@ -1617,6 +1638,7 @@ pub mod pallet {
                 current_spec_name: Self::current_spec()?,
                 held_resources: HeldResources::<T>::get().into_inner(),
                 blocked_meters: BlockedMeters::<T>::get().into_inner(),
+                gate_suspended: T::Guardian::gate_suspended(),
                 hard_gate_breach: HardGateBreach::<T>::get(),
                 dead_man_freeze: DeadManFreeze::<T>::get(),
                 migration_halt: MigrationHalt::<T>::get(),
@@ -1922,6 +1944,7 @@ pub mod pallet {
                 CoreError::MetersBlocked => Error::<T>::MetersBlocked.into(),
                 CoreError::ResourceLockMissing => Error::<T>::ResourceLockMissing.into(),
                 CoreError::GuardianHold => Error::<T>::GuardianHold.into(),
+                CoreError::GateSuspended => Error::<T>::GateSuspended.into(),
                 CoreError::FreezeActive => Error::<T>::FreezeActive.into(),
                 CoreError::PayloadTooLarge => Error::<T>::PayloadTooLarge.into(),
                 CoreError::TooManyCalls => Error::<T>::TooManyCalls.into(),

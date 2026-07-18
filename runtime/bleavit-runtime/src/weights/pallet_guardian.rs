@@ -123,14 +123,9 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 	/// Storage: `Epoch::Proposals` (r:1 w:0)
 	/// Proof: `Epoch::Proposals` (`max_values`: None, `max_size`: Some(326), added: 2801, mode: `MaxEncodedLen`)
 	fn approve_action() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `51349`
-		//  Estimated: `31567`
-		// Minimum execution time: 87_210_000 picoseconds.
-		Weight::from_parts(89_330_000, 0)
-			.saturating_add(Weight::from_parts(0, 31567))
-			.saturating_add(T::DbWeight::get().reads(12))
-			.saturating_add(T::DbWeight::get().writes(9))
+		Weight::from_parts(1_950_000_000, 183055)
+			.saturating_add(T::DbWeight::get().reads(220))
+			.saturating_add(T::DbWeight::get().writes(150))
 	}
 	/// Storage: `Guardian::Members` (r:1 w:1)
 	/// Proof: `Guardian::Members` (`max_values`: Some(1), `max_size`: Some(224), added: 719, mode: `MaxEncodedLen`)
@@ -153,14 +148,9 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 	/// Storage: `Guardian::NextActionId` (r:1 w:1)
 	/// Proof: `Guardian::NextActionId` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn ratify_action() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `51468`
-		//  Estimated: `31567`
-		// Minimum execution time: 71_610_000 picoseconds.
-		Weight::from_parts(73_190_000, 0)
-			.saturating_add(Weight::from_parts(0, 31567))
-			.saturating_add(T::DbWeight::get().reads(10))
-			.saturating_add(T::DbWeight::get().writes(9))
+		Weight::from_parts(1_950_000_000, 183055)
+			.saturating_add(T::DbWeight::get().reads(220))
+			.saturating_add(T::DbWeight::get().writes(150))
 	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
@@ -194,6 +184,16 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 			.saturating_add(T::DbWeight::get().reads(11))
 			.saturating_add(T::DbWeight::get().writes(9))
 	}
+	fn uphold_veto() -> Weight {
+		Weight::from_parts(1_950_000_000, 183055)
+			.saturating_add(T::DbWeight::get().reads(220))
+			.saturating_add(T::DbWeight::get().writes(150))
+	}
+	fn recall() -> Weight {
+		Weight::from_parts(300_000_000, 50000)
+			.saturating_add(T::DbWeight::get().reads(35))
+			.saturating_add(T::DbWeight::get().writes(35))
+	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	/// Storage: `Guardian::LastSeenEpoch` (r:1 w:1)
@@ -217,13 +217,13 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 	/// Storage: `Guardian::NextActionId` (r:1 w:1)
 	/// Proof: `Guardian::NextActionId` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn on_initialize() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `51365`
-		//  Estimated: `31567`
-		// Minimum execution time: 481_410_000 picoseconds.
-		Weight::from_parts(485_680_000, 0)
-			.saturating_add(Weight::from_parts(0, 31567))
-			.saturating_add(T::DbWeight::get().reads(11))
-			.saturating_add(T::DbWeight::get().writes(10))
+		Weight::from_parts(1_950_000_000, 183055)
+			.saturating_add(T::DbWeight::get().reads(220))
+			.saturating_add(T::DbWeight::get().writes(150))
+	}
+	/// B1b v2 benchmark stub: one bounded playbook-registration write.
+	fn set_playbook_registered() -> Weight {
+		Weight::from_parts(10_000_000, 1_500)
+			.saturating_add(T::DbWeight::get().writes(1))
 	}
 }

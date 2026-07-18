@@ -329,7 +329,7 @@ class SurfaceManifestTests(unittest.TestCase):
                 {
                     "id": "b1b.compliance",
                     "owner": "B1b",
-                    "reason": "SQ-172..SQ-182 remain open",
+                    "reason": "SQ-173..SQ-175, SQ-177, SQ-180..SQ-182 remain open (fail-closed adoption-input backing gaps; per-SQ owners)",
                 },
                 {
                     "id": "treasury.reserve_health_unwired",

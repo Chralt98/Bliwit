@@ -15,7 +15,7 @@ pub const GUARDIAN_BOND: Balance = 50_000_000_000_000_000;
 pub const ACTION_EXPIRY_BLOCKS: BlockNumber = 43_200;
 pub const REVIEW_DEADLINE_EPOCHS: EpochId = 2;
 pub const REVIEW_SLASH_PERCENT: u8 = 50;
-pub const HOLD_MAX_BLOCKS: BlockNumber = 201_600;
+pub const HOLD_MAX_BLOCKS: BlockNumber = futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS;
 // 13 §3.4: `frn.window = dec.extension` (shared K).
 pub const FORCE_RERUN_WINDOW_BLOCKS: BlockNumber =
     futarchy_primitives::kernel::DEC_EXTENSION_BLOCKS;
@@ -92,6 +92,15 @@ pub enum PlaybookId {
     LedgerFreeze,
 }
 
+pub const ALL_PLAYBOOKS: [PlaybookId; 6] = [
+    PlaybookId::Depeg,
+    PlaybookId::Migration,
+    PlaybookId::OracleVoid,
+    PlaybookId::HaltIntake,
+    PlaybookId::Reserve,
+    PlaybookId::LedgerFreeze,
+];
+
 #[derive(
     Clone,
     Copy,
@@ -141,6 +150,8 @@ pub enum GuardianPower {
         id: PlaybookId,
         trigger: PlaybookTrigger,
         expiry: BlockNumber,
+        /// PB-ORACLE-VOID cohort target. Every other playbook rejects `Some`.
+        target: Option<EpochId>,
     },
     SuspendOnGate,
 }
@@ -289,6 +300,7 @@ pub enum Error {
     DurationTooLong,
     TriggerInactive,
     BadPlaybookTrigger,
+    BadPlaybookTarget,
     AlreadyRerun,
     NotRerunnable,
     ReviewNotFound,
@@ -323,7 +335,9 @@ pub struct TriggerState {
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
 pub struct Guardian {
-    pub members: [AccountId; GUARDIAN_SEATS],
+    /// Fixed seat slots. A recalled seat is `None` until the values layer
+    /// refills the complete council; the approval threshold remains five.
+    pub members: [Option<AccountId>; GUARDIAN_SEATS],
     pub member_bonds: [Balance; GUARDIAN_SEATS],
     pub pending: Vec<PendingAction>,
     pub approvals: Vec<(ActionId, AccountId)>,
@@ -343,7 +357,7 @@ impl Guardian {
     pub fn new(members: [AccountId; GUARDIAN_SEATS]) -> Result<Self, Error> {
         validate_members(&members)?;
         Ok(Self {
-            members,
+            members: members.map(Some),
             member_bonds: [GUARDIAN_BOND; GUARDIAN_SEATS],
             pending: Vec::new(),
             approvals: Vec::new(),
@@ -377,7 +391,7 @@ impl Guardian {
             Error::BadOrigin
         );
         validate_members(&members)?;
-        self.members = members;
+        self.members = members.map(Some);
         self.member_bonds = [GUARDIAN_BOND; GUARDIAN_SEATS];
         // Re-election starts the incoming council with a clean workflow: drop
         // every un-dispatched proposed action and its approvals so a recalled
@@ -385,9 +399,33 @@ impl Guardian {
         // under the new council (a stale-approval bypass of the threshold —
         // 06 §5.1/§5.4). Accountability state (reviews), emergency state (active
         // playbooks) and the per-proposal rerun ledger deliberately survive.
-        self.pending.clear();
+        self.pending.retain(|action| action.dispatched);
         self.approvals.clear();
         self.events.push(Event::MembersSet { members });
+        Ok(())
+    }
+
+    /// Apply a values-approved recall to the still-seated approvers of a
+    /// failed action. Seats become vacant and the complete live approval
+    /// workflow is cleared, matching the conservative `set_members` cleanup.
+    /// Bond release timing and fungible custody are owned by the FRAME shell.
+    pub fn recall_members(
+        &mut self,
+        origin: GuardianOrigin,
+        approvers: &[AccountId],
+    ) -> Result<(), Error> {
+        ensure!(
+            matches!(origin, GuardianOrigin::ConstitutionalValues),
+            Error::BadOrigin
+        );
+        for (member, bond) in self.members.iter_mut().zip(self.member_bonds.iter_mut()) {
+            if member.is_some_and(|who| approvers.contains(&who)) {
+                *member = None;
+                *bond = 0;
+            }
+        }
+        self.pending.retain(|action| action.dispatched);
+        self.approvals.clear();
         Ok(())
     }
     pub fn propose_action(
@@ -478,28 +516,53 @@ impl Guardian {
             .push(Event::ActionRatified { action: action_id });
         Ok(())
     }
-    pub fn enforce_reviews(&mut self, epoch: EpochId) -> Result<(), Error> {
-        for review in &mut self.reviews {
-            if !review.ratified && !review.recall_scheduled && epoch > review.deadline_epoch {
-                let slash = GUARDIAN_BOND.saturating_mul(REVIEW_SLASH_PERCENT as Balance) / 100;
-                // KNOWN LIMITATION (deferred to the real per-account bond system,
-                // B-track — Codex finding). Bonds are a seat-indexed arithmetic
-                // placeholder, so this only slashes approvers *still seated*: a
-                // guardian recalled before the review deadline evades the slash.
-                // 06 §5.1 requires bonds "held for the full term plus one epoch";
-                // the `fungible` bond ledger must key bonds by account and keep a
-                // recalled member liable through the post-term window.
-                for approver in review.approvers.iter().take(review.approver_count as usize) {
-                    if let Some(idx) = self.members.iter().position(|member| member == approver) {
-                        self.member_bonds[idx] = self.member_bonds[idx].saturating_sub(slash);
-                    }
-                }
-                review.recall_scheduled = true;
-                self.events.push(Event::ReviewFailed {
-                    action: review.action_id,
-                    slashed_each: slash,
-                });
+    pub fn mark_review_failed(
+        &mut self,
+        action_id: ActionId,
+        epoch: EpochId,
+        actual_slashes: [Balance; GUARDIAN_SEATS],
+    ) -> Result<(), Error> {
+        let review = self
+            .reviews
+            .iter_mut()
+            .find(|review| review.action_id == action_id)
+            .ok_or(Error::ReviewNotFound)?;
+        ensure!(
+            !review.ratified && !review.recall_scheduled && epoch >= review.deadline_epoch,
+            Error::ReviewNotFound
+        );
+        let approvers = review.approvers;
+        let approver_count = review.approver_count;
+        review.recall_scheduled = true;
+        for (position, approver) in approvers.iter().take(approver_count as usize).enumerate() {
+            if let Some(index) = self
+                .members
+                .iter()
+                .position(|member| member.as_ref() == Some(approver))
+            {
+                self.member_bonds[index] =
+                    self.member_bonds[index].saturating_sub(actual_slashes[position]);
             }
+        }
+        Ok(())
+    }
+
+    pub fn enforce_reviews(&mut self, epoch: EpochId) -> Result<(), Error> {
+        let due = self
+            .reviews
+            .iter()
+            .filter(|review| {
+                !review.ratified && !review.recall_scheduled && epoch >= review.deadline_epoch
+            })
+            .map(|review| review.action_id)
+            .collect::<Vec<_>>();
+        let slash = GUARDIAN_BOND.saturating_mul(REVIEW_SLASH_PERCENT as Balance) / 100;
+        for action in due {
+            self.mark_review_failed(action, epoch, [slash; GUARDIAN_SEATS])?;
+            self.events.push(Event::ReviewFailed {
+                action,
+                slashed_each: slash,
+            });
         }
         Ok(())
     }
@@ -552,7 +615,11 @@ impl Guardian {
     pub fn reap_terminal(&mut self, now: BlockNumber) {
         let mut reaped: Vec<ActionId> = Vec::new();
         self.pending.retain(|a| {
-            let terminal = a.dispatched || now > a.expires_at;
+            let review_live = self
+                .reviews
+                .iter()
+                .any(|r| r.action_id == a.id && !r.ratified && !r.recall_scheduled);
+            let terminal = (a.dispatched && !review_live) || (!a.dispatched && now > a.expires_at);
             if terminal {
                 reaped.push(a.id);
             }
@@ -564,7 +631,7 @@ impl Guardian {
         self.reviews.retain(|r| !(r.ratified || r.recall_scheduled));
     }
     pub fn try_state(&self) -> Result<(), Error> {
-        validate_members(&self.members)?;
+        validate_seats(&self.members)?;
         ensure!(self.pending.len() <= 64, Error::TooManyPending);
         ensure!(self.reviews.len() <= 128, Error::TooManyReviews);
         ensure!(
@@ -639,6 +706,7 @@ impl Guardian {
             id,
             trigger,
             expiry,
+            ..
         } = action.power
         {
             // Upsert by id: re-activation renews the existing record's expiry
@@ -680,7 +748,7 @@ impl Guardian {
         match power {
             GuardianPower::PauseIntake { until } => {
                 ensure!(
-                    until <= now.saturating_add(HOLD_MAX_BLOCKS),
+                    until >= now && until <= now.saturating_add(HOLD_MAX_BLOCKS),
                     Error::DurationTooLong
                 );
                 if self
@@ -731,12 +799,18 @@ impl Guardian {
                 id,
                 trigger,
                 expiry,
+                target,
             } => {
                 ensure!(
-                    expiry <= now.saturating_add(HOLD_MAX_BLOCKS),
+                    expiry >= now && expiry <= now.saturating_add(HOLD_MAX_BLOCKS),
                     Error::DurationTooLong
                 );
                 ensure!(trigger_matches(id, trigger), Error::BadPlaybookTrigger);
+                ensure!(
+                    matches!((id, target), (PlaybookId::OracleVoid, Some(_)))
+                        || (!matches!(id, PlaybookId::OracleVoid) && target.is_none()),
+                    Error::BadPlaybookTarget
+                );
                 ensure!(ctx.triggers.is_active(trigger), Error::TriggerInactive);
             }
             GuardianPower::SuspendOnGate => {
@@ -765,7 +839,7 @@ impl Guardian {
         (approvers, count as u8)
     }
     fn ensure_member(&self, who: AccountId) -> Result<(), Error> {
-        ensure!(self.members.contains(&who), Error::NotMember);
+        ensure!(self.members.contains(&Some(who)), Error::NotMember);
         Ok(())
     }
 }
@@ -819,6 +893,17 @@ fn validate_members(members: &[AccountId; GUARDIAN_SEATS]) -> Result<(), Error> 
     for i in 0..GUARDIAN_SEATS {
         for j in (i + 1)..GUARDIAN_SEATS {
             ensure!(members[i] != members[j], Error::DuplicateMember);
+        }
+    }
+    Ok(())
+}
+
+fn validate_seats(members: &[Option<AccountId>; GUARDIAN_SEATS]) -> Result<(), Error> {
+    for i in 0..GUARDIAN_SEATS {
+        for j in (i + 1)..GUARDIAN_SEATS {
+            if members[i].is_some() {
+                ensure!(members[i] != members[j], Error::DuplicateMember);
+            }
         }
     }
     Ok(())
@@ -928,6 +1013,31 @@ mod tests {
             .any(|e| matches!(e, Event::ForceRerun { pid: 42, .. })));
     }
     #[test]
+    fn recalled_vacancies_keep_the_threshold_at_absolute_five() {
+        let mut g = Guardian::new(members()).unwrap();
+        g.recall_members(
+            GuardianOrigin::ConstitutionalValues,
+            &[acct(1), acct(2), acct(3)],
+        )
+        .unwrap();
+        assert_eq!(
+            g.members.iter().filter(|member| member.is_some()).count(),
+            4
+        );
+        assert_eq!(
+            g.propose_action(acct(1), GuardianPower::SuspendOnGate, [0; 32], 0),
+            Err(Error::NotMember)
+        );
+        let id = g
+            .propose_action(acct(4), GuardianPower::SuspendOnGate, [0; 32], 0)
+            .unwrap();
+        for member in [acct(5), acct(6), acct(7)] {
+            assert!(!g.approve_action(member, id, 1, ctx()).unwrap());
+        }
+        assert!(!g.pending[0].dispatched);
+        assert_eq!(g.approval_count(id), 4);
+    }
+    #[test]
     fn force_rerun_requires_pre_execution_and_once() {
         let mut g = Guardian::new(members()).unwrap();
         let id = g
@@ -1035,6 +1145,7 @@ mod tests {
                     id: PlaybookId::LedgerFreeze,
                     trigger: PlaybookTrigger::LedgerDrift,
                     expiry: 100,
+                    target: None,
                 },
                 [1; 32],
                 0,
@@ -1058,6 +1169,7 @@ mod tests {
                     id: PlaybookId::LedgerFreeze,
                     trigger: PlaybookTrigger::LedgerDrift,
                     expiry: 100,
+                    target: None,
                 },
                 [1; 32],
                 2,
@@ -1095,6 +1207,7 @@ mod tests {
                     id: PlaybookId::LedgerFreeze,
                     trigger: PlaybookTrigger::LedgerDrift,
                     expiry: 100,
+                    target: None,
                 },
                 [1; 32],
                 0,
@@ -1110,6 +1223,7 @@ mod tests {
                     id: PlaybookId::LedgerFreeze,
                     trigger: PlaybookTrigger::LedgerDrift,
                     expiry: 200,
+                    target: None,
                 },
                 [1; 32],
                 2,

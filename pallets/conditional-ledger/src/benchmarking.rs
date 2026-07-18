@@ -6,8 +6,8 @@ use crate::*;
 use frame_benchmarking::v2::*;
 use frame_support::traits::{fungibles::Mutate, EnsureOrigin, Get};
 use frame_system::RawOrigin;
-use futarchy_primitives::{Balance, Branch, FixedU64, GateType, ProposalId, ScalarSide};
-use sp_runtime::traits::AccountIdConversion;
+use futarchy_primitives::{kernel, Balance, Branch, FixedU64, GateType, ProposalId, ScalarSide};
+use sp_runtime::traits::{AccountIdConversion, Saturating};
 
 const UNIT: Balance = 1_000_000;
 const SEED_AMT: Balance = 1_000 * UNIT;
@@ -33,6 +33,10 @@ fn resolve_origin<T: Config>() -> T::RuntimeOrigin {
 }
 fn settle_origin<T: Config>() -> T::RuntimeOrigin {
     T::SettleAuthority::try_successful_origin().expect("mock provides a SettleAuthority origin")
+}
+fn emergency_origin<T: Config>() -> Result<T::RuntimeOrigin, BenchmarkError> {
+    T::EmergencyPlaybookOrigin::try_successful_origin()
+        .map_err(|_| BenchmarkError::Stop("EmergencyPlaybook origin unavailable"))
 }
 
 /// A funded, `Open` proposal vault with the caller already holding branch-USDC.
@@ -408,6 +412,26 @@ mod benchmarks {
         T::BenchmarkHelper::assert_keeper_rebate_paid(
             futarchy_primitives::keeper::CrankClass::General,
         );
+    }
+
+    #[benchmark]
+    fn set_split_paused() -> Result<(), BenchmarkError> {
+        let expiry = frame_system::Pallet::<T>::block_number()
+            .saturating_add(kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS.into());
+        let origin = emergency_origin::<T>()?;
+        #[extrinsic_call]
+        _(origin as T::RuntimeOrigin, true, expiry);
+        assert_eq!(SplitPausedUntil::<T>::get(), Some(expiry));
+        Ok(())
+    }
+
+    #[benchmark]
+    fn set_frozen() -> Result<(), BenchmarkError> {
+        let origin = emergency_origin::<T>()?;
+        #[extrinsic_call]
+        _(origin as T::RuntimeOrigin, true);
+        assert!(FrozenUntil::<T>::get().is_some());
+        Ok(())
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);

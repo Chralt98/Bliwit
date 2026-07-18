@@ -4,7 +4,7 @@ use crate::*;
 use frame_benchmarking::v2::*;
 use frame_support::traits::{fungibles::Mutate, EnsureOrigin, Get};
 use frame_system::RawOrigin;
-use futarchy_primitives::{Balance, Branch, MarketId, ScalarSide};
+use futarchy_primitives::{kernel, Balance, Branch, MarketId, ScalarSide};
 use market_core::{BookKind, MarketPhase};
 use sp_runtime::traits::Saturating;
 
@@ -128,6 +128,28 @@ mod benchmarks {
             futarchy_primitives::keeper::CrankClass::General,
         );
         assert!(!Markets::<T>::contains_key(1));
+    }
+
+    #[benchmark]
+    fn freeze_creation() -> Result<(), BenchmarkError> {
+        let origin = <T as Config>::EmergencyPlaybookOrigin::try_successful_origin()
+            .map_err(|_| BenchmarkError::Stop("EmergencyPlaybook origin unavailable"))?;
+        let expiry = frame_system::Pallet::<T>::block_number()
+            .saturating_add(kernel::MIN_EPOCH_LENGTH_BLOCKS.into());
+        #[extrinsic_call]
+        _(origin as T::RuntimeOrigin, expiry);
+        assert_eq!(CreationFrozenUntil::<T>::get(), Some(expiry));
+        Ok(())
+    }
+
+    #[benchmark]
+    fn set_frozen() -> Result<(), BenchmarkError> {
+        let origin = <T as Config>::EmergencyPlaybookOrigin::try_successful_origin()
+            .map_err(|_| BenchmarkError::Stop("EmergencyPlaybook origin unavailable"))?;
+        #[extrinsic_call]
+        _(origin as T::RuntimeOrigin, true);
+        assert!(FrozenUntil::<T>::get().is_some());
+        Ok(())
     }
 
     #[benchmark]

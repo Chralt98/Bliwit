@@ -22,7 +22,7 @@ Changes from the superseded §23 are marked **[updated]** / **[new]**. The **Enf
 | I-8 | Values scope ⟂ beliefs scope | track filters + screening | machine/test | filter-exhaustiveness test over `RuntimeCall` | — |
 | I-9 | Only epoch-decide enqueues; only the guard executes | origin plumbing | machine/state | model check with I-15 | ExecutionRecords audit |
 | I-10 | No external origin reaches Root; internal Root limited to `authorize_upgrade(committed hash)` | SafetyFilter + guard (wrapper set closed incl. `proxy_announced`, `as_multi_threshold_1` — [06](06-governance-and-guardians.md)) | machine/state | negative tests via every wrapper | — |
-| I-11 | Executed batch domains ⊆ declared; wrappers recursively filtered | guard step 5 + SafetyFilter | machine/state | fuzz over nested wrappers | bond slash |
+| I-11 | Executed batch domains ⊆ declared; wrappers recursively filtered; declared resources ≡ canonical footprint at screening ([05](05-welfare-and-decision-engine.md) §1.4) | guard step 5 + SafetyFilter; T4/T5 screening | machine/state | fuzz over nested wrappers | bond slash |
 | I-12 | LMSR loss ≤ b·ln 2 + rounding bound; books pre-collateralized (revenue recycled into complete sets per D-3) | market + ledger | machine/state | differential vs MPFR; fuzz | book P&L gauge |
 | I-13 | TWAP recorded drift ≤ (1±κ)^k per gap; slew cap per 10-block observation interval *(normative value: [13](13-parameters.md))* | accumulator | machine/state | fuzz + reference diff | dispersion alert |
 | I-14 | Gate vetoes evaluated before welfare; no override path exists | `decide()` kernel ordering | machine/test | branch-coverage proof + model check | — |

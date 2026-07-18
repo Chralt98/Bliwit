@@ -16,6 +16,8 @@ pub trait WeightInfo {
     fn seed() -> Weight;
     fn close() -> Weight;
     fn try_state() -> Weight;
+    fn freeze_creation() -> Weight;
+    fn set_frozen() -> Weight;
 }
 
 const REF_READS: u64 = 16;
@@ -56,4 +58,6 @@ ref_impl!(
     seed,
     close,
     try_state,
+    freeze_creation,
+    set_frozen,
 );

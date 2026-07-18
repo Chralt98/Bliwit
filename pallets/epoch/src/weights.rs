@@ -16,13 +16,13 @@ pub trait WeightInfo {
     fn settle_cohort(items: u32) -> Weight;
     fn set_next_epoch_length() -> Weight;
     fn delay_once() -> Weight;
-    fn veto_upheld() -> Weight;
     fn mark_executed() -> Weight;
     fn mark_failed_executed() -> Weight;
     fn retry_exhausted_to_measurement() -> Weight;
     fn expire_or_stale_queue() -> Weight;
     fn force_reject_process_hold() -> Weight;
     fn void_cohort(items: u32) -> Weight;
+    fn set_intake_paused() -> Weight;
 }
 
 const STATE_POV: u64 = 48_000;
@@ -31,7 +31,7 @@ pub struct SubstrateWeight<T>(PhantomData<T>);
 
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn submit() -> Weight {
-        base::<T>(45_000_000, 12, 10)
+        base::<T>(45_000_000, 13, 10)
     }
     fn withdraw() -> Weight {
         base::<T>(40_000_000, 12, 10)
@@ -53,9 +53,6 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn delay_once() -> Weight {
         base::<T>(40_000_000, 12, 10)
     }
-    fn veto_upheld() -> Weight {
-        base::<T>(70_000_000, 16, 12)
-    }
     fn mark_executed() -> Weight {
         base::<T>(70_000_000, 16, 12)
     }
@@ -75,6 +72,9 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
         base::<T>(55_000_000, 14, 10)
             .saturating_add(Weight::from_parts(20_000_000, 2_000).saturating_mul(items.into()))
     }
+    fn set_intake_paused() -> Weight {
+        base::<T>(20_000_000, 2, 1)
+    }
 }
 
 fn base<T: frame_system::Config>(time: u64, reads: u64, writes: u64) -> Weight {
@@ -85,7 +85,7 @@ fn base<T: frame_system::Config>(time: u64, reads: u64, writes: u64) -> Weight {
 
 impl WeightInfo for () {
     fn submit() -> Weight {
-        rocks(45_000_000, 12, 10)
+        rocks(45_000_000, 13, 10)
     }
     fn withdraw() -> Weight {
         rocks(40_000_000, 12, 10)
@@ -107,9 +107,6 @@ impl WeightInfo for () {
     fn delay_once() -> Weight {
         rocks(40_000_000, 12, 10)
     }
-    fn veto_upheld() -> Weight {
-        rocks(70_000_000, 16, 12)
-    }
     fn mark_executed() -> Weight {
         rocks(70_000_000, 16, 12)
     }
@@ -128,6 +125,9 @@ impl WeightInfo for () {
     fn void_cohort(items: u32) -> Weight {
         rocks(55_000_000, 14, 10)
             .saturating_add(Weight::from_parts(20_000_000, 2_000).saturating_mul(items.into()))
+    }
+    fn set_intake_paused() -> Weight {
+        rocks(20_000_000, 2, 1)
     }
 }
 

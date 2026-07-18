@@ -874,6 +874,12 @@ pub mod kernel {
     pub const POSITION_DEPOSIT_USDC: u128 = 100_000;
     /// Minimum META-amendable epoch length (14 days; 05 §3.1 / 13 §1).
     pub const MIN_EPOCH_LENGTH_BLOCKS: u32 = 201_600;
+    /// Guardian/playbook effect backstop (14 days at six-second blocks).
+    ///
+    /// 06 §5.2/§6.2/§6.3 and 13 §2: intake pauses, reserve split
+    /// pauses and ledger/market freezes can never remain effective beyond
+    /// this window without the one values-governed LedgerFreeze renewal.
+    pub const PLAYBOOK_FREEZE_WINDOW_BLOCKS: u32 = 201_600;
     /// Kernel floor for the decision window (`dec.window`, 13 §1).
     pub const DECISION_WINDOW_FLOOR_BLOCKS: u32 = BLOCKS_PER_DAY;
     pub const DEC_EXTENSION_BLOCKS: u32 = 43_200;

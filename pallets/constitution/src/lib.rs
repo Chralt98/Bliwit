@@ -136,8 +136,8 @@ pub mod pallet {
     /// channel. SCALE for the wrapper is exactly the 168 raw bytes (no length
     /// prefix), so a metadata-less reader parses by offset. Writers are
     /// exhaustive: the execution guard via [`Pallet::note_release_channel`]
-    /// and the `ConstitutionalValues` origin via
-    /// [`Pallet::set_release_channel`].
+    /// and the scoped constitution track (or its internal bare
+    /// `ConstitutionalValues` form) via [`Pallet::set_release_channel`].
     #[pallet::storage]
     pub type ReleaseChannel<T: Config> =
         StorageValue<_, ReleaseChannelValue, ValueQuery, DefaultReleaseChannel<T>>;
@@ -350,8 +350,9 @@ pub mod pallet {
         }
 
         /// `constitution.set_release_channel` — 02 §12 writer (b): the
-        /// `ConstitutionalValues` origin rewrites the D-14 fixed layout on a
-        /// canonical repoint, `min_supported_version` bump or key revocation.
+        /// scoped constitution track rewrites the D-14 fixed layout on a
+        /// canonical repoint, `min_supported_version` bump or key revocation;
+        /// internal construction may use bare `ConstitutionalValues`.
         /// No other origin — including bootstrap Root — may dispatch this;
         /// writer (a) is the execution guard's [`Pallet::note_release_channel`].
         #[pallet::call_index(3)]
@@ -372,8 +373,9 @@ pub mod pallet {
         /// metadata (bounds / max-Δ / cooldown), never its value, class or
         /// key set (06 §2.1 constitution track; 06 §3.2 row 4; 13 rule 2/7).
         ///
-        /// Origins: `ConstitutionalValues` (constitution/entrenched tracks)
-        /// or `FutarchyMeta` (META-amendable within meta-bounds).
+        /// Origins: the class-matched constitution/entrenched track, internal
+        /// bare `ConstitutionalValues`, or `FutarchyMeta` (META-amendable
+        /// within meta-bounds).
         /// Kernel-bounded rows keep their bounds genesis-fixed; every
         /// amendment must keep `min ≤ value ≤ max`, preserve the value kind,
         /// and keep `cooldown ≤ 8` epochs. Registry rows are never inserted
@@ -390,8 +392,11 @@ pub mod pallet {
             cooldown_epochs: u32,
         ) -> DispatchResult {
             let authority = T::GovernanceOrigin::ensure_origin(origin)?;
-            ensure!(authority.can_amend_registry(), DispatchError::BadOrigin);
             let record = Params::<T>::get(key).ok_or(Error::<T>::UnknownParam)?;
+            ensure!(
+                authority.can_amend_registry(record.class),
+                DispatchError::BadOrigin
+            );
             let amended = record
                 .checked_amend(min, max, max_delta, cooldown_epochs)
                 .map_err(Self::map_core_error)?;

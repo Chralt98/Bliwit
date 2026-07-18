@@ -136,6 +136,7 @@ impl pallet_conditional_ledger::Config for Test {
     type MarketAuthority = EnsureMarket;
     type ResolveAuthority = EnsureResolver;
     type SettleAuthority = EnsureSettler;
+    type EmergencyPlaybookOrigin = EnsureSettler;
     type MinSplit = MinSplit;
     type PositionDeposit = PositionDeposit;
     type MaxPositionsPerAccount = MaxPositionsPerAccount;

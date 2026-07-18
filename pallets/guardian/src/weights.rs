@@ -22,6 +22,12 @@ pub trait WeightInfo {
     fn ratify_action() -> Weight;
     /// Weight of `renew_playbook`.
     fn renew_playbook() -> Weight;
+    /// Weight of the ratify-track T24 verdict.
+    fn uphold_veto() -> Weight;
+    /// Weight of a guardian-track recall enactment.
+    fn recall() -> Weight;
+    /// Weight of a guardian-track playbook availability toggle.
+    fn set_playbook_registered() -> Weight;
     /// Weight of the per-block maintenance hook (expire playbooks + enforce
     /// review deadlines over the bounded sets).
     fn on_initialize() -> Weight;
@@ -42,24 +48,39 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(4))
     }
     fn approve_action() -> Weight {
-        Weight::from_parts(45_000_000, 9_000)
-            .saturating_add(T::DbWeight::get().reads(9))
-            .saturating_add(T::DbWeight::get().writes(9))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(T::DbWeight::get().reads(220))
+            .saturating_add(T::DbWeight::get().writes(150))
     }
     fn ratify_action() -> Weight {
-        Weight::from_parts(30_000_000, 4_000)
-            .saturating_add(T::DbWeight::get().reads(8))
-            .saturating_add(T::DbWeight::get().writes(8))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(T::DbWeight::get().reads(220))
+            .saturating_add(T::DbWeight::get().writes(150))
     }
     fn renew_playbook() -> Weight {
         Weight::from_parts(30_000_000, 4_000)
             .saturating_add(T::DbWeight::get().reads(8))
             .saturating_add(T::DbWeight::get().writes(8))
     }
+    fn uphold_veto() -> Weight {
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(T::DbWeight::get().reads(220))
+            .saturating_add(T::DbWeight::get().writes(150))
+    }
+    fn recall() -> Weight {
+        Weight::from_parts(75_000_000, 9_000)
+            .saturating_add(T::DbWeight::get().reads(14))
+            .saturating_add(T::DbWeight::get().writes(14))
+    }
+    fn set_playbook_registered() -> Weight {
+        Weight::from_parts(15_000_000, 2_000)
+            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
     fn on_initialize() -> Weight {
-        Weight::from_parts(40_000_000, 9_000)
-            .saturating_add(T::DbWeight::get().reads(9))
-            .saturating_add(T::DbWeight::get().writes(8))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(T::DbWeight::get().reads(220))
+            .saturating_add(T::DbWeight::get().writes(150))
     }
 }
 
@@ -76,23 +97,38 @@ impl WeightInfo for () {
             .saturating_add(RocksDbWeight::get().writes(4))
     }
     fn approve_action() -> Weight {
-        Weight::from_parts(45_000_000, 9_000)
-            .saturating_add(RocksDbWeight::get().reads(9))
-            .saturating_add(RocksDbWeight::get().writes(9))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(RocksDbWeight::get().reads(220))
+            .saturating_add(RocksDbWeight::get().writes(150))
     }
     fn ratify_action() -> Weight {
-        Weight::from_parts(30_000_000, 4_000)
-            .saturating_add(RocksDbWeight::get().reads(8))
-            .saturating_add(RocksDbWeight::get().writes(8))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(RocksDbWeight::get().reads(220))
+            .saturating_add(RocksDbWeight::get().writes(150))
     }
     fn renew_playbook() -> Weight {
         Weight::from_parts(30_000_000, 4_000)
             .saturating_add(RocksDbWeight::get().reads(8))
             .saturating_add(RocksDbWeight::get().writes(8))
     }
+    fn uphold_veto() -> Weight {
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(RocksDbWeight::get().reads(220))
+            .saturating_add(RocksDbWeight::get().writes(150))
+    }
+    fn recall() -> Weight {
+        Weight::from_parts(75_000_000, 9_000)
+            .saturating_add(RocksDbWeight::get().reads(14))
+            .saturating_add(RocksDbWeight::get().writes(14))
+    }
+    fn set_playbook_registered() -> Weight {
+        Weight::from_parts(15_000_000, 2_000)
+            .saturating_add(RocksDbWeight::get().reads(1))
+            .saturating_add(RocksDbWeight::get().writes(1))
+    }
     fn on_initialize() -> Weight {
-        Weight::from_parts(40_000_000, 9_000)
-            .saturating_add(RocksDbWeight::get().reads(9))
-            .saturating_add(RocksDbWeight::get().writes(8))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(RocksDbWeight::get().reads(220))
+            .saturating_add(RocksDbWeight::get().writes(150))
     }
 }
