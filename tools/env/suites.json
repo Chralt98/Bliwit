@@ -57,7 +57,7 @@
       "path": "zombienet/drills/06-pb-migration.zndsl",
       "tier": "release",
       "gated_on": [
-        "09 §3.2 migration-control surface (SQ-240): no migrations.force_failure/retry exists, so the MigrationHalt trigger can never go live in a drill and guardian playbook activation correctly refuses (TriggerInactive); the playbook effect substrate itself landed with B1b (#104)"
+        "09 §3.2 migration-control surface (SQ-244): no migrations.force_failure/retry exists, so the MigrationHalt trigger can never go live in a drill and guardian playbook activation correctly refuses (TriggerInactive); the playbook effect substrate itself landed with B1b (#104)"
       ],
       "timeout_seconds": 1800,
       "spec": "09 §3.2/§7.1"

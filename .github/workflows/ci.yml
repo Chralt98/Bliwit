@@ -76,6 +76,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      - name: Install monitoring tooling dependency
+        run: pip install pyyaml==6.0.2
       - name: Run reference model tests
         run: PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
       - name: Run economic-simulation tests
@@ -84,7 +86,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests tools/ci/tests; do
+          for suite in tools/deploy/tests tools/reference-model/tests tools/release/tests tools/monitoring/tests tools/ci/tests; do
             if [[ -d "$suite" ]]; then
               python3 -m unittest discover -s "$suite"
             fi
@@ -205,6 +207,10 @@ jobs:
         run: python3 -m py_compile tools/env/*.py tools/env/tests/*.py
       - name: Run environment validator tests
         run: python3 -m unittest discover -s tools/env/tests
+      - name: Run monitoring tests and alert-coverage gate
+        run: |
+          python3 -m unittest discover -s tools/monitoring/tests
+          python3 tools/monitoring/check_alert_coverage.py
       - name: Validate committed environment definitions
         run: python3 tools/env/validate-environments.py
       - name: Check environment shell syntax

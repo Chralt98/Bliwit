@@ -1,0 +1,39 @@
+[monitor]
+node_urls = ["wss://node-a.example.invalid", "wss://node-b.example.invalid"]
+arns_name = "futarchy"
+keyring_file = "keyring.example.toml"
+bind = "127.0.0.1:9618"
+check_interval_seconds = 3600
+# O1/operator policy seam: 12 fixes two attestations, but does not fix the
+# release-key signature threshold. Supply it explicitly for each deployment.
+minimum_release_signatures = 1
+# Operational resource limits are operator-supplied, not protocol parameters.
+max_file_bytes = 67108864
+max_bundle_bytes = 536870912
+
+[[gateway]]
+name = "gateway-a"
+resolve_url = "https://gateway-a.example.invalid/ar-io/resolver/{name}"
+raw_url = "https://gateway-a.example.invalid/raw/{txid}"
+tx_url = "https://gateway-a.example.invalid/{txid}/{path}"
+name_url = "https://{name}.gateway-a.example.invalid/{path}"
+
+[[gateway]]
+name = "gateway-b"
+resolve_url = "https://gateway-b.example.invalid/ar-io/resolver/{name}"
+raw_url = "https://gateway-b.example.invalid/raw/{txid}"
+tx_url = "https://gateway-b.example.invalid/{txid}/{path}"
+name_url = "https://{name}.gateway-b.example.invalid/{path}"
+
+[[gateway]]
+name = "gateway-c"
+resolve_url = "https://gateway-c.example.invalid/ar-io/resolver/{name}"
+raw_url = "https://gateway-c.example.invalid/raw/{txid}"
+tx_url = "https://gateway-c.example.invalid/{txid}/{path}"
+name_url = "https://{name}.gateway-c.example.invalid/{path}"
+
+[webhooks]
+paging = ["https://paging-webhook.example.invalid/bleavit"]
+status_page = ["https://status-page-webhook.example.invalid/bleavit"]
+community = ["https://community-webhook.example.invalid/bleavit"]
+

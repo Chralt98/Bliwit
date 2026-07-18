@@ -1,0 +1,19 @@
+# Structure-only example. Replace the non-secret public-key placeholders with
+# real minisign public packets from the published generation before deployment.
+generation = 1
+
+[[key]]
+role = "release"
+revocation_index = 0
+public_key = "REPLACE_WITH_MINISIGN_PUBLIC_KEY_PACKET"
+
+[[key]]
+role = "attestor"
+revocation_index = 1
+public_key = "REPLACE_WITH_MINISIGN_PUBLIC_KEY_PACKET"
+
+[[key]]
+role = "attestor"
+revocation_index = 2
+public_key = "REPLACE_WITH_MINISIGN_PUBLIC_KEY_PACKET"
+

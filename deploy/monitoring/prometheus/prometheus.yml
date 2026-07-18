@@ -1,0 +1,44 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # Every *.example.invalid target below is an operator-supplied placeholder.
+  - job_name: bleavit-collators
+    static_configs:
+      - targets:
+          - collator-1.example.invalid:9615
+          - collator-2.example.invalid:9615
+
+  - job_name: bleavit-keeper
+    static_configs:
+      - targets:
+          - keeper-1.example.invalid:9616
+          - keeper-2.example.invalid:9616
+
+  - job_name: bleavit-chain-alerts
+    static_configs:
+      - targets:
+          - chain-alerts.example.invalid:9617
+
+  - job_name: bleavit-attestation-monitor
+    static_configs:
+      - targets:
+          - attestation-monitor-a.example.invalid:9618
+          - attestation-monitor-b.example.invalid:9618
+
+  # O3 seam: uncomment only after milestone O3 supplies the browser-context
+  # dial/certificate/retention probe exporter and replace the operator target.
+  # - job_name: bleavit-browser-dial-probes
+  #   static_configs:
+  #     - targets:
+  #         - browser-probes.example.invalid:9619
+

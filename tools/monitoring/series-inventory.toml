@@ -1,0 +1,150 @@
+# Every metric referenced by deploy/monitoring/prometheus/rules/*.yml.
+# Runtime telemetry gaps are explicit seams; the coverage gate prints them.
+
+[[series]]
+name = "bleavit_chain_tick_lag_blocks"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_market_book_loss_usdc"
+source = "seam"
+owner = "B10"
+rationale = "No frozen runtime API exposes per-book realized P&L; a runtime-side audited series is required."
+
+[[series]]
+name = "bleavit_market_lmsr_loss_bound_usdc"
+source = "seam"
+owner = "B10"
+rationale = "The alert needs each live book's b·ln2 loss bound paired with audited P&L."
+
+[[series]]
+name = "bleavit_market_mid_window_coverage_percent"
+source = "seam"
+owner = "B10"
+rationale = "FutarchyApi::decision_stats exposes coverage only after DecisionWindows are sealed at decide_at; 12 §6.3 does not define a live mid-window projection and O5 may not add one in Rust."
+
+[[series]]
+name = "bleavit_market_effective_pol_usdc"
+source = "seam"
+owner = "B10"
+rationale = "FutarchyApi has no effective-POL view and O5 may not add a Rust surface."
+
+[[series]]
+name = "bleavit_market_pol_floor_usdc"
+source = "seam"
+owner = "B10"
+rationale = "The effective POL comparison needs the matching live floor from the runtime owner."
+
+[[series]]
+name = "bleavit_chain_oracle_max_round_depth"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_ledger_collateral_drift_usdc"
+source = "seam"
+owner = "B10"
+rationale = "Σ escrow versus sovereign custody is solvency-critical and has no frozen view; it must be computed beside the ledger custody adapter."
+
+[[series]]
+name = "bleavit_chain_treasury_meter_utilization_bps"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_chain_xcm_trapped_assets"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_keeper_last_successful_crank_timestamp_seconds"
+source = "keeper"
+
+[[series]]
+name = "bleavit_keeper_planned_total"
+source = "keeper"
+
+[[series]]
+name = "bleavit_keeper_connected"
+source = "keeper"
+
+[[series]]
+name = "bleavit_chain_guardian_actions_total"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_runtime_migration_cursor_stalled"
+source = "seam"
+owner = "B10"
+rationale = "The migration cursor and stall detector are not in FutarchyApi; the runtime migration owner must export the canonical detector state."
+
+[[series]]
+name = "bleavit_chain_storage_map_entries"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_chain_storage_map_bound"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_runtime_storage_max_utilization_ratio"
+source = "seam"
+owner = "B10"
+rationale = "Portable metadata omits const-generic bounds for maps without paired constants; the runtime owner must cover the remainder and PoV sizes."
+
+[[series]]
+name = "bleavit_runtime_numeric_anomaly_spike"
+source = "seam"
+owner = "B10"
+rationale = "No runtime-side LMSR domain-rejection or rounding-dust counter is currently exported."
+
+[[series]]
+name = "bleavit_bootnode_browser_dial_success"
+source = "seam"
+owner = "O3"
+rationale = "Browser-context dial probes are milestone O3's deliverable."
+
+[[series]]
+name = "bleavit_bootnode_wss_certificate_days_remaining"
+source = "seam"
+owner = "O3"
+rationale = "Certificate probing is part of the O3 browser-dial exporter."
+
+[[series]]
+name = "bleavit_bootnode_served_state_retention_days"
+source = "seam"
+owner = "O3"
+rationale = "Per-operator served-state retention evidence is owned by O3."
+
+[[series]]
+name = "bleavit_release_monitor_bundle_byte_mismatches"
+source = "attestation-monitor"
+
+[[series]]
+name = "bleavit_release_monitor_resolver_divergent_gateways"
+source = "attestation-monitor"
+
+[[series]]
+name = "bleavit_release_monitor_integrity_ok"
+source = "attestation-monitor"
+
+[[series]]
+name = "bleavit_chain_pending_upgrade_age_blocks"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_chain_descriptor_lead_time_blocks"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_release_monitor_covering_release"
+source = "attestation-monitor"
+
+[[series]]
+name = "bleavit_release_monitor_repoint_channel_lag_blocks"
+source = "attestation-monitor"
+
+[[series]]
+name = "bleavit_chain_release_channel_security_flips_total"
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_chain_keeper_budget_utilization_ratio"
+source = "chain-exporter"

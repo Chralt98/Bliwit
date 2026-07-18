@@ -1,0 +1,35 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: ops-channel
+  group_by: [alertname, runbook]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: ['severity="page"']
+      receiver: paging
+      continue: true
+    - matchers: ['alert_channel="release-integrity"']
+      receiver: status-page
+      continue: true
+    - matchers: ['alert_channel="release-integrity"']
+      receiver: community-channel
+
+receivers:
+  # All URLs are operator placeholders. Store real endpoints in the deployment
+  # secret mechanism and render this file; never commit webhook credentials.
+  - name: ops-channel
+    webhook_configs:
+      - url: https://ops-webhook.example.invalid/bleavit
+  - name: paging
+    webhook_configs:
+      - url: https://paging-webhook.example.invalid/bleavit
+  - name: status-page
+    webhook_configs:
+      - url: https://status-page-webhook.example.invalid/bleavit
+  - name: community-channel
+    webhook_configs:
+      - url: https://community-webhook.example.invalid/bleavit
+

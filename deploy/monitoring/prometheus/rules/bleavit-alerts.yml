@@ -1,0 +1,164 @@
+groups:
+  - name: bleavit.protocol
+    rules:
+      - alert: BleavitEpochTickLag
+        expr: bleavit_chain_tick_lag_blocks > 600
+        labels: {severity: warning, runbook: RB-KEEPER, domain: "Epoch progress"}
+        annotations:
+          summary: "Epoch progress: tick lag exceeds 600 finalized blocks"
+          key_series: "phase, blocks-to-boundary, tick lag"
+          threshold: "tick lag > 600 blocks"
+
+      - alert: BleavitProposalQueueAtBound
+        expr: (bleavit_chain_storage_map_bound{pallet="Epoch",item="IntakeProposals"} > 0) and (bleavit_chain_storage_map_entries{pallet="Epoch",item="IntakeProposals"} >= bleavit_chain_storage_map_bound{pallet="Epoch",item="IntakeProposals"})
+        labels: {severity: warning, runbook: RB-INTAKE, domain: "Proposal state"}
+        annotations:
+          summary: "Proposal state: intake queue reached its live metadata bound"
+          key_series: "per-state counts, queue depth"
+          threshold: "queue at bound"
+
+      - alert: BleavitMarketBookLoss
+        expr: bleavit_market_book_loss_usdc > (0.9 * bleavit_market_lmsr_loss_bound_usdc)
+        labels: {severity: warning, runbook: RB-MARKET, domain: "Markets"}
+        annotations:
+          summary: "Markets: book loss exceeds 0.9 times b times ln(2)"
+          key_series: "price, depth, spread proxy, book P&L"
+          threshold: "book loss > 0.9·b·ln2"
+
+      - alert: BleavitTwapCoverageLowMidWindow
+        expr: bleavit_market_mid_window_coverage_percent < 96
+        labels: {severity: warning, runbook: RB-KEEPER, domain: "TWAP"}
+        annotations:
+          summary: "TWAP: runtime-side live-window coverage is below 96% at mid-window"
+          key_series: "coverage %, stale events, spot-vs-TWAP dispersion"
+          threshold: "coverage < 96% mid-window"
+
+      - alert: BleavitLiquidityFloorDisturbed
+        expr: bleavit_market_effective_pol_usdc < bleavit_market_pol_floor_usdc
+        labels: {severity: warning, runbook: RB-POL, domain: "Liquidity floors"}
+        annotations:
+          summary: "Liquidity floors: effective POL is below its floor"
+          key_series: "effective POL vs floor"
+          threshold: "POL disturbed"
+
+      - alert: BleavitOracleRoundThreeOpened
+        expr: bleavit_chain_oracle_max_round_depth >= 3
+        labels: {severity: warning, runbook: RB-ORACLE, domain: "Oracle"}
+        annotations:
+          summary: "Oracle: a third dispute round is open"
+          key_series: "report timeliness, open disputes, round depth"
+          threshold: "round 3 opened"
+
+      - alert: BleavitCollateralizationDrift
+        expr: bleavit_ledger_collateral_drift_usdc != 0
+        labels: {severity: page, runbook: RB-LEDGER, domain: "Collateralization"}
+        annotations:
+          summary: "Collateralization: escrow and sovereign custody drift is non-zero"
+          key_series: "Σ escrow vs sovereign balance drift"
+          threshold: "any drift ≠ 0"
+
+      - alert: BleavitTreasuryMeterHigh
+        expr: bleavit_chain_treasury_meter_utilization_bps > 8000
+        labels: {severity: warning, runbook: RB-TREASURY, domain: "Treasury"}
+        annotations:
+          summary: "Treasury: rolling meter utilization exceeds 80%"
+          key_series: "NAV, meter utilization, stream schedule"
+          threshold: "meter > 80%"
+
+      - alert: BleavitXcmAssetTrap
+        expr: bleavit_chain_xcm_trapped_assets > 0
+        labels: {severity: warning, runbook: RB-XCM, domain: "XCM"}
+        annotations:
+          summary: "XCM: at least one trapped-asset key is live"
+          key_series: "send/fail/timeout counters, trapped assets"
+          threshold: "any trap"
+
+      - alert: BleavitKeeperInactive
+        expr: (time() - bleavit_keeper_last_successful_crank_timestamp_seconds) > 3600 and bleavit_keeper_last_successful_crank_timestamp_seconds > 0 and bleavit_keeper_planned_total > 0 and on() bleavit_keeper_connected == 1
+        labels: {severity: warning, runbook: RB-KEEPER, domain: "Keepers"}
+        annotations:
+          summary: "Keepers: a required role has no successful crank for one hour"
+          key_series: "rebate claims per role, inactivity"
+          threshold: "no crank 1 h"
+
+      - alert: BleavitGuardianAction
+        expr: increase(bleavit_chain_guardian_actions_total[5m]) > 0
+        labels: {severity: warning, runbook: RB-GUARDIAN, domain: "Guardian"}
+        annotations:
+          summary: "Guardian: a finalized GuardianAction occurred"
+          key_series: "actions, allowance consumption, pending reviews"
+          threshold: "any action"
+
+      - alert: BleavitMigrationCursorStalled
+        expr: bleavit_runtime_migration_cursor_stalled > 0
+        labels: {severity: warning, runbook: RB-UPGRADE, playbook: PB-MIGRATION, domain: "Upgrades"}
+        annotations:
+          summary: "Upgrades: the migration cursor is stalled"
+          key_series: "authorized hash, applied version, migration cursor"
+          threshold: "cursor stalled"
+
+      - alert: BleavitStorageNearBound
+        expr: max(bleavit_chain_storage_map_entries / bleavit_chain_storage_map_bound) > 0.8 or bleavit_runtime_storage_max_utilization_ratio > 0.8
+        labels: {severity: warning, runbook: RB-STORAGE, domain: "Storage"}
+        annotations:
+          summary: "Storage: at least one bounded map exceeds 80% occupancy"
+          key_series: "per-map counts vs bounds, PoV sizes"
+          threshold: "> 80% of any bound"
+
+      - alert: BleavitNumericsAnomalySpike
+        expr: bleavit_runtime_numeric_anomaly_spike > 0
+        labels: {severity: warning, runbook: RB-MARKET, domain: "Numerics"}
+        annotations:
+          summary: "Numerics: LMSR rejection or rounding-dust anomaly detector reports a spike"
+          key_series: "LMSR domain-rejection count, rounding-dust accumulation"
+          threshold: "anomaly spike"
+
+  - name: bleavit.operations
+    rules:
+      - alert: BleavitBootnodeCommitment
+        expr: sum(bleavit_bootnode_browser_dial_success) < 8 or sum(bleavit_bootnode_browser_dial_success{port="443"}) < 2 or min(bleavit_bootnode_wss_certificate_days_remaining) < 14
+        labels: {severity: warning, runbook: RB-BOOTNODE, domain: "Bootnodes"}
+        annotations:
+          summary: "Bootnodes: browser reachability, :443 floor, or certificate horizon failed"
+          key_series: "per-endpoint browser-dial success, WSS cert expiry, operator count"
+          threshold: "< 8 dialable, or < 2 on :443, or cert < 14 d"
+
+      - alert: BleavitServedStateWindowShort
+        expr: max(bleavit_bootnode_served_state_retention_days) < 30
+        labels: {severity: warning, runbook: RB-BOOTNODE, domain: "Served-state window"}
+        annotations:
+          summary: "Served-state window: the joint fleet does not cover 30 days"
+          key_series: "per-operator retention depth"
+          threshold: "window < 30 d on the joint fleet"
+
+      - alert: BleavitReleaseIntegrity
+        expr: bleavit_release_monitor_bundle_byte_mismatches > 0 or bleavit_release_monitor_resolver_divergent_gateways >= 2 or bleavit_release_monitor_integrity_ok == 0
+        labels: {severity: page, runbook: RB-RELEASE, alert_channel: release-integrity, domain: "Release integrity"}
+        annotations:
+          summary: "Release integrity: signed bytes or gateway resolution do not agree"
+          key_series: "out-of-band bundle-vs-manifest comparison (§5.2), ArNS resolution consistency across gateways, ANT record history"
+          threshold: "any byte mismatch; 2-of-3 resolver divergence"
+
+      - alert: BleavitDescriptorLeadTimeUncovered
+        expr: (bleavit_chain_pending_upgrade_age_blocks > (0.5 * bleavit_chain_descriptor_lead_time_blocks)) and on() (bleavit_release_monitor_covering_release == 0)
+        labels: {severity: warning, runbook: RB-RELEASE, domain: "Descriptor lead time"}
+        annotations:
+          summary: "Descriptor lead time: no covering canonical release at half the live lead time"
+          key_series: "UpgradeAuthorized age vs covering-release liveness"
+          threshold: "no covering release at 50% of DescriptorLeadTime"
+
+      - alert: BleavitReleaseChannelLagOrSecurityFlip
+        expr: bleavit_release_monitor_repoint_channel_lag_blocks > 600 or increase(bleavit_chain_release_channel_security_flips_total[5m]) > 0
+        labels: {severity: warning, runbook: RB-RELEASE, domain: "ReleaseChannel"}
+        annotations:
+          summary: "ReleaseChannel: repoint update is late or SECURITY changed"
+          key_series: "staleness vs latest repoint, flag changes"
+          threshold: "update missing 600 blocks after repoint; any SECURITY flip"
+
+      - alert: BleavitKeeperBudgetHigh
+        expr: bleavit_chain_keeper_budget_utilization_ratio > 0.8
+        labels: {severity: warning, runbook: RB-KEEPER, domain: "Keeper budget"}
+        annotations:
+          summary: "Keeper budget: current-epoch use exceeds 80% of the live keeper.budget gauge"
+          key_series: "metered-budget utilization"
+          threshold: "> 80% of 12,000 USDC/epoch"
