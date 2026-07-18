@@ -109,6 +109,7 @@ def in_cap_prize(
     envelope=Decimal(0),
     spendable_nav=Decimal(0),
     cap_proposal: Decimal = CAP_PROPOSAL,
+    upgrade_payload: bool = True,
 ) -> Decimal:
     """08 §5.2 prize proxy, rounded up as required by 05 §5.4 step 9."""
     name = _class_name(proposal_class)
@@ -120,7 +121,11 @@ def in_cap_prize(
     elif name == "param":
         prize = envelope
     else:
-        prize = max(ask, envelope, cap)
+        prize = (
+            max(ask, envelope, cap)
+            if upgrade_payload
+            else max(ask, envelope)
+        )
     return round_up(prize)
 
 
