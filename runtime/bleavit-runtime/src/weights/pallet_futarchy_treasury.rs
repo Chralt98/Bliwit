@@ -153,13 +153,34 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Storage: `System::Account` (r:1 w:1)
 	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
 	fn execute_coretime_renewal() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `11915`
-		//  Estimated: `26782`
-		// Minimum execution time: 114_600_000 picoseconds.
-		Weight::from_parts(118_920_000, 0)
+		// SQ-261: conservative B12-only placeholder. The 10_000_000_000 /
+		// 655_360 local XCM execution envelope is charged in full, with
+		// additional headroom for treasury, Params, UMP-router and asset work.
+		Weight::from_parts(11_000_000_000, 0)
+			.saturating_add(Weight::from_parts(0, 700_000))
+			.saturating_add(T::DbWeight::get().reads(20))
+			.saturating_add(T::DbWeight::get().writes(10))
+	}
+	/// SQ-261: conservative B12-only placeholder pending regenerated treasury
+	/// benchmarks; covers bounded State plus quote-authority storage.
+	fn note_coretime_quote() -> Weight {
+		Weight::from_parts(150_000_000, 0)
+			.saturating_add(Weight::from_parts(0, 26782))
+			.saturating_add(T::DbWeight::get().reads(3))
+			.saturating_add(T::DbWeight::get().writes(1))
+	}
+	/// SQ-261: conservative B12-only placeholder; includes the fail-soft
+	/// keeper-rebate envelope used by permissionless expiry pruning.
+	fn prune_coretime_quote() -> Weight {
+		Weight::from_parts(175_000_000, 0)
 			.saturating_add(Weight::from_parts(0, 26782))
 			.saturating_add(T::DbWeight::get().reads(13))
 			.saturating_add(T::DbWeight::get().writes(5))
+	}
+	/// SQ-261: conservative B12-only placeholder for two dedicated writes.
+	fn set_coretime_authority() -> Weight {
+		Weight::from_parts(50_000_000, 0)
+			.saturating_add(Weight::from_parts(0, 6200))
+			.saturating_add(T::DbWeight::get().writes(2))
 	}
 }

@@ -1,12 +1,25 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 #![deny(unsafe_code)]
 
-//! Bleavit's frozen, read-only `FutarchyApi` runtime-API declaration.
+//! Bleavit runtime-API declarations.
 //!
-//! The 11-method surface is specified by the integration contract (02 §3). Calls
-//! are made with `chainHead_call`; implementations perform no dispatch and must
-//! remain O(bounded-collection). The production runtime implements this trait in
-//! milestone B2; this crate owns the declaration shared with clients.
+//! The frozen 11-method [`FutarchyApi`] surface is specified by the integration
+//! contract (02 §3). The separate [`telemetry`] module is monitoring-only and
+//! explicitly outside that contract (12 §6.3). Both are read-only, bounded, and
+//! shared with their respective clients.
+
+pub mod telemetry;
+
+#[cfg(not(feature = "std"))]
+pub use runtime_decl_for_telemetry_api::TelemetryApi;
+pub use telemetry::runtime_decl_for_telemetry_api;
+#[cfg(feature = "std")]
+pub use telemetry::TelemetryApi;
+pub use telemetry::{
+    CollateralTelemetry, MarketTelemetry, PolComponent, PolTelemetry, StorageUtilizationTelemetry,
+    WindowCoverageTelemetry, MAX_POL_TELEMETRY_ROWS, MAX_STORAGE_NAME_BYTES,
+    MAX_STORAGE_UTILIZATION_ROWS, MAX_WINDOW_COVERAGE_ROWS,
+};
 
 use futarchy_primitives::{
     bounds, AccountId, Balance, BoundedVec, CohortSummaryView, DecisionStatsView, EpochStatusView,

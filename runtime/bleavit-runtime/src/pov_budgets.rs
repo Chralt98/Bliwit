@@ -193,7 +193,8 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
     all.extend(
         pallet_call_weights!(pallet_futarchy_treasury as pallet_futarchy_treasury::WeightInfo {
             spend, open_stream, claim_stream, cancel_stream, fund_budget_line, issue_vit,
-            recover_foreign, execute_coretime_renewal,
+            recover_foreign, execute_coretime_renewal, note_coretime_quote,
+            prune_coretime_quote, set_coretime_authority,
         }),
     );
     all.extend(
@@ -238,7 +239,7 @@ fn every_futarchy_call_and_hook_fits_the_normal_class() {
     // Exact count of the 12 futarchy pallets' WeightInfo functions — update
     // in lockstep when a trait gains or loses a function, so a silently
     // dropped inventory entry cannot pass.
-    assert_eq!(all.len(), 101, "call inventory drifted");
+    assert_eq!(all.len(), 104, "call inventory drifted");
     for (name, w) in all {
         assert_fits(name, w);
     }

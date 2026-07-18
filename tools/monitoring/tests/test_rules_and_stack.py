@@ -22,7 +22,7 @@ EXPECTED_EXPRESSIONS = {
     "BleavitGuardianAction": "increase(bleavit_chain_guardian_actions_total[5m]) > 0",
     "BleavitMigrationCursorStalled": "bleavit_runtime_migration_cursor_stalled > 0",
     "BleavitStorageNearBound": "max(bleavit_chain_storage_map_entries / bleavit_chain_storage_map_bound) > 0.8 or bleavit_runtime_storage_max_utilization_ratio > 0.8",
-    "BleavitNumericsAnomalySpike": "bleavit_runtime_numeric_anomaly_spike > 0",
+    "BleavitNumericsAnomalySpike": "increase(bleavit_runtime_lmsr_domain_rejections_total[5m]) > 0 or bleavit_runtime_numeric_anomaly_spike > 0",
     "BleavitBootnodeCommitment": 'sum(bleavit_bootnode_browser_dial_success) < 8 or sum(bleavit_bootnode_browser_dial_success{port="443"}) < 2 or min(bleavit_bootnode_wss_certificate_days_remaining) < 14',
     "BleavitServedStateWindowShort": "max(bleavit_bootnode_served_state_retention_days) < 30",
     "BleavitReleaseIntegrity": "bleavit_release_monitor_bundle_byte_mismatches > 0 or bleavit_release_monitor_resolver_divergent_gateways >= 2 or bleavit_release_monitor_integrity_ok == 0",

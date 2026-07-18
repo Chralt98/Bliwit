@@ -37,9 +37,21 @@ class MetricsTests(unittest.TestCase):
     def test_exporter_registry_is_single_source_of_truth(self) -> None:
         self.assertTrue(chain_alerts_exporter.SERIES)
         self.assertTrue(attestation_monitor.SERIES)
-        self.assertTrue(all(name.startswith("bleavit_chain_") for name in chain_alerts_exporter.SERIES))
+        self.assertTrue(all(name.startswith("bleavit_") for name in chain_alerts_exporter.SERIES))
+        self.assertTrue(
+            all(
+                not name.startswith("bleavit_release_monitor_")
+                for name in chain_alerts_exporter.SERIES
+            )
+        )
         self.assertTrue(all(name.startswith("bleavit_release_monitor_") for name in attestation_monitor.SERIES))
         self.assertEqual(chain_alerts_exporter.SERIES["bleavit_chain_scrape_errors_total"].kind, "counter")
+        self.assertEqual(
+            chain_alerts_exporter.SERIES[
+                "bleavit_runtime_lmsr_domain_rejections_total"
+            ].kind,
+            "counter",
+        )
         self.assertEqual(attestation_monitor.SERIES["bleavit_release_monitor_integrity_ok"].kind, "gauge")
 
     def test_param_key_encoding_fixture(self) -> None:

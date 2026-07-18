@@ -464,7 +464,7 @@ pub type MigrationProgressMarker = frame_support::storage::types::StorageValue<
 >;
 
 const MIGRATION_FAILURE_HALT: u8 = 0b001;
-const MIGRATION_STALL_HALT: u8 = 0b010;
+pub(crate) const MIGRATION_STALL_HALT: u8 = 0b010;
 const APPLIED_DETECTION_HALT: u8 = 0b100;
 const UPGRADE_ABORT_TRIGGER: u8 = 0b1000;
 const EXECUTION_HALT_SOURCES: u8 =
@@ -512,7 +512,9 @@ pub(crate) fn retire_stuck_migration_cursor_for_remediation() -> bool {
     retire
 }
 
-fn active_migration_stall_is_live(cursor: &pallet_migrations::ActiveCursorOf<Runtime>) -> bool {
+pub(crate) fn active_migration_stall_is_live(
+    cursor: &pallet_migrations::ActiveCursorOf<Runtime>,
+) -> bool {
     MigrationProgressMarker::get().is_some_and(|(marker, since)| {
         marker == active_migration_marker(cursor)
             && System::block_number().saturating_sub(since) > kernel::MIGRATION_STALL_BLOCKS
@@ -689,6 +691,12 @@ pub(crate) mod xcm_config {
     >;
     pub type Barrier =
         bleavit_xcm::barrier::BleavitBarrier<PolkadotXcm, UniversalLocation, MaxPrefixes>;
+    pub type RelayRouter = cumulus_primitives_utility::ParentAsUmp<
+        ParachainSystem,
+        PolkadotXcm,
+        polkadot_runtime_common::xcm_sender::NoPriceForMessageDelivery<()>,
+    >;
+    pub type Router = bleavit_xcm::health::HealthTrackingRouter<RelayRouter, XcmTrafficRecorder>;
 
     /// Maps the Treasury-class execution origin to the protocol custody
     /// location under which protocol-owned local traps are keyed (09 §6.1).
@@ -719,10 +727,9 @@ pub(crate) mod xcm_config {
         for XcmConfig<Assets>
     {
         type RuntimeCall = RuntimeCall;
-        // The real transport remains fail closed. The health wrapper records
-        // only actual accepted/failing routes; `()` returning NotApplicable is
-        // tuple-router control flow and records no traffic.
-        type XcmSender = bleavit_xcm::health::HealthTrackingRouter<(), XcmTrafficRecorder>;
+        // The Coretime route's local reserve withdrawal targets Parent, so the
+        // production sender is the canonical parachain→relay UMP adapter.
+        type XcmSender = Router;
         type XcmEventEmitter = PolkadotXcm;
         type AssetTransactor = Assets;
         type OriginConverter = ();
@@ -822,7 +829,7 @@ impl cumulus_pallet_xcmp_queue::Config for Runtime {
 impl pallet_xcm::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type SendXcmOrigin = staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, ()>;
-    type XcmRouter = bleavit_xcm::health::HealthTrackingRouter<(), XcmTrafficRecorder>;
+    type XcmRouter = xcm_config::Router;
     type ExecuteXcmOrigin =
         staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, xcm_config::LocalOriginToLocation>;
     type XcmExecuteFilter = Nothing;
@@ -2780,7 +2787,8 @@ fn derived_treasury_ask(
                     pallet_futarchy_treasury::Call::fund_budget_line { .. }
                     | pallet_futarchy_treasury::Call::cancel_stream { .. }
                     | pallet_futarchy_treasury::Call::issue_vit { .. }
-                    | pallet_futarchy_treasury::Call::recover_foreign { .. },
+                    | pallet_futarchy_treasury::Call::recover_foreign { .. }
+                    | pallet_futarchy_treasury::Call::set_coretime_authority { .. },
                 ) => 0,
                 // `claim_stream` is Signed-recipient-only and coretime renewal is
                 // priced from live quote storage. Neither can be committed as a
@@ -2788,6 +2796,8 @@ fn derived_treasury_ask(
                 RuntimeCall::FutarchyTreasury(
                     pallet_futarchy_treasury::Call::claim_stream { .. }
                     | pallet_futarchy_treasury::Call::execute_coretime_renewal { .. }
+                    | pallet_futarchy_treasury::Call::note_coretime_quote { .. }
+                    | pallet_futarchy_treasury::Call::prune_coretime_quote { .. }
                     | pallet_futarchy_treasury::Call::__Ignore(_, _),
                 ) => return false,
                 _ => return false,
@@ -3898,6 +3908,18 @@ impl pallet_futarchy_treasury::TreasuryParams for TreasuryParams {
             _ => 0,
         }
     }
+
+    fn coretime_dot_rate() -> Balance {
+        balance_param(b"ops.ct_dot_rate")
+    }
+
+    fn coretime_fee_dot() -> Balance {
+        balance_param(b"ops.ct_fee_dot")
+    }
+
+    fn coretime_quote_ttl() -> u32 {
+        u32_param(b"ops.ct_quote_ttl")
+    }
 }
 
 pub struct TreasuryRebatePayout;
@@ -3952,27 +3974,90 @@ impl pallet_futarchy_treasury::PotFunding<AccountId> for TreasuryPotFunding {
         .map(|_| ())
     }
 }
-/// Coretime renewal stays fail-closed (G-1): production has no authenticated
-/// period-price/freshness source or specified USDC-budget-to-DOT-route
-/// denomination rule. Until both are defined, `execute_coretime_renewal` must
-/// roll back without consuming a quote or marking the period funded (09 §4).
-pub struct PendingRenewalDispatch;
-impl pallet_futarchy_treasury::RenewalDispatch for PendingRenewalDispatch {
-    fn dispatch_renewal(
-        _period_index: u32,
-        _amount: Balance,
-    ) -> frame_support::dispatch::DispatchResult {
-        Err(sp_runtime::DispatchError::Other(
-            "coretime renewal quote authority and denomination are not wired",
-        ))
+#[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
+pub struct CoretimeTreasuryLocation;
+#[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
+impl Get<staging_xcm::latest::Location> for CoretimeTreasuryLocation {
+    fn get() -> staging_xcm::latest::Location {
+        staging_xcm::latest::Location::new(
+            0,
+            [staging_xcm::latest::Junction::AccountId32 {
+                network: xcm_config::RelayNetwork::get(),
+                id: treasury_protocol_account().into(),
+            }],
+        )
     }
+}
+
+#[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
+pub struct CoretimeFeeBudget;
+#[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
+impl Get<Balance> for CoretimeFeeBudget {
+    fn get() -> Balance {
+        <TreasuryParams as pallet_futarchy_treasury::TreasuryParams>::coretime_fee_dot()
+    }
+}
+
+#[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
+pub struct CoretimeRenewalAccount;
+#[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
+impl Get<Option<[u8; 32]>> for CoretimeRenewalAccount {
+    fn get() -> Option<[u8; 32]> {
+        pallet_futarchy_treasury::CoretimeRenewalAccount::<Runtime>::get()
+    }
+}
+
+#[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
+parameter_types! {
+    // SQ-261: conservative B12-only XCM execution bounds. Replace with
+    // measured Coretime route limits in the next treasury weight calibration.
+    pub CoretimeRelayWeightLimit: Weight = Weight::from_parts(100_000_000_000, 1_048_576);
+    pub CoretimeRemoteWeightLimit: Weight = Weight::from_parts(100_000_000_000, 1_048_576);
+    pub CoretimeLocalWeightLimit: Weight = xcm_config::UnitWeightCost::get().saturating_mul(10);
+}
+
+#[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
+type ProductionRenewalDispatch = bleavit_xcm::coretime::XcmRenewalDispatcher<
+    xcm_config::Executor,
+    RuntimeCall,
+    CoretimeTreasuryLocation,
+    CoretimeFeeBudget,
+    CoretimeRenewalAccount,
+    CoretimeRelayWeightLimit,
+    CoretimeRemoteWeightLimit,
+    CoretimeLocalWeightLimit,
+>;
+
+#[cfg(test)]
+std::thread_local! {
+    static TEST_CORETIME_RENEWALS: core::cell::RefCell<Vec<(u32, Balance)>> =
+        const { core::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+pub struct TestRenewalDispatch;
+#[cfg(test)]
+impl pallet_futarchy_treasury::RenewalDispatch for TestRenewalDispatch {
+    fn dispatch_renewal(
+        period_index: u32,
+        amount: Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        TEST_CORETIME_RENEWALS.with(|calls| calls.borrow_mut().push((period_index, amount)));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn take_test_coretime_renewals() -> Vec<(u32, Balance)> {
+    TEST_CORETIME_RENEWALS.with(|calls| core::mem::take(&mut *calls.borrow_mut()))
 }
 
 #[cfg(feature = "runtime-benchmarks")]
 pub struct BenchmarkRenewalDispatch;
-// FIXME(SQ-205/B10 wiring closure): remove this bench stub when the real
-// renewal XCM leg is wired — an Ok(()) stub left behind would keep the wired
-// production path out of the measured `execute_coretime_renewal` weight.
+// The live XCM executor needs custody and transport that the generated
+// benchmark harness does not provide. The B12-only delta remains explicitly
+// conservative pending SQ-261 calibration; bleavit-xcm exercises the real
+// executor route and rollback behavior.
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_futarchy_treasury::RenewalDispatch for BenchmarkRenewalDispatch {
     fn dispatch_renewal(
@@ -3985,8 +4070,10 @@ impl pallet_futarchy_treasury::RenewalDispatch for BenchmarkRenewalDispatch {
 
 #[cfg(feature = "runtime-benchmarks")]
 type RuntimeRenewalDispatch = BenchmarkRenewalDispatch;
-#[cfg(not(feature = "runtime-benchmarks"))]
-type RuntimeRenewalDispatch = PendingRenewalDispatch;
+#[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
+type RuntimeRenewalDispatch = ProductionRenewalDispatch;
+#[cfg(all(not(feature = "runtime-benchmarks"), test))]
+type RuntimeRenewalDispatch = TestRenewalDispatch;
 
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
@@ -4697,7 +4784,8 @@ impl RuntimeCapabilities {
                 | pallet_futarchy_treasury::Call::open_stream { .. }
                 | pallet_futarchy_treasury::Call::cancel_stream { .. }
                 | pallet_futarchy_treasury::Call::issue_vit { .. }
-                | pallet_futarchy_treasury::Call::recover_foreign { .. },
+                | pallet_futarchy_treasury::Call::recover_foreign { .. }
+                | pallet_futarchy_treasury::Call::set_coretime_authority { .. },
             ) => Self::enabled(class, pallet_constitution::Capability::TreasurySpend),
             _ => {
                 let Ok(analysis) =

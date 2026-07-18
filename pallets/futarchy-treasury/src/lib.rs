@@ -62,11 +62,12 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // (named, not glob — the pallet defines its own `Event`/`Error`).
 pub use futarchy_treasury_core::{
-    bps, vested_amount, AssetKind, BudgetLine, Error as CoreError, Event as CoreEvent, KeeperMeter,
-    KeeperMeterClass, NavComponents, RollingMeter, Stream, StreamInput, Treasury, TreasuryAccount,
-    DEFAULT_VIT_SUPPLY, ISS_INFLATION_CAP_BPS, MAX_BUDGET_LINES, MAX_FUNDED_CORETIME_PERIODS,
-    MAX_PENDING_OUTFLOWS, MAX_POL_COMMITMENTS, MAX_STREAMS, TRS_CAP_180D_BPS, TRS_CAP_30D_BPS,
-    TRS_CAP_PROPOSAL_BPS, TRS_STREAM_THRESHOLD_BPS, USDC, VIT,
+    bps, vested_amount, AssetKind, BudgetLine, CoretimeQuote, Error as CoreError,
+    Event as CoreEvent, KeeperMeter, KeeperMeterClass, NavComponents, RollingMeter, Stream,
+    StreamInput, Treasury, TreasuryAccount, DEFAULT_VIT_SUPPLY, ISS_INFLATION_CAP_BPS,
+    MAX_BUDGET_LINES, MAX_FUNDED_CORETIME_PERIODS, MAX_PENDING_OUTFLOWS, MAX_POL_COMMITMENTS,
+    MAX_STREAMS, TRS_CAP_180D_BPS, TRS_CAP_30D_BPS, TRS_CAP_PROPOSAL_BPS, TRS_STREAM_THRESHOLD_BPS,
+    USDC, VIT,
 };
 pub use origins_core::Origin;
 
@@ -107,6 +108,12 @@ pub trait TreasuryParams {
     /// rebate makes the entire path a structural no-op and cannot create an
     /// unbacked outflow.
     fn keeper_rebate() -> futarchy_primitives::Balance;
+    /// `ops.ct_dot_rate` — µUSDC per DOT for renewal budget accounting.
+    fn coretime_dot_rate() -> futarchy_primitives::Balance;
+    /// `ops.ct_fee_dot` — DOT-planck fee budget for the two remote XCM legs.
+    fn coretime_fee_dot() -> futarchy_primitives::Balance;
+    /// `ops.ct_quote_ttl` — open-quote freshness window in blocks.
+    fn coretime_quote_ttl() -> u32;
 }
 
 /// Custody account from which a rebate is paid.
@@ -228,7 +235,11 @@ pub mod pallet {
         Balance, BlockNumber, EpochId, ProposalClass,
     };
 
-    /// The in-code storage version of this pallet.
+    /// The in-code storage version of this pallet. Stays 0 while no persistent
+    /// network exists (every environment rebuilds from genesis, which stamps
+    /// the then-current version): a bump without an accompanying
+    /// `OnRuntimeUpgrade` translation would leave stored state undecodable on
+    /// upgrade. The first real bump must land together with its migration.
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
     #[pallet::pallet]
@@ -299,7 +310,7 @@ pub mod pallet {
         pub next_stream_id: u64,
         pub vit_lines: BoundedVec<(BudgetLine, Balance), ConstU32<MAX_BUDGET_LINES_BOUND>>,
         pub funded_coretime_periods: BoundedVec<u32, ConstU32<MAX_FUNDED_CORETIME_BOUND>>,
-        pub coretime_quotes: BoundedVec<(u32, Balance), ConstU32<MAX_FUNDED_CORETIME_BOUND>>,
+        pub coretime_quotes: BoundedVec<CoretimeQuote, ConstU32<MAX_FUNDED_CORETIME_BOUND>>,
         pub keeper_meter: KeeperMeter,
     }
 
@@ -346,6 +357,14 @@ pub mod pallet {
     /// bounded (rule 3); B5 may split hot items if PoV benchmarks demand it.
     #[pallet::storage]
     pub type State<T: Config> = StorageValue<_, TreasuryState, ValueQuery>;
+
+    /// Signed account authorized to note Coretime renewal quotes (09 §4).
+    #[pallet::storage]
+    pub type CoretimeQuoteAuthority<T: Config> = StorageValue<_, T::AccountId, OptionQuery>;
+
+    /// Ops-operated account funded on the Coretime chain (09 §4).
+    #[pallet::storage]
+    pub type CoretimeRenewalAccount<T: Config> = StorageValue<_, [u8; 32], OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -398,6 +417,15 @@ pub mod pallet {
         KeeperBudgetLow { remaining: Balance },
         /// The metered keeper budget is exhausted (08 §6.3).
         KeeperBudgetExhausted { epoch: EpochId, spent: Balance },
+        /// An authenticated Coretime renewal quote was noted or superseded.
+        CoretimeQuoteNoted { period_index: u32, price: Balance },
+        /// An open Coretime quote was pruned.
+        CoretimeQuotePruned { period_index: u32 },
+        /// Treasury governance rotated the quote authority and renewal account.
+        CoretimeAuthoritySet {
+            quote_authority: T::AccountId,
+            renewal_account: [u8; 32],
+        },
     }
 
     /// 1:1 with [`CoreError`]; `CoreError::BadOrigin` maps to
@@ -448,6 +476,22 @@ pub mod pallet {
         ZeroQuote,
         /// Arithmetic overflow — rejected, never wrapped (G-1).
         Overflow,
+        /// Signed caller is not the stored Coretime quote authority.
+        NotQuoteAuthority,
+        /// No Coretime renewal destination is configured.
+        RenewalAccountUnset,
+        /// The quote freshness window elapsed.
+        QuoteExpired,
+        /// A permissionless prune was attempted before expiry.
+        QuoteNotExpired,
+        /// `ops.ct_dot_rate` is absent, malformed, or zero.
+        RateUnset,
+        /// `ops.ct_fee_dot` is absent, malformed, or zero.
+        FeeBudgetUnset,
+        /// `ops.ct_quote_ttl` is absent, malformed, or zero.
+        QuoteTtlUnset,
+        /// Stored quote timestamp is ahead of the current block.
+        QuoteTimestampInFuture,
     }
 
     #[pallet::hooks]
@@ -602,12 +646,82 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::execute_coretime_renewal())]
         pub fn execute_coretime_renewal(origin: OriginFor<T>, period_index: u32) -> DispatchResult {
             let keeper = ensure_signed(origin)?;
+            ensure!(
+                CoretimeRenewalAccount::<T>::get().is_some(),
+                Error::<T>::RenewalAccountUnset
+            );
             let core_keeper = Self::to_core_account(keeper.clone());
-            let amount = Self::mutate(|t| t.execute_coretime_renewal(core_keeper, period_index))?;
+            let now = Self::now_u64();
+            let amount = Self::mutate(|t| {
+                t.execute_coretime_renewal(
+                    core_keeper,
+                    period_index,
+                    now,
+                    u64::from(T::Params::coretime_quote_ttl()),
+                    T::Params::coretime_dot_rate(),
+                    T::Params::coretime_fee_dot(),
+                )
+            })?;
             T::RenewalDispatch::dispatch_renewal(period_index, amount)?;
             // B5 recalibrates this call's weight for the additional bounded
             // keeper-meter read/write and custody-transfer path.
             Self::do_keeper_rebate(&keeper, CrankClass::General);
+            Ok(())
+        }
+
+        /// Note or supersede an authenticated Coretime renewal quote (09 §4).
+        #[pallet::call_index(8)]
+        #[pallet::weight(T::WeightInfo::note_coretime_quote())]
+        pub fn note_coretime_quote(
+            origin: OriginFor<T>,
+            period_index: u32,
+            price: Balance,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            ensure!(
+                CoretimeQuoteAuthority::<T>::get().as_ref() == Some(&who),
+                Error::<T>::NotQuoteAuthority
+            );
+            let now = Self::now_u64();
+            Self::mutate(|t| t.note_coretime_renewal_quote(period_index, price, now))
+        }
+
+        /// Prune an expired quote, or allow its authority to prune it early.
+        #[pallet::call_index(9)]
+        #[pallet::weight(T::WeightInfo::prune_coretime_quote())]
+        pub fn prune_coretime_quote(origin: OriginFor<T>, period_index: u32) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            let authority = CoretimeQuoteAuthority::<T>::get().as_ref() == Some(&who);
+            let now = Self::now_u64();
+            Self::mutate(|t| {
+                t.prune_coretime_quote(
+                    period_index,
+                    now,
+                    u64::from(T::Params::coretime_quote_ttl()),
+                    authority,
+                )
+            })?;
+            if !authority {
+                Self::do_keeper_rebate(&who, CrankClass::General);
+            }
+            Ok(())
+        }
+
+        /// Rotate the Coretime quote authority and funded renewal account.
+        #[pallet::call_index(10)]
+        #[pallet::weight(T::WeightInfo::set_coretime_authority())]
+        pub fn set_coretime_authority(
+            origin: OriginFor<T>,
+            quote_authority: T::AccountId,
+            renewal_account: [u8; 32],
+        ) -> DispatchResult {
+            T::TreasuryOrigin::ensure_origin(origin)?;
+            CoretimeQuoteAuthority::<T>::put(quote_authority.clone());
+            CoretimeRenewalAccount::<T>::put(renewal_account);
+            Self::deposit_event(Event::CoretimeAuthoritySet {
+                quote_authority,
+                renewal_account,
+            });
             Ok(())
         }
     }
@@ -645,6 +759,10 @@ pub mod pallet {
         /// 1,000,000,000 VIT ([`DEFAULT_VIT_SUPPLY`], a chain identity), so a
         /// chain spec cannot mint a different total (Codex review).
         pub main_usdc: Balance,
+        /// Genesis quote authority; `None` keeps noting fail closed.
+        pub coretime_quote_authority: Option<T::AccountId>,
+        /// Genesis Coretime-side funded account; `None` keeps dispatch fail closed.
+        pub coretime_renewal_account: Option<[u8; 32]>,
         #[serde(skip)]
         pub _config: core::marker::PhantomData<T>,
     }
@@ -653,6 +771,8 @@ pub mod pallet {
         fn default() -> Self {
             Self {
                 main_usdc: 0,
+                coretime_quote_authority: None,
+                coretime_renewal_account: None,
                 _config: core::marker::PhantomData,
             }
         }
@@ -679,6 +799,12 @@ pub mod pallet {
             // `try_state` above proves every collection is within bound, so the
             // truncating conversion drops nothing.
             State::<T>::put(TreasuryState::truncating_from_core(&t));
+            if let Some(authority) = self.coretime_quote_authority.clone() {
+                CoretimeQuoteAuthority::<T>::put(authority);
+            }
+            if let Some(account) = self.coretime_renewal_account {
+                CoretimeRenewalAccount::<T>::put(account);
+            }
         }
     }
 
@@ -756,25 +882,6 @@ pub mod pallet {
             for event in events {
                 Self::deposit_core_event(event);
             }
-        }
-
-        /// 09 §4/§6: the runtime notes the current coretime renewal quote read
-        /// from Coretime-chain state (never a user-facing value). A present quote
-        /// is what opens the renewal window. Runtime-internal (B4 wires it).
-        pub fn note_coretime_renewal_quote(period_index: u32, price: Balance) -> DispatchResult {
-            let mut t = Self::load();
-            t.note_coretime_renewal_quote(period_index, price)
-                .map_err(Self::map_core_error)?;
-            Self::persist(t)
-        }
-
-        /// 09 §4/§6: drop a stale open coretime quote so the bounded quote slot
-        /// cannot be clogged. Runtime-internal (B4 prunes on re-read; quote
-        /// validity intervals are PLAN SQ-53). No-op if there is no open quote.
-        pub fn prune_coretime_quote(period_index: u32) -> DispatchResult {
-            let mut t = Self::load();
-            t.prune_coretime_quote(period_index);
-            Self::persist(t)
         }
 
         /// 08 §1.2/§8.2: sync the live-book POL subsidy commitments `nav()` nets
@@ -969,6 +1076,10 @@ pub mod pallet {
             frame_system::Pallet::<T>::block_number().saturated_into::<BlockNumber>()
         }
 
+        fn now_u64() -> u64 {
+            frame_system::Pallet::<T>::block_number().saturated_into::<u64>()
+        }
+
         fn deposit_core_event(ev: CoreEvent) {
             let fe = match ev {
                 CoreEvent::Spent { line, dest, amount } => Event::Spent {
@@ -1024,6 +1135,16 @@ pub mod pallet {
                 CoreEvent::CoretimeRenewalCalled { line, amount } => {
                     Event::CoretimeRenewalCalled { line, amount }
                 }
+                CoreEvent::CoretimeQuoteNoted {
+                    period_index,
+                    price,
+                } => Event::CoretimeQuoteNoted {
+                    period_index,
+                    price,
+                },
+                CoreEvent::CoretimeQuotePruned { period_index } => {
+                    Event::CoretimeQuotePruned { period_index }
+                }
                 CoreEvent::NavFloorUnmet { class, nav, floor } => {
                     Event::NavFloorUnmet { class, nav, floor }
                 }
@@ -1039,9 +1160,14 @@ pub mod pallet {
         /// solvency identities (15 §1). Public so genesis and tests can call it.
         pub fn do_try_state() -> Result<(), TryRuntimeError> {
             let t = Self::load();
-            t.try_state().map_err(|_| {
+            t.try_state_at(Self::now_u64()).map_err(|_| {
                 TryRuntimeError::Other("treasury core try_state failed (I-7 / solvency bounds)")
             })?;
+            if CoretimeQuoteAuthority::<T>::exists() != CoretimeRenewalAccount::<T>::exists() {
+                return Err(TryRuntimeError::Other(
+                    "treasury: coretime authority and renewal account must be set together",
+                ));
+            }
             // FRAME-side solvency identity: minted VIT credited to lines never
             // exceeds total supply (marked 0 in NAV, but must stay backed).
             let vit_in_lines = t
@@ -1097,6 +1223,12 @@ pub mod pallet {
                 CoreError::NavFloorUnmet => Error::<T>::NavFloorUnmet.into(),
                 CoreError::ZeroQuote => Error::<T>::ZeroQuote.into(),
                 CoreError::Overflow => Error::<T>::Overflow.into(),
+                CoreError::QuoteExpired => Error::<T>::QuoteExpired.into(),
+                CoreError::QuoteNotExpired => Error::<T>::QuoteNotExpired.into(),
+                CoreError::RateUnset => Error::<T>::RateUnset.into(),
+                CoreError::FeeBudgetUnset => Error::<T>::FeeBudgetUnset.into(),
+                CoreError::QuoteTtlUnset => Error::<T>::QuoteTtlUnset.into(),
+                CoreError::QuoteTimestampInFuture => Error::<T>::QuoteTimestampInFuture.into(),
             }
         }
     }

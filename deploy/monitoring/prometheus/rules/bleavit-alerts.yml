@@ -106,7 +106,7 @@ groups:
           threshold: "> 80% of any bound"
 
       - alert: BleavitNumericsAnomalySpike
-        expr: bleavit_runtime_numeric_anomaly_spike > 0
+        expr: increase(bleavit_runtime_lmsr_domain_rejections_total[5m]) > 0 or bleavit_runtime_numeric_anomaly_spike > 0
         labels: {severity: warning, runbook: RB-MARKET, domain: "Numerics"}
         annotations:
           summary: "Numerics: LMSR rejection or rounding-dust anomaly detector reports a spike"

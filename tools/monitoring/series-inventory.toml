@@ -7,33 +7,23 @@ source = "chain-exporter"
 
 [[series]]
 name = "bleavit_market_book_loss_usdc"
-source = "seam"
-owner = "B13"
-rationale = "No frozen runtime API exposes per-book realized P&L; a runtime-side audited series is required."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_market_lmsr_loss_bound_usdc"
-source = "seam"
-owner = "B13"
-rationale = "The alert needs each live book's b·ln2 loss bound paired with audited P&L."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_market_mid_window_coverage_percent"
-source = "seam"
-owner = "B13"
-rationale = "FutarchyApi::decision_stats exposes coverage only after DecisionWindows are sealed at decide_at; 12 §6.3 does not define a live mid-window projection and O5 may not add one in Rust."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_market_effective_pol_usdc"
-source = "seam"
-owner = "B13"
-rationale = "FutarchyApi has no effective-POL view and O5 may not add a Rust surface."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_market_pol_floor_usdc"
-source = "seam"
-owner = "B13"
-rationale = "The effective POL comparison needs the matching live floor from the runtime owner."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_chain_oracle_max_round_depth"
@@ -41,9 +31,7 @@ source = "chain-exporter"
 
 [[series]]
 name = "bleavit_ledger_collateral_drift_usdc"
-source = "seam"
-owner = "B13"
-rationale = "Σ escrow versus sovereign custody is solvency-critical and has no frozen view; it must be computed beside the ledger custody adapter."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_chain_treasury_meter_utilization_bps"
@@ -71,9 +59,7 @@ source = "chain-exporter"
 
 [[series]]
 name = "bleavit_runtime_migration_cursor_stalled"
-source = "seam"
-owner = "B13"
-rationale = "The migration cursor and stall detector are not in FutarchyApi; the runtime migration owner must export the canonical detector state."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_chain_storage_map_entries"
@@ -85,15 +71,15 @@ source = "chain-exporter"
 
 [[series]]
 name = "bleavit_runtime_storage_max_utilization_ratio"
-source = "seam"
-owner = "B13"
-rationale = "Portable metadata omits const-generic bounds for maps without paired constants; the runtime owner must cover the remainder and PoV sizes."
+source = "chain-exporter"
+
+[[series]]
+name = "bleavit_runtime_lmsr_domain_rejections_total"
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_runtime_numeric_anomaly_spike"
-source = "seam"
-owner = "B13"
-rationale = "No runtime-side LMSR domain-rejection or rounding-dust counter is currently exported."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_bootnode_browser_dial_success"

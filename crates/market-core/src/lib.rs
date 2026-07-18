@@ -7,8 +7,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use conditional_ledger_core::{baseline, position, LedgerOrigin, LedgerState};
 use futarchy_fixed::{
-    lmsr_buy_cost, lmsr_price_long, lmsr_sell_proceeds, round_charge_up, round_payout_down,
-    FixedError, FixedU64x64, LmsrSide, LN_2,
+    lmsr_buy_cost, lmsr_cost, lmsr_price_long, lmsr_sell_proceeds, round_charge_up,
+    round_payout_down, FixedError, FixedU64x64, LmsrSide, LN_2,
 };
 use futarchy_primitives::{
     kernel, Balance, BlockNumber, Branch, EpochId, FixedU64, GateType, MarketId, PositionId,
@@ -416,6 +416,35 @@ pub fn maker_loss_floor(b: Balance) -> Option<Balance> {
 /// so no parallel `b·ln 2` formula can drift from the cash seed path.
 pub fn seed_headroom(b: Balance) -> Result<Balance, Error> {
     fixed_to_base_units_up(fx(b)?.checked_mul(LN_2).map_err(map_fixed)?)
+}
+
+/// Reconstruct the maker's worst-world loss at an LMSR quantity state.
+///
+/// Path independence makes net premium held at `(q_long, q_short)` equal to
+/// `C(q_long, q_short) - C(0, 0)`. The worst settlement pays the larger
+/// outstanding quantity, hence loss is
+/// `max(q_long, q_short) - premium`. Premium is rounded up exactly like a buy
+/// charge; sell proceeds round down, so the real book inventory can only retain
+/// at least this much premium. The result is therefore a conservative upper
+/// bound on realized custody loss, and never exceeds the seeded `b·ln 2`
+/// headroom (04 §3–§6.3).
+pub fn maker_loss_at_state(
+    b: Balance,
+    q_long: Balance,
+    q_short: Balance,
+) -> Result<Balance, Error> {
+    let initial = lmsr_cost(FixedU64x64::ZERO, FixedU64x64::ZERO, fx(b)?).map_err(map_fixed)?;
+    let current = lmsr_cost(fx(q_long)?, fx(q_short)?, fx(b)?).map_err(map_fixed)?;
+    let premium = current.checked_sub(initial).map_err(map_fixed)?;
+    let premium_held = fixed_to_base_units_up(premium)?;
+    let loss = q_long
+        .max(q_short)
+        .checked_sub(premium_held)
+        .unwrap_or_default();
+    if loss > seed_headroom(b)? {
+        return Err(Error::TryStateViolation);
+    }
+    Ok(loss)
 }
 
 #[derive(
@@ -1857,6 +1886,33 @@ mod tests {
             markets.events.last(),
             Some(Event::Traded { cost, .. }) if *cost == sell_quote.cost
         ));
+    }
+
+    #[test]
+    fn maker_loss_reconstructs_normative_v1_v3_and_v4_states() -> Result<(), Error> {
+        assert_eq!(maker_loss_at_state(B, 0, 0), Ok(0));
+
+        // 04 §5 V1: 1,000 LONG costs 512.494795136 USDC. Maker-favourable
+        // charge rounding leaves 487.505204 USDC of realized loss.
+        let v1 = maker_loss_at_state(B, 1_000_000_000, 0)?;
+        assert!(v1.abs_diff(487_505_204) <= 1, "V1 loss {v1}");
+
+        // V3: q = 10,000·ln(1.5), cost = 2,231.43551314 USDC.
+        let v3 = maker_loss_at_state(B, 4_054_651_081, 0)?;
+        assert!(v3.abs_diff(1_823_215_567) <= 1, "V3 loss {v3}");
+
+        // V4: the finite domain edge approaches, but cannot exceed, b·ln 2.
+        let edge = B
+            .checked_mul(Balance::from(kernel::LMSR_DOMAIN_BOUND))
+            .ok_or(Error::ArithmeticOverflow)?;
+        let v4 = maker_loss_at_state(B, edge, 0)?;
+        let bound = seed_headroom(B)?;
+        assert!(v4 <= bound);
+        assert!(
+            bound.saturating_sub(v4) <= 1,
+            "edge loss {v4}, bound {bound}"
+        );
+        Ok(())
     }
 
     #[test]

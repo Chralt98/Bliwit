@@ -1753,6 +1753,34 @@ pub mod pallet {
 
         // ---------------------------------------------------------- try-state (§9)
 
+        /// Return the exact custody and liability quantities compared by L-2.
+        ///
+        /// This read-only helper is the sole telemetry window onto ledger
+        /// collateralization. Its checked summation deliberately mirrors the
+        /// unchanged L-2 try-state check below, so monitoring does not recreate
+        /// ledger accounting in the runtime or exporter (12 §6.3, B13).
+        pub fn collateral_totals() -> Result<(Balance, Balance), sp_runtime::DispatchError> {
+            let mut escrow: Balance = 0;
+            for vault in Vaults::<T>::iter_values() {
+                escrow = escrow
+                    .checked_add(vault.escrowed)
+                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+            }
+            for vault in BaselineVaults::<T>::iter_values() {
+                escrow = escrow
+                    .checked_add(vault.escrowed)
+                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+            }
+            let liability = escrow
+                .checked_add(DepositsHeld::<T>::get())
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            let custody = <T::Collateral as fungibles::Inspect<T::AccountId>>::balance(
+                Self::usdc(),
+                &Self::account_id(),
+            );
+            Ok((custody, liability))
+        }
+
         /// Load the full ledger state and run the core conservation checks (L-1…L-6),
         /// then the sovereign-solvency check L-2 the core cannot see.
         pub fn do_try_state() -> Result<(), sp_runtime::DispatchError> {
@@ -1833,28 +1861,10 @@ pub mod pallet {
                 Error::<T>::TryStateViolation
             );
 
-            // L-2: sovereign USDC covers all escrow plus held deposits (checked — an
-            // overflow is itself a conservation violation, never masked by saturation).
-            let mut escrow: Balance = 0;
-            for v in st.vaults.iter() {
-                escrow = escrow
-                    .checked_add(v.info.escrowed)
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
-            }
-            for v in st.baseline_vaults.iter() {
-                escrow = escrow
-                    .checked_add(v.info.escrowed)
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
-            }
-            let held = DepositsHeld::<T>::get();
-            let bal = <T::Collateral as fungibles::Inspect<T::AccountId>>::balance(
-                Self::usdc(),
-                &Self::account_id(),
-            );
-            let liability = escrow
-                .checked_add(held)
-                .ok_or(Error::<T>::ArithmeticOverflow)?;
-            ensure!(liability <= bal, Error::<T>::TryStateViolation);
+            // L-2: sovereign USDC covers all escrow plus held deposits. The
+            // helper is the single checked definition shared with telemetry.
+            let (custody, liability) = Self::collateral_totals()?;
+            ensure!(liability <= custody, Error::<T>::TryStateViolation);
             Ok(())
         }
     }

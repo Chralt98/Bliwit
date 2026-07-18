@@ -11,7 +11,7 @@ use crate::pallet::Pallet;
 
 use frame_benchmarking::v2::*;
 use frame_system::RawOrigin;
-use futarchy_treasury_core::{Stream, Treasury, USDC};
+use futarchy_treasury_core::{CoretimeQuote, Stream, Treasury, USDC};
 
 /// A funded treasury: plenty of `MAIN` USDC and pre-funded lines so the outflow
 /// calls have both NAV and line balances to draw on.
@@ -183,7 +183,11 @@ mod benches {
         for p in 0..(MAX_FUNDED_CORETIME_PERIODS as u32 - 1) {
             t.funded_coretime_periods.push(p);
         }
-        t.coretime_quotes.push((1000, 100_000 * USDC));
+        t.coretime_quotes.push(CoretimeQuote {
+            period_index: 1000,
+            price: 100_000 * USDC,
+            noted_at: 0,
+        });
         Pallet::<T>::seed(&t);
         let keeper: T::AccountId = T::BenchmarkHelper::account(1);
         T::BenchmarkHelper::prime_keeper_rebate();
@@ -193,6 +197,62 @@ mod benches {
         T::BenchmarkHelper::assert_keeper_rebate_paid(
             futarchy_primitives::keeper::CrankClass::General,
         );
+    }
+
+    #[benchmark]
+    fn note_coretime_quote() {
+        let mut t = funded();
+        for period_index in 0..(MAX_FUNDED_CORETIME_PERIODS as u32 - 1) {
+            t.coretime_quotes.push(CoretimeQuote {
+                period_index,
+                price: USDC,
+                noted_at: 0,
+            });
+        }
+        Pallet::<T>::seed(&t);
+        let authority = T::BenchmarkHelper::account(2);
+        let treasury_origin = T::BenchmarkHelper::treasury_origin();
+        assert!(
+            Pallet::<T>::set_coretime_authority(treasury_origin, authority.clone(), [2u8; 32],)
+                .is_ok()
+        );
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(authority), 1000, USDC);
+    }
+
+    #[benchmark]
+    fn prune_coretime_quote() {
+        let mut t = funded();
+        for period_index in 0..MAX_FUNDED_CORETIME_PERIODS as u32 {
+            t.coretime_quotes.push(CoretimeQuote {
+                period_index,
+                price: USDC,
+                noted_at: 0,
+            });
+        }
+        Pallet::<T>::seed(&t);
+        frame_system::Pallet::<T>::set_block_number(u32::MAX.into());
+        let keeper = T::BenchmarkHelper::account(3);
+        T::BenchmarkHelper::prime_keeper_rebate();
+
+        #[extrinsic_call]
+        _(
+            RawOrigin::Signed(keeper),
+            MAX_FUNDED_CORETIME_PERIODS as u32 - 1,
+        );
+        T::BenchmarkHelper::assert_keeper_rebate_paid(
+            futarchy_primitives::keeper::CrankClass::General,
+        );
+    }
+
+    #[benchmark]
+    fn set_coretime_authority() {
+        let origin = T::BenchmarkHelper::treasury_origin();
+        let authority = T::BenchmarkHelper::account(4);
+
+        #[extrinsic_call]
+        _(origin as T::RuntimeOrigin, authority, [4u8; 32]);
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);

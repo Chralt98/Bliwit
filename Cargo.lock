@@ -4418,6 +4418,7 @@ dependencies = [
  "bounded-collections",
  "futarchy-primitives",
  "parity-scale-codec",
+ "scale-info",
  "sp-api",
  "sp-core",
  "sp-runtime",

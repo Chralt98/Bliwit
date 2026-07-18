@@ -30,6 +30,12 @@ pub trait WeightInfo {
     fn recover_foreign() -> Weight;
     /// Weight of `execute_coretime_renewal` (`State` r:1 w:1; quote lookup).
     fn execute_coretime_renewal() -> Weight;
+    /// Weight of `note_coretime_quote` (`State` r:1 w:1; bounded quote scan).
+    fn note_coretime_quote() -> Weight;
+    /// Weight of `prune_coretime_quote` (`State` r:1 w:1; bounded quote scan).
+    fn prune_coretime_quote() -> Weight;
+    /// Weight of `set_coretime_authority` (two dedicated values w:2).
+    fn set_coretime_authority() -> Weight;
 }
 
 /// Placeholder proof size covering the worst-case bounded `State` encoding
@@ -80,6 +86,19 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(1))
             .saturating_add(T::DbWeight::get().writes(1))
     }
+    fn note_coretime_quote() -> Weight {
+        Weight::from_parts(35_000_000, STATE_POV)
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
+    fn prune_coretime_quote() -> Weight {
+        Weight::from_parts(35_000_000, STATE_POV)
+            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().writes(1))
+    }
+    fn set_coretime_authority() -> Weight {
+        Weight::from_parts(20_000_000, 4_000).saturating_add(T::DbWeight::get().writes(2))
+    }
 }
 
 // For tests and backwards compatibility.
@@ -123,5 +142,18 @@ impl WeightInfo for () {
         Weight::from_parts(35_000_000, STATE_POV)
             .saturating_add(RocksDbWeight::get().reads(1))
             .saturating_add(RocksDbWeight::get().writes(1))
+    }
+    fn note_coretime_quote() -> Weight {
+        Weight::from_parts(35_000_000, STATE_POV)
+            .saturating_add(RocksDbWeight::get().reads(2))
+            .saturating_add(RocksDbWeight::get().writes(1))
+    }
+    fn prune_coretime_quote() -> Weight {
+        Weight::from_parts(35_000_000, STATE_POV)
+            .saturating_add(RocksDbWeight::get().reads(3))
+            .saturating_add(RocksDbWeight::get().writes(1))
+    }
+    fn set_coretime_authority() -> Weight {
+        Weight::from_parts(20_000_000, 4_000).saturating_add(RocksDbWeight::get().writes(2))
     }
 }

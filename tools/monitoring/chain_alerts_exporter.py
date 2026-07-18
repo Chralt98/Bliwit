@@ -72,6 +72,16 @@ SERIES: dict[str, SeriesDefinition] = {
         _series("bleavit_chain_treasury_nav", "gauge", "Treasury NAV in chain balance base units."),
         _series("bleavit_chain_treasury_spendable_nav", "gauge", "Spendable NAV in chain balance base units."),
         _series("bleavit_chain_treasury_meter_utilization_bps", "gauge", "Treasury rolling-meter utilization in basis points."),
+        _series("bleavit_market_book_loss_usdc", "gauge", "Realized maker inventory loss in USDC base units.", "market"),
+        _series("bleavit_market_lmsr_loss_bound_usdc", "gauge", "Canonical seed_headroom(b) loss bound in USDC base units.", "market"),
+        _series("bleavit_market_mid_window_coverage_percent", "gauge", "Projected scheduled-observation coverage for an active unsealed decision window.", "market", "start", "end"),
+        _series("bleavit_market_effective_pol_usdc", "gauge", "Funded balance for one independently accounted POL component in USDC base units.", "component"),
+        _series("bleavit_market_pol_floor_usdc", "gauge", "Matching requirement for one independently accounted POL component in USDC base units.", "component"),
+        _series("bleavit_ledger_collateral_drift_usdc", "gauge", "Signed ledger custody minus audited L-2 liability in USDC base units."),
+        _series("bleavit_runtime_migration_cursor_stalled", "gauge", "Canonical migration halt/live-stall detector state."),
+        _series("bleavit_runtime_storage_max_utilization_ratio", "gauge", "Occupancy ratio for a metadata-invisible bounded storage shape.", "map"),
+        _series("bleavit_runtime_lmsr_domain_rejections_total", "counter", "Finalized Market.PriceBoundExceeded extrinsic failures resolved from live metadata."),
+        _series("bleavit_runtime_numeric_anomaly_spike", "gauge", "Anomalous positive ledger rounding residue.", "kind"),
         _series("bleavit_chain_keeper_budget_limit", "gauge", "Live keeper.budget Param value in chain balance base units."),
         _series("bleavit_chain_keeper_budget_spent", "gauge", "Current-epoch keeper meter spend in chain balance base units."),
         _series("bleavit_chain_keeper_budget_utilization_ratio", "gauge", "Current keeper spend divided by the live keeper.budget Param."),
@@ -118,7 +128,9 @@ EVENT_FAMILIES = (
     "bleavit_chain_upgrade_authorized_total",
     "bleavit_chain_upgrade_applied_total",
     "bleavit_chain_keeper_budget_low_events_total",
+    "bleavit_runtime_lmsr_domain_rejections_total",
 )
+FINALIZED_EVENT_FAMILIES = EVENT_FAMILIES
 FULL_DOMAIN_FAMILIES = {
     "epoch": (
         "bleavit_chain_epoch_index",
@@ -147,6 +159,19 @@ FULL_DOMAIN_FAMILIES = {
         "bleavit_chain_treasury_spendable_nav",
         "bleavit_chain_treasury_meter_utilization_bps",
     ),
+    "market books": (
+        "bleavit_market_book_loss_usdc",
+        "bleavit_market_lmsr_loss_bound_usdc",
+    ),
+    "mid-window coverage": ("bleavit_market_mid_window_coverage_percent",),
+    "pol": (
+        "bleavit_market_effective_pol_usdc",
+        "bleavit_market_pol_floor_usdc",
+    ),
+    "collateral": ("bleavit_ledger_collateral_drift_usdc",),
+    "migration stall": ("bleavit_runtime_migration_cursor_stalled",),
+    "storage remainder": ("bleavit_runtime_storage_max_utilization_ratio",),
+    "numeric anomalies": ("bleavit_runtime_numeric_anomaly_spike",),
     "keeper budget": (
         "bleavit_chain_keeper_budget_limit",
         "bleavit_chain_keeper_budget_spent",
@@ -193,6 +218,27 @@ def _boolean_field(value: Any, field: str, source: str) -> bool:
     return candidate
 
 
+def _required_some(value: Any, source: str) -> Any:
+    if variant_name(value) != "Some":
+        raise MonitoringError(f"{source} returned no audited value")
+    return value.get("fields")
+
+
+def _bounded_ascii(value: Any, source: str) -> str:
+    if not isinstance(value, list) or not all(
+        isinstance(item, int) and not isinstance(item, bool) and 0 <= item <= 255
+        for item in value
+    ):
+        raise MonitoringError(f"{source} is not a bounded byte string")
+    try:
+        decoded = bytes(value).decode("ascii")
+    except UnicodeDecodeError as error:
+        raise MonitoringError(f"{source} is not ASCII") from error
+    if not decoded:
+        raise MonitoringError(f"{source} is empty")
+    return decoded
+
+
 class ChainExporter:
     def __init__(self, rpc: WsRpc, store: MetricStore | None = None):
         self.rpc = rpc
@@ -206,10 +252,7 @@ class ChainExporter:
         self.store.set("bleavit_chain_connected", 1)
         for counter in (
             "bleavit_chain_scrape_errors_total",
-            "bleavit_chain_guardian_actions_total",
-            "bleavit_chain_upgrade_authorized_total",
-            "bleavit_chain_upgrade_applied_total",
-            "bleavit_chain_keeper_budget_low_events_total",
+            *EVENT_FAMILIES,
             "bleavit_chain_release_channel_security_flips_total",
         ):
             self.store.set(counter, 0)
@@ -236,6 +279,74 @@ class ChainExporter:
         raw = hex_bytes(response, f"state_call FutarchyApi_{method}")
         assert raw is not None
         return decode_typed_bytes(raw, entry["output_type"], metadata)
+
+    def _telemetry_api(self, method: str, block_hash: str) -> Any:
+        metadata = self._load_metadata(block_hash)
+        api = metadata.get("apis", {}).get("TelemetryApi")
+        entry = api.get("methods", {}).get(method) if api else None
+        if entry is None:
+            raise MonitoringError(f"live metadata has no TelemetryApi.{method}")
+        response = self.rpc.call(
+            "state_call", [f"TelemetryApi_{method}", "0x", block_hash]
+        )
+        raw = hex_bytes(response, f"state_call TelemetryApi_{method}")
+        assert raw is not None
+        return decode_typed_bytes(raw, entry["output_type"], metadata)
+
+    def _price_bound_error_identity(self) -> tuple[int, int]:
+        metadata = self.metadata
+        if metadata is None:
+            raise MonitoringError("portable metadata is not loaded")
+        pallet = metadata.get("pallets", {}).get("Market")
+        if not isinstance(pallet, dict):
+            raise MonitoringError("live metadata has no Market pallet")
+        module_index = pallet.get("index")
+        error_type = pallet.get("error_type")
+        error_meta = metadata.get("types", {}).get(error_type)
+        variants = (
+            error_meta.get("definition", {}).get("variants", [])
+            if isinstance(error_meta, dict)
+            else []
+        )
+        matches = [item for item in variants if item.get("name") == "PriceBoundExceeded"]
+        if (
+            isinstance(module_index, bool)
+            or not isinstance(module_index, int)
+            or len(matches) != 1
+            or isinstance(matches[0].get("index"), bool)
+            or not isinstance(matches[0].get("index"), int)
+        ):
+            raise MonitoringError(
+                "live metadata cannot resolve Market.PriceBoundExceeded identity"
+            )
+        return module_index, matches[0]["index"]
+
+    def _is_price_bound_failure(self, record: Any, identity: tuple[int, int]) -> bool:
+        event = record.get("event") if isinstance(record, dict) else None
+        inner = event.get("fields") if isinstance(event, dict) else None
+        payload = inner.get("fields") if isinstance(inner, dict) else None
+        dispatch_error = (
+            payload.get("dispatch_error") if isinstance(payload, dict) else None
+        )
+        if variant_name(dispatch_error) != "Module":
+            return False
+        module = dispatch_error.get("fields")
+        index = module.get("index") if isinstance(module, dict) else None
+        error = module.get("error") if isinstance(module, dict) else None
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not isinstance(error, list)
+            or len(error) != 4
+            or not all(
+                isinstance(item, int)
+                and not isinstance(item, bool)
+                and 0 <= item <= 255
+                for item in error
+            )
+        ):
+            raise MonitoringError("System.ExtrinsicFailed has malformed Module error")
+        return index == identity[0] and error[0] == identity[1]
 
     def _constant(self, pallet: str, name: str, block_hash: str) -> Any:
         metadata = self._load_metadata(block_hash)
@@ -333,6 +444,7 @@ class ChainExporter:
         if not isinstance(records, list):
             raise MonitoringError("System.Events did not decode to a sequence")
         observed = {name: 0 for name in EVENT_FAMILIES}
+        price_bound_identity = self._price_bound_error_identity()
         for record in records:
             pallet, event = _runtime_event_names(record)
             if (pallet, event) == ("Guardian", "GuardianAction"):
@@ -343,6 +455,12 @@ class ChainExporter:
                 observed["bleavit_chain_upgrade_applied_total"] += 1
             elif (pallet, event) == ("FutarchyTreasury", "KeeperBudgetLow"):
                 observed["bleavit_chain_keeper_budget_low_events_total"] += 1
+            elif (pallet, event) == ("System", "ExtrinsicFailed") and self._is_price_bound_failure(
+                record, price_bound_identity
+            ):
+                # Failed extrinsics roll back pallet storage, so this finalized
+                # event stream is the only auditable rejection source.
+                observed["bleavit_runtime_lmsr_domain_rejections_total"] += 1
         for name, count in observed.items():
             self.event_totals[name] += count
             self.store.set(name, self.event_totals[name])
@@ -510,6 +628,154 @@ class ChainExporter:
             _integer_field(nav, "meter_utilization_bps", "nav"),
         )
 
+    def _market_books(self, block_hash: str) -> None:
+        rows = _required_some(
+            self._telemetry_api("market_books", block_hash),
+            "TelemetryApi.market_books",
+        )
+        if not isinstance(rows, list):
+            raise MonitoringError("TelemetryApi.market_books is not a sequence")
+        self.store.clear_family("bleavit_market_book_loss_usdc")
+        self.store.clear_family("bleavit_market_lmsr_loss_bound_usdc")
+        observed: set[int] = set()
+        for row in rows:
+            market = _integer_field(row, "market", "market_books row")
+            if market in observed:
+                raise MonitoringError("TelemetryApi.market_books contains duplicate market")
+            observed.add(market)
+            labels = {"market": str(market)}
+            self.store.set(
+                "bleavit_market_book_loss_usdc",
+                _integer_field(row, "book_loss_usdc", "market_books row"),
+                labels,
+            )
+            self.store.set(
+                "bleavit_market_lmsr_loss_bound_usdc",
+                _integer_field(row, "lmsr_loss_bound_usdc", "market_books row"),
+                labels,
+            )
+
+    def _mid_window_coverage(self, block_hash: str) -> None:
+        rows = _required_some(
+            self._telemetry_api("mid_window_coverage", block_hash),
+            "TelemetryApi.mid_window_coverage",
+        )
+        if not isinstance(rows, list):
+            raise MonitoringError("TelemetryApi.mid_window_coverage is not a sequence")
+        self.store.clear_family("bleavit_market_mid_window_coverage_percent")
+        observed: set[tuple[int, int, int]] = set()
+        for row in rows:
+            key = (
+                _integer_field(row, "market", "mid_window_coverage row"),
+                _integer_field(row, "start", "mid_window_coverage row"),
+                _integer_field(row, "end", "mid_window_coverage row"),
+            )
+            if key in observed:
+                raise MonitoringError("TelemetryApi.mid_window_coverage contains a duplicate")
+            observed.add(key)
+            coverage = _integer_field(
+                row, "coverage_percent", "mid_window_coverage row"
+            )
+            if not 0 <= coverage <= 100:
+                raise MonitoringError("mid-window coverage is outside 0..100")
+            self.store.set(
+                "bleavit_market_mid_window_coverage_percent",
+                coverage,
+                {"market": str(key[0]), "start": str(key[1]), "end": str(key[2])},
+            )
+
+    def _pol(self, block_hash: str) -> None:
+        rows = _required_some(
+            self._telemetry_api("pol", block_hash), "TelemetryApi.pol"
+        )
+        if not isinstance(rows, list):
+            raise MonitoringError("TelemetryApi.pol is not a sequence")
+        components: dict[str, tuple[int, int]] = {}
+        names = {"Pol": "pol", "Baseline": "baseline"}
+        for row in rows:
+            if not isinstance(row, dict):
+                raise MonitoringError("TelemetryApi.pol row is not a struct")
+            component = names.get(variant_name(row.get("component")))
+            if component is None:
+                raise MonitoringError("TelemetryApi.pol row has an unknown component")
+            if component in components:
+                raise MonitoringError("TelemetryApi.pol contains a duplicate component")
+            components[component] = (
+                _integer_field(row, "effective_pol_usdc", "TelemetryApi.pol row"),
+                _integer_field(row, "pol_floor_usdc", "TelemetryApi.pol row"),
+            )
+        if set(components) != {"pol", "baseline"}:
+            raise MonitoringError("TelemetryApi.pol must contain both components")
+        self.store.clear_family("bleavit_market_effective_pol_usdc")
+        self.store.clear_family("bleavit_market_pol_floor_usdc")
+        for component, (effective, floor) in components.items():
+            labels = {"component": component}
+            self.store.set("bleavit_market_effective_pol_usdc", effective, labels)
+            self.store.set("bleavit_market_pol_floor_usdc", floor, labels)
+
+    def _collateral(self, block_hash: str) -> None:
+        value = _required_some(
+            self._telemetry_api("collateral", block_hash),
+            "TelemetryApi.collateral",
+        )
+        if not isinstance(value, dict):
+            raise MonitoringError("TelemetryApi.collateral is not a struct")
+        custody = _integer_field(value, "custody_usdc", "TelemetryApi.collateral")
+        liability = _integer_field(value, "liability_usdc", "TelemetryApi.collateral")
+        self.store.set("bleavit_ledger_collateral_drift_usdc", custody - liability)
+
+    def _migration_stall(self, block_hash: str) -> None:
+        value = self._telemetry_api("migration_cursor_stalled", block_hash)
+        if not isinstance(value, bool):
+            raise MonitoringError("TelemetryApi.migration_cursor_stalled is not boolean")
+        self.store.set("bleavit_runtime_migration_cursor_stalled", int(value))
+
+    def _storage_remainder(self, block_hash: str) -> None:
+        rows = _required_some(
+            self._telemetry_api("storage_utilization", block_hash),
+            "TelemetryApi.storage_utilization",
+        )
+        if not isinstance(rows, list):
+            raise MonitoringError("TelemetryApi.storage_utilization is not a sequence")
+        self.store.clear_family("bleavit_runtime_storage_max_utilization_ratio")
+        observed: set[str] = set()
+        for row in rows:
+            name = _bounded_ascii(
+                row.get("map") if isinstance(row, dict) else None,
+                "storage_utilization map",
+            )
+            if name in observed:
+                raise MonitoringError("TelemetryApi.storage_utilization contains duplicate map")
+            observed.add(name)
+            entries = _integer_field(row, "entries", "storage_utilization row")
+            bound = _integer_field(row, "bound", "storage_utilization row")
+            if entries < 0 or bound <= 0 or entries > bound:
+                raise MonitoringError("storage utilization row violates its bound")
+            self.store.set(
+                "bleavit_runtime_storage_max_utilization_ratio",
+                entries / bound,
+                {"map": name},
+            )
+
+    def _numeric_anomalies(self, block_hash: str) -> None:
+        value = _required_some(
+            self._telemetry_api("collateral", block_hash),
+            "TelemetryApi.collateral",
+        )
+        if not isinstance(value, dict):
+            raise MonitoringError("TelemetryApi.collateral is not a struct")
+        dust = _integer_field(
+            value,
+            "anomalous_rounding_dust_usdc",
+            "TelemetryApi.collateral",
+        )
+        self.store.clear_family("bleavit_runtime_numeric_anomaly_spike")
+        self.store.set(
+            "bleavit_runtime_numeric_anomaly_spike",
+            dust,
+            {"kind": "rounding_dust"},
+        )
+
     def _keeper_budget(self, block_hash: str) -> None:
         params = self._runtime_api("params", encode_param_keys(["keeper.budget"]), block_hash)
         if not isinstance(params, list) or len(params) != 1:
@@ -574,7 +840,9 @@ class ChainExporter:
             lambda: self._release_channel(block_hash, block),
         )
         complete = self._run_domain(
-            "finalized events", EVENT_FAMILIES, lambda: self._events(block_hash, block)
+            "finalized events",
+            FINALIZED_EVENT_FAMILIES,
+            lambda: self._events(block_hash, block),
         ) and complete
         if not full:
             return complete
@@ -585,6 +853,13 @@ class ChainExporter:
             ("oracle", lambda: self._oracle(block_hash)),
             ("welfare", lambda: self._welfare(block_hash)),
             ("treasury", lambda: self._treasury(block_hash)),
+            ("market books", lambda: self._market_books(block_hash)),
+            ("mid-window coverage", lambda: self._mid_window_coverage(block_hash)),
+            ("pol", lambda: self._pol(block_hash)),
+            ("collateral", lambda: self._collateral(block_hash)),
+            ("migration stall", lambda: self._migration_stall(block_hash)),
+            ("storage remainder", lambda: self._storage_remainder(block_hash)),
+            ("numeric anomalies", lambda: self._numeric_anomalies(block_hash)),
             ("keeper budget", lambda: self._keeper_budget(block_hash)),
             ("descriptor lead time", lambda: self._descriptor_lead_time(block_hash)),
             ("storage", lambda: self._storage_counts(block_hash)),

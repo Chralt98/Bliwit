@@ -139,6 +139,44 @@ impl_runtime_apis! {
         }
     }
 
+    impl futarchy_runtime_api::TelemetryApi<Block> for Runtime {
+        fn market_books() -> Option<futarchy_primitives::BoundedVec<
+            futarchy_runtime_api::MarketTelemetry,
+            { futarchy_primitives::bounds::MAX_LIVE_MARKETS },
+        >> {
+            crate::telemetry::market_books()
+        }
+
+        fn mid_window_coverage() -> Option<futarchy_primitives::BoundedVec<
+            futarchy_runtime_api::WindowCoverageTelemetry,
+            { futarchy_runtime_api::MAX_WINDOW_COVERAGE_ROWS },
+        >> {
+            crate::telemetry::mid_window_coverage()
+        }
+
+        fn pol() -> Option<futarchy_primitives::BoundedVec<
+            futarchy_runtime_api::PolTelemetry,
+            { futarchy_runtime_api::MAX_POL_TELEMETRY_ROWS },
+        >> {
+            crate::telemetry::pol()
+        }
+
+        fn collateral() -> Option<futarchy_runtime_api::CollateralTelemetry> {
+            crate::telemetry::collateral()
+        }
+
+        fn migration_cursor_stalled() -> bool {
+            crate::telemetry::migration_cursor_stalled()
+        }
+
+        fn storage_utilization() -> Option<futarchy_primitives::BoundedVec<
+            futarchy_runtime_api::StorageUtilizationTelemetry,
+            { futarchy_runtime_api::MAX_STORAGE_UTILIZATION_ROWS },
+        >> {
+            crate::telemetry::storage_utilization()
+        }
+    }
+
     impl sp_block_builder::BlockBuilder<Block> for Runtime {
         fn apply_extrinsic(extrinsic: <Block as BlockT>::Extrinsic) -> ApplyExtrinsicResult {
             Executive::apply_extrinsic(extrinsic)

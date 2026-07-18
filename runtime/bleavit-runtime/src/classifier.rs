@@ -144,6 +144,12 @@ fn derive_resource_inner(
             line,
             ..
         }) => keyed_resource(0x09, &line.encode()),
+        RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::set_coretime_authority {
+            ..
+        }) => keyed_resource(
+            0x09,
+            &pallet_futarchy_treasury::BudgetLine::OpsCoretime.encode(),
+        ),
         RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) => {
             if !budget.enter() {
                 return Err(FootprintError::Unclassifiable);
@@ -659,9 +665,14 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_futarchy_treasury::Call::open_stream { .. }
             | pallet_futarchy_treasury::Call::cancel_stream { .. }
             | pallet_futarchy_treasury::Call::issue_vit { .. }
-            | pallet_futarchy_treasury::Call::recover_foreign { .. } => leaf(CallDomain::Treasury),
+            | pallet_futarchy_treasury::Call::recover_foreign { .. }
+            | pallet_futarchy_treasury::Call::set_coretime_authority { .. } => {
+                leaf(CallDomain::Treasury)
+            }
             pallet_futarchy_treasury::Call::claim_stream { .. }
-            | pallet_futarchy_treasury::Call::execute_coretime_renewal { .. } => {
+            | pallet_futarchy_treasury::Call::execute_coretime_renewal { .. }
+            | pallet_futarchy_treasury::Call::note_coretime_quote { .. }
+            | pallet_futarchy_treasury::Call::prune_coretime_quote { .. } => {
                 leaf(CallDomain::Public)
             }
             pallet_futarchy_treasury::Call::__Ignore(_, _) => denied(),

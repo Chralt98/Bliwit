@@ -440,21 +440,38 @@ fn registry_close_proven(snapshot: &ChainSnapshot, registry: &RegistryEpochSnaps
 }
 
 fn plan_renewals(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut Vec<PlannedCrank>) {
-    if !enabled(config, Role::Renewal)
-        || !snapshot.has_call("FutarchyTreasury", "execute_coretime_renewal")
-    {
+    if !enabled(config, Role::Renewal) {
         return;
     }
     let Some(coretime) = &snapshot.coretime else {
         return;
     };
-    for (period, price) in &coretime.quotes {
-        if *price > 0 && !coretime.funded_periods.contains(period) {
+    let Some(ttl) = snapshot.live_params.coretime_quote_ttl else {
+        return;
+    };
+    for quote in &coretime.quotes {
+        let Some(age) = snapshot.current_block.checked_sub(quote.noted_at) else {
+            continue;
+        };
+        if age > ttl {
+            if snapshot.has_call("FutarchyTreasury", "prune_coretime_quote") {
+                cranks.push(crank(
+                    Role::Renewal,
+                    "FutarchyTreasury",
+                    "prune_coretime_quote",
+                    [("period_index", number(u64::from(quote.period_index)))],
+                    PRIORITY_RENEWAL,
+                ));
+            }
+        } else if quote.price > 0
+            && !coretime.funded_periods.contains(&quote.period_index)
+            && snapshot.has_call("FutarchyTreasury", "execute_coretime_renewal")
+        {
             cranks.push(crank(
                 Role::Renewal,
                 "FutarchyTreasury",
                 "execute_coretime_renewal",
-                [("period_index", number(*period))],
+                [("period_index", number(u64::from(quote.period_index)))],
                 PRIORITY_RENEWAL,
             ));
         }
@@ -600,9 +617,9 @@ mod tests {
 
     use super::*;
     use crate::snapshot::{
-        BookSnapshot, CohortSnapshot, CoretimeSnapshot, EpochSnapshot, ExecutionSnapshot,
-        OracleRoundSnapshot, ProposalSnapshot, ReapSnapshot, RegistryFilingSnapshot,
-        ReserveHealthSnapshot, WelfareSnapshot,
+        BookSnapshot, CohortSnapshot, CoretimeQuoteSnapshot, CoretimeSnapshot, EpochSnapshot,
+        ExecutionSnapshot, OracleRoundSnapshot, ProposalSnapshot, ReapSnapshot,
+        RegistryFilingSnapshot, ReserveHealthSnapshot, WelfareSnapshot,
     };
 
     fn snapshot() -> ChainSnapshot {
@@ -637,13 +654,17 @@ mod tests {
                 "ExecutionGuard.execute",
                 "ExecutionGuard.expire_failed_execution",
                 "FutarchyTreasury.execute_coretime_renewal",
+                "FutarchyTreasury.prune_coretime_quote",
                 "Welfare.record_snapshot",
                 "Welfare.record_daily_gate",
             ]
             .into_iter()
             .map(str::to_owned)
             .collect(),
-            live_params: crate::snapshot::LivePlannerParams::default(),
+            live_params: crate::snapshot::LivePlannerParams {
+                coretime_quote_ttl: Some(100),
+                ..crate::snapshot::LivePlannerParams::default()
+            },
             tick_batch: Some(DEFAULT_TICK_BATCH),
             epoch: Some(EpochSnapshot {
                 index: 5,
@@ -707,7 +728,11 @@ mod tests {
                 cancelled: false,
             }],
             coretime: Some(CoretimeSnapshot {
-                quotes: vec![(12, 1_000)],
+                quotes: vec![CoretimeQuoteSnapshot {
+                    period_index: 12,
+                    price: 1_000,
+                    noted_at: 950,
+                }],
                 funded_periods: BTreeSet::new(),
             }),
             market_reaps: vec![ReapSnapshot {
@@ -965,6 +990,81 @@ mod tests {
         assert!(!plan(&snapshot(), &config)
             .iter()
             .any(|crank| crank.role == Role::Renewal));
+    }
+
+    #[test]
+    fn renewal_uses_fresh_positive_unfunded_quotes_and_prunes_only_expired_quotes() {
+        let mut snapshot = snapshot();
+        snapshot.coretime = Some(CoretimeSnapshot {
+            quotes: vec![
+                CoretimeQuoteSnapshot {
+                    period_index: 1,
+                    price: 1_000,
+                    noted_at: 900,
+                },
+                CoretimeQuoteSnapshot {
+                    period_index: 2,
+                    price: 2_000,
+                    noted_at: 899,
+                },
+                CoretimeQuoteSnapshot {
+                    period_index: 3,
+                    price: 0,
+                    noted_at: 950,
+                },
+                CoretimeQuoteSnapshot {
+                    period_index: 4,
+                    price: 4_000,
+                    noted_at: 950,
+                },
+                CoretimeQuoteSnapshot {
+                    period_index: 5,
+                    price: 5_000,
+                    noted_at: 1_001,
+                },
+            ],
+            funded_periods: BTreeSet::from([4]),
+        });
+
+        let planned = plan(&snapshot, &config_for(Role::Renewal));
+        let calls = planned
+            .iter()
+            .map(|crank| {
+                (
+                    crank.call,
+                    crank
+                        .args
+                        .values()
+                        .next()
+                        .and_then(Value::as_u128)
+                        .expect("renewal period argument"),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            calls,
+            vec![("execute_coretime_renewal", 1), ("prune_coretime_quote", 2)]
+        );
+    }
+
+    #[test]
+    fn renewal_fails_closed_without_ttl_or_required_call() {
+        let mut snapshot = snapshot();
+        snapshot.live_params.coretime_quote_ttl = None;
+        assert!(plan(&snapshot, &config_for(Role::Renewal)).is_empty());
+
+        snapshot.live_params.coretime_quote_ttl = Some(100);
+        snapshot
+            .available_calls
+            .remove("FutarchyTreasury.execute_coretime_renewal");
+        assert!(plan(&snapshot, &config_for(Role::Renewal)).is_empty());
+
+        snapshot.coretime.as_mut().expect("fixture coretime").quotes[0].noted_at = 899;
+        snapshot
+            .available_calls
+            .remove("FutarchyTreasury.prune_coretime_quote");
+        assert!(plan(&snapshot, &config_for(Role::Renewal)).is_empty());
     }
 
     #[test]

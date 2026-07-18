@@ -911,7 +911,9 @@ pub fn genesis_capabilities() -> Vec<CapabilityRecord> {
 /// default is a simulation hypothesis (13 rule 4) and is seeded; rows whose
 /// default is a formula, unset, or TGE-dependent stay out — currently
 /// `fee.vit_usdc` (TGE ref), `keeper.rebate` (fee-basis formula),
-/// `collator.bond` and `sec.*`/`ops.*` (uncalibrated). `gate.v_min` and
+/// `collator.bond` and the remaining `sec.*`/`ops.*` rows (uncalibrated).
+/// The three calibrated `ops.ct_*` Coretime controls are explicit exceptions.
+/// `gate.v_min` and
 /// `dis.merit_min` carry derived defaults and bind at their consuming
 /// engines. Kernel-bounded flags follow the enumeration in 13 rule 7.
 #[allow(clippy::too_many_lines)]
@@ -1762,6 +1764,36 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             true
         ),
         row(
+            b"ops.ct_dot_rate",
+            ParamValue::Balance(5_000_000),
+            ParamValue::Balance(500_000),
+            ParamValue::Balance(500_000_000),
+            Some(MaxDelta::Factor(2)),
+            1,
+            ParamClass::Treasury,
+            false
+        ),
+        row(
+            b"ops.ct_fee_dot",
+            ParamValue::Balance(5_000_000_000),
+            ParamValue::Balance(100_000_000),
+            ParamValue::Balance(100_000_000_000),
+            Some(MaxDelta::Factor(2)),
+            1,
+            ParamClass::Treasury,
+            false
+        ),
+        row(
+            b"ops.ct_quote_ttl",
+            ParamValue::U32(100_800),
+            ParamValue::U32(7_200),
+            ParamValue::U32(403_200),
+            Some(MaxDelta::Factor(2)),
+            1,
+            ParamClass::Treasury,
+            false
+        ),
+        row(
             b"collator.comp",
             ParamValue::Balance(2_000_000_000),
             ParamValue::Balance(500_000_000),
@@ -2105,6 +2137,9 @@ mod tests {
         for name in [
             b"intake.max_acct".as_slice(),
             b"keeper.budget".as_slice(),
+            b"ops.ct_dot_rate".as_slice(),
+            b"ops.ct_fee_dot".as_slice(),
+            b"ops.ct_quote_ttl".as_slice(),
             b"xcm.dot_per_sec".as_slice(),
             b"xcm.dot_per_mb".as_slice(),
             b"xcm.usdc_per_sec".as_slice(),
@@ -2115,6 +2150,54 @@ mod tests {
                 "missing canonical genesis Param key: {name:?}"
             );
         }
+        for (name, value, min, max) in [
+            (
+                b"ops.ct_dot_rate".as_slice(),
+                5_000_000,
+                500_000,
+                500_000_000,
+            ),
+            (
+                b"ops.ct_fee_dot".as_slice(),
+                5_000_000_000,
+                100_000_000,
+                100_000_000_000,
+            ),
+        ] {
+            let Some(record) = params.iter().find(|record| record.key == key16(name)) else {
+                assert!(
+                    params.iter().any(|record| record.key == key16(name)),
+                    "missing Coretime Balance Param: {name:?}"
+                );
+                continue;
+            };
+            assert_eq!(record.value, ParamValue::Balance(value));
+            assert_eq!(record.min, ParamValue::Balance(min));
+            assert_eq!(record.max, ParamValue::Balance(max));
+            assert_eq!(record.max_delta, Some(MaxDelta::Factor(2)));
+            assert_eq!(record.cooldown_epochs, 1);
+            assert_eq!(record.class, ParamClass::Treasury);
+            assert!(!record.kernel_bounded);
+        }
+        let Some(ttl) = params
+            .iter()
+            .find(|record| record.key == key16(b"ops.ct_quote_ttl"))
+        else {
+            assert!(
+                params
+                    .iter()
+                    .any(|record| record.key == key16(b"ops.ct_quote_ttl")),
+                "missing Coretime TTL Param"
+            );
+            return;
+        };
+        assert_eq!(ttl.value, ParamValue::U32(100_800));
+        assert_eq!(ttl.min, ParamValue::U32(7_200));
+        assert_eq!(ttl.max, ParamValue::U32(403_200));
+        assert_eq!(ttl.max_delta, Some(MaxDelta::Factor(2)));
+        assert_eq!(ttl.cooldown_epochs, 1);
+        assert_eq!(ttl.class, ParamClass::Treasury);
+        assert!(!ttl.kernel_bounded);
         for (name, value, min, max) in [
             (
                 b"xcm.dot_per_sec".as_slice(),

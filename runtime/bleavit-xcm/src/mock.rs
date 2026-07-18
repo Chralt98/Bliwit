@@ -178,6 +178,18 @@ impl pallet_futarchy_treasury::TreasuryParams for TestTreasuryParams {
     fn keeper_rebate() -> u128 {
         0
     }
+
+    fn coretime_dot_rate() -> u128 {
+        10_000_000_000
+    }
+
+    fn coretime_fee_dot() -> u128 {
+        CoretimeFeeBudget::get()
+    }
+
+    fn coretime_quote_ttl() -> u32 {
+        100
+    }
 }
 
 impl pallet_futarchy_treasury::Config for Test {
@@ -384,7 +396,7 @@ parameter_types! {
     pub const OurParaId: u32 = chain_identity::FIXTURE_PARA_ID;
     pub TreasuryLocation: Location = Location::new(0, [Junction::AccountId32 { network: None, id: ALICE_BYTES }]);
     pub const CoretimeFeeBudget: u128 = 100;
-    pub const RenewalAccount: [u8; 32] = [44; 32];
+    pub static RenewalAccount: Option<[u8; 32]> = Some([44; 32]);
     pub const RelayWeightLimit: Weight = Weight::from_parts(100, 100);
     pub const CoretimeWeightLimit: Weight = Weight::from_parts(100, 100);
 }
@@ -500,6 +512,8 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         oracle: Default::default(),
         treasury: pallet_futarchy_treasury::GenesisConfig {
             main_usdc: 2_000_000,
+            coretime_quote_authority: Some(alice()),
+            coretime_renewal_account: Some([44; 32]),
             ..Default::default()
         },
         pallet_xcm: Default::default(),
@@ -523,6 +537,7 @@ pub fn reset_test_state() {
     TVL_CAP.with(|cap| *cap.borrow_mut() = u128::MAX);
     ACCOUNT_CAP.with(|cap| *cap.borrow_mut() = u128::MAX);
     ACCOUNT_INFLOWS.with(|inflows| inflows.borrow_mut().clear());
+    RenewalAccount::set(Some([44; 32]));
 }
 
 /// The executor type is intentionally named so the composability assertion can

@@ -621,6 +621,24 @@ genesis = false
 reason = "13 §1: unseeded operating-budget value — [VERIFY]-gated on Phase-2/3 operations planning; it has no dispatch-path limit of its own."
 
 [[entry]]
+key = "ops.ct_dot_rate"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / 09 §4: governed µUSDC-per-whole-DOT conversion rate for the ops.coretime line debit; amendment bounds are covered by the generated per-key suite, and treasury tests prove live reads plus claimant-adverse ceiling conversion."
+
+[[entry]]
+key = "ops.ct_fee_dot"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / 09 §4: governed per-renewal DOT fee budget; amendment bounds are covered by the generated per-key suite, and treasury tests prove the live value participates in the exact debit."
+
+[[entry]]
+key = "ops.ct_quote_ttl"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / 09 §4: governed quote freshness bound; amendment bounds are covered by the generated per-key suite, and treasury tests prove the inclusive execute and strict prune boundaries."
+
+[[entry]]
 key = "ops.oracle_ev"
 class = "value"
 genesis = false
@@ -1028,9 +1046,9 @@ reason = "13 §4 / 08 §1.2: market seed, settlement and reap transactionally mi
 
 [[entry]]
 key = "Treasury coretime obligations"
-class = "unwired"
-reason = "13 §4 / 09 §4: both 8-entry helper behaviors are covered (bounds + eviction tested), but production still lacks an authenticated Coretime quote/freshness source and the USDC-budget-line-to-DOT-route denomination rule (PLAN SQ-245/SQ-246); note/prune cannot be wired without inventing protocol semantics — re-owned to B12 at the B10 close."
-owner = "B12"
+class = "dispatch-limit"
+error = "Treasury::TooManyObligations"
+reason = "13 §4 / 09 §4: the marked owning-pallet test fills all eight authenticated quote slots through note_coretime_quote and proves the ninth distinct period rejects without changing storage."
 
 [[entry]]
 key = "xcm.dot_per_sec"

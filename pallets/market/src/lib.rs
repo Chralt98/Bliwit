@@ -185,15 +185,23 @@ pub mod pallet {
         _,
         Blake2_128Concat,
         MarketId,
-        BoundedVec<(BlockNumber, TwapCumulative), ConstU32<8>>,
+        BoundedVec<
+            (BlockNumber, TwapCumulative),
+            ConstU32<{ bounds::MAX_TWAP_WINDOWS_PER_MARKET }>,
+        >,
         ValueQuery,
     >;
 
     /// Per-window coverage and staleness counters. A Baseline can serve
     /// several proposal pairs, hence the same eight-entry bound as checkpoints.
     #[pallet::storage]
-    pub type DecisionWindows<T: Config> =
-        StorageMap<_, Blake2_128Concat, MarketId, BoundedVec<TwapWindow, ConstU32<8>>, ValueQuery>;
+    pub type DecisionWindows<T: Config> = StorageMap<
+        _,
+        Blake2_128Concat,
+        MarketId,
+        BoundedVec<TwapWindow, ConstU32<{ bounds::MAX_TWAP_WINDOWS_PER_MARKET }>>,
+        ValueQuery,
+    >;
 
     /// Logical proposal consumers of registered windows. Baseline windows may
     /// be shared by several proposals with identical boundaries; a sealed
@@ -205,7 +213,7 @@ pub mod pallet {
         MarketId,
         BoundedVec<
             (ProposalId, BlockNumber, BlockNumber, BlockNumber),
-            ConstU32<{ bounds::MAX_LIVE_PROPOSALS * 8 }>,
+            ConstU32<{ bounds::MAX_LIVE_PROPOSALS * bounds::MAX_TWAP_WINDOWS_PER_MARKET }>,
         >,
         ValueQuery,
     >;
@@ -829,7 +837,12 @@ pub mod pallet {
                     boundaries.extend([start, trailing_start, end]);
                     boundaries.sort_unstable();
                     boundaries.dedup();
-                    ensure!(boundaries.len() <= 8, Error::<T>::TryStateViolation);
+                    let max_boundaries = usize::try_from(bounds::MAX_TWAP_WINDOWS_PER_MARKET)
+                        .map_err(|_| Error::<T>::TryStateViolation)?;
+                    ensure!(
+                        boundaries.len() <= max_boundaries,
+                        Error::<T>::TryStateViolation
+                    );
                     DecisionWindows::<T>::try_mutate(id, |windows| {
                         windows
                             .try_push(candidate)

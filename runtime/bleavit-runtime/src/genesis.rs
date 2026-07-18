@@ -1,5 +1,6 @@
 use alloc::{vec, vec::Vec};
 
+use bleavit_xcm::identity::dot_location;
 use cumulus_primitives_core::ParaId;
 use frame_support::build_struct_json_patch;
 use serde_json::Value;
@@ -10,9 +11,9 @@ use sp_runtime::traits::AccountIdConversion;
 use crate::{
     configs::{LedgerPalletId, TreasuryPalletId},
     usdc_location, AccountId, Balance, BalancesConfig, CollatorSelectionConfig, ConstitutionConfig,
-    EpochConfig, ExecutionGuardConfig, ForeignAssetsConfig, ParachainInfoConfig, PolkadotXcmConfig,
-    RuntimeGenesisConfig, SessionConfig, SessionKeys, SudoConfig, VestingConfig,
-    MILLISECS_PER_BLOCK,
+    EpochConfig, ExecutionGuardConfig, ForeignAssetsConfig, FutarchyTreasuryConfig,
+    ParachainInfoConfig, PolkadotXcmConfig, RuntimeGenesisConfig, SessionConfig, SessionKeys,
+    SudoConfig, VestingConfig, MILLISECS_PER_BLOCK,
 };
 
 const SAFE_XCM_VERSION: u32 = staging_xcm::prelude::XCM_VERSION;
@@ -84,13 +85,13 @@ fn testnet_genesis(
     let bob = AccountId::new(BOB_PUBLIC);
     let charlie = AccountId::new(CHARLIE_PUBLIC);
     let dave = AccountId::new(DAVE_PUBLIC);
-    let owner = LedgerPalletId::get().into_account_truncating();
+    let owner: AccountId = LedgerPalletId::get().into_account_truncating();
 
     build_struct_json_patch!(RuntimeGenesisConfig {
         balances: BalancesConfig {
             balances: vec![
                 // 08 §2.1 ecosystem/ops fund: dev stand-ins for the ops multisig.
-                (alice, ECOSYSTEM_OPS_ACCOUNT),
+                (alice.clone(), ECOSYSTEM_OPS_ACCOUNT),
                 (bob, ECOSYSTEM_OPS_ACCOUNT),
                 // 08 §2.1 founding team: fully locked by the schedules below.
                 (charlie.clone(), FOUNDING_TEAM_ACCOUNT),
@@ -112,18 +113,31 @@ fn testnet_genesis(
             ],
         },
         foreign_assets: ForeignAssetsConfig {
-            assets: vec![(
-                usdc_location(),
-                owner,
-                true,
-                futarchy_primitives::currency::USDC_CENT,
-            )],
-            metadata: vec![(
-                usdc_location(),
-                b"USD Coin".to_vec(),
-                b"USDC".to_vec(),
-                futarchy_primitives::currency::USDC_DECIMALS
-            )],
+            assets: vec![
+                (
+                    usdc_location(),
+                    owner.clone(),
+                    true,
+                    futarchy_primitives::currency::USDC_CENT,
+                ),
+                // 09 §4/§6.1: treasury renewal funding is withdrawn from the
+                // local ForeignAssets DOT holding under the parent Location.
+                (dot_location(), owner, true, 1),
+            ],
+            metadata: vec![
+                (
+                    usdc_location(),
+                    b"USD Coin".to_vec(),
+                    b"USDC".to_vec(),
+                    futarchy_primitives::currency::USDC_DECIMALS,
+                ),
+                (
+                    dot_location(),
+                    b"Polkadot".to_vec(),
+                    b"DOT".to_vec(),
+                    futarchy_primitives::chain_identity::DOT_DECIMALS,
+                ),
+            ],
             accounts: vec![],
             next_asset_id: None,
             reserves: vec![],
@@ -155,6 +169,13 @@ fn testnet_genesis(
         epoch: EpochConfig {
             index: 1,
             start_block: 0,
+            ..Default::default()
+        },
+        // B12 development default: Alice stands in for the authenticated
+        // operations quote authority and the Coretime renewal destination.
+        futarchy_treasury: FutarchyTreasuryConfig {
+            coretime_quote_authority: Some(alice),
+            coretime_renewal_account: Some(ALICE_PUBLIC),
             ..Default::default()
         },
         // Seeds CurrentSpecName from the live RuntimeVersion; all other guard

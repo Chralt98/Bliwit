@@ -43,7 +43,7 @@
       "path": "zombienet/drills/05-coretime-renewal-under-dead-man.zndsl",
       "tier": "g1",
       "gated_on": [
-        "B12 coretime renewal staging for the 09 §7.1 exit form (quote-noting seam + class-origin ops.coretime funding + RenewalDispatch wiring — re-owned to B12 at the B10 close, PLAN SQ-245/SQ-246; until staged, the helper's exemption-reachability form proves freeze traversal only, not a renewal; the B10 dead-man detector landed, so engagement itself is live)"
+        "G1 drill-side staging of the 09 §7.1 renewal exit form against the landed B12 surface (B12 merged 2026-07-18: authority quote-noting, class-origin ops.coretime funding, RenewalDispatch wiring — the drill must stage an authority quote + funded line to prove success + CoretimeRenewalCalled; until staged, the helper's exemption-reachability form proves freeze traversal only, not a renewal; the B10 dead-man detector landed, so engagement itself is live)"
       ],
       "timeout_seconds": 100000,
       "spec": "09 §4/§7.1"
@@ -54,7 +54,7 @@
       "path": "zombienet/drills/06-pb-migration.zndsl",
       "tier": "release",
       "gated_on": [
-        "09 §3.2 migration-control surface (SQ-264): no migrations.force_failure/retry exists, so the MigrationHalt trigger can never go live in a drill and guardian playbook activation correctly refuses (TriggerInactive); the playbook effect substrate itself landed with B1b (#104)"
+        "09 §3.2 migration-control surface (SQ-267): no migrations.force_failure/retry exists, so the MigrationHalt trigger can never go live in a drill and guardian playbook activation correctly refuses (TriggerInactive); the playbook effect substrate itself landed with B1b (#104)"
       ],
       "timeout_seconds": 1800,
       "spec": "09 §3.2/§7.1"

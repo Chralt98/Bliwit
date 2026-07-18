@@ -62,7 +62,7 @@ class ChainExporterIsolationTests(unittest.TestCase):
 
     def test_event_failure_clears_event_families_and_full_scrape_continues(self) -> None:
         exporter = self.new_exporter()
-        for family in exporter_module.EVENT_FAMILIES:
+        for family in exporter_module.FINALIZED_EVENT_FAMILIES:
             seed_family(exporter.store, family)
         seed_family(exporter.store, "bleavit_chain_xcm_trapped_assets")
         exporter._release_channel = lambda *_args: exporter.store.set(  # type: ignore[method-assign]
@@ -80,6 +80,13 @@ class ChainExporterIsolationTests(unittest.TestCase):
             "_oracle",
             "_welfare",
             "_treasury",
+            "_market_books",
+            "_mid_window_coverage",
+            "_pol",
+            "_collateral",
+            "_migration_stall",
+            "_storage_remainder",
+            "_numeric_anomalies",
             "_keeper_budget",
             "_descriptor_lead_time",
             "_storage_counts",
@@ -91,7 +98,7 @@ class ChainExporterIsolationTests(unittest.TestCase):
 
         present = family_names(exporter.store)
         self.assertFalse(complete)
-        for family in exporter_module.EVENT_FAMILIES:
+        for family in exporter_module.FINALIZED_EVENT_FAMILIES:
             self.assertNotIn(family, present)
         self.assertIn("bleavit_chain_release_channel_spec_version", present)
         self.assertIn("bleavit_chain_xcm_trapped_assets", present)
@@ -105,6 +112,13 @@ class ChainExporterIsolationTests(unittest.TestCase):
             "oracle": "_oracle",
             "welfare": "_welfare",
             "treasury": "_treasury",
+            "market books": "_market_books",
+            "mid-window coverage": "_mid_window_coverage",
+            "pol": "_pol",
+            "collateral": "_collateral",
+            "migration stall": "_migration_stall",
+            "storage remainder": "_storage_remainder",
+            "numeric anomalies": "_numeric_anomalies",
             "keeper budget": "_keeper_budget",
             "descriptor lead time": "_descriptor_lead_time",
             "storage": "_storage_counts",

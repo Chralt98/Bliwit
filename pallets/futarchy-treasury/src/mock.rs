@@ -41,6 +41,10 @@ pub fn acc(n: u8) -> AccountId32 {
     AccountId32::new([n; 32])
 }
 
+pub fn coretime_quote_authority() -> AccountId32 {
+    acc(42)
+}
+
 parameter_types! {
     pub static CurrentEpochValue: u32 = 0;
     // 13 §1 treasury tunables — defaulting to the core defaults so shell ≡ core,
@@ -54,6 +58,11 @@ parameter_types! {
     pub static KeeperBudgetEpoch: u128 = futarchy_treasury_core::KEEPER_BUDGET_EPOCH;
     // `keeper.rebate` is intentionally absent from genesis Params until B5.
     pub static KeeperRebate: u128 = 0;
+    // Test-only injected coretime parameters. They are deliberately simple
+    // non-default values so tests prove the pallet consumes the seam.
+    pub static CoretimeDotRate: u128 = 10_000_000_000;
+    pub static CoretimeFeeDot: u128 = 100;
+    pub static CoretimeQuoteTtl: u32 = 100;
     // Configurable stand-ins for the real KEEPER__/ORACLE__ USDC custody pots.
     pub static KeeperRebatePotBalance: u128 = 0;
     pub static OracleRebatePotBalance: u128 = 0;
@@ -81,6 +90,15 @@ impl TreasuryParams for TestParams {
     }
     fn keeper_rebate() -> u128 {
         KeeperRebate::get()
+    }
+    fn coretime_dot_rate() -> u128 {
+        CoretimeDotRate::get()
+    }
+    fn coretime_fee_dot() -> u128 {
+        CoretimeFeeDot::get()
+    }
+    fn coretime_quote_ttl() -> u32 {
+        CoretimeQuoteTtl::get()
     }
 }
 
@@ -222,7 +240,11 @@ impl pallet_futarchy_treasury::BenchmarkHelper<RuntimeOrigin, AccountId32> for T
 
 /// Externalities with the default (empty, 1e9 VIT supply) treasury genesis.
 pub fn new_test_ext() -> sp_io::TestExternalities {
-    new_test_ext_with(pallet_futarchy_treasury::GenesisConfig::default())
+    new_test_ext_with(pallet_futarchy_treasury::GenesisConfig {
+        coretime_quote_authority: Some(coretime_quote_authority()),
+        coretime_renewal_account: Some([44; 32]),
+        ..Default::default()
+    })
 }
 
 /// Externalities with an explicit treasury genesis.
@@ -240,6 +262,9 @@ pub fn new_test_ext_with(
         System::set_block_number(1);
         KeeperBudgetEpoch::set(futarchy_treasury_core::KEEPER_BUDGET_EPOCH);
         KeeperRebate::set(0);
+        CoretimeDotRate::set(10_000_000_000);
+        CoretimeFeeDot::set(100);
+        CoretimeQuoteTtl::set(100);
         reset_rebate_payout();
         reset_pot_funding();
     });

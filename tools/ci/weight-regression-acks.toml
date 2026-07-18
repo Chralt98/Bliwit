@@ -8,5 +8,6 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
-# (empty: the B1b/B10 acknowledgements were consumed when those weights
-# reached main — vs the post-#107 base there is no outstanding regression)
+# (the B1b/B10 acknowledgements were consumed when those weights reached
+# main — vs the post-#107 base there was no outstanding regression)
+runtime/bleavit-runtime/src/weights/pallet_futarchy_treasury.rs execute_coretime_renewal: B12 (#111, merged into this branch) replaced the pre-activation placeholder with the real renewal path's conservative hand envelope — authenticated quote consumption + line debit + XCM RenewalDispatch send — pending the next omni-bencher regeneration sweep; inherited via the main merge, no weight change originates on this branch

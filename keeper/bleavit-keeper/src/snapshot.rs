@@ -76,6 +76,7 @@ pub struct LivePlannerParams {
     pub decision_window: Option<u64>,
     pub reserve_probe_interval: Option<u64>,
     pub reserve_probe_timeout: Option<u64>,
+    pub coretime_quote_ttl: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -160,8 +161,15 @@ pub struct ExecutionSnapshot {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CoretimeSnapshot {
-    pub quotes: Vec<(u64, u128)>,
-    pub funded_periods: BTreeSet<u64>,
+    pub quotes: Vec<CoretimeQuoteSnapshot>,
+    pub funded_periods: BTreeSet<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoretimeQuoteSnapshot {
+    pub period_index: u32,
+    pub price: u128,
+    pub noted_at: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -280,8 +288,9 @@ impl SnapshotExtractor {
             ),
             capability(
                 Role::Renewal,
-                has_call("FutarchyTreasury", "execute_coretime_renewal"),
-                "treasury renewal call absent",
+                has_call("FutarchyTreasury", "execute_coretime_renewal")
+                    || has_call("FutarchyTreasury", "prune_coretime_quote"),
+                "treasury renewal calls absent",
             ),
             capability(
                 Role::Welfare,
@@ -409,17 +418,25 @@ impl SnapshotExtractor {
         &self,
         at_block: &OnlineClientAtBlock<PolkadotConfig>,
     ) -> LivePlannerParams {
-        let (obs_interval, decision_window, reserve_probe_interval, reserve_probe_timeout) = tokio::join!(
+        let (
+            obs_interval,
+            decision_window,
+            reserve_probe_interval,
+            reserve_probe_timeout,
+            coretime_quote_ttl,
+        ) = tokio::join!(
             self.fetch_u32_param(at_block, b"mkt.obs_interval"),
             self.fetch_u32_param(at_block, b"dec.window"),
             self.fetch_u32_param(at_block, b"res.probe_int"),
             self.fetch_u32_param(at_block, b"res.probe_to"),
+            self.fetch_u32_param(at_block, b"ops.ct_quote_ttl"),
         );
         LivePlannerParams {
             obs_interval,
             decision_window,
             reserve_probe_interval,
             reserve_probe_timeout,
+            coretime_quote_ttl,
         }
     }
 
@@ -681,11 +698,11 @@ impl SnapshotExtractor {
             .await?;
         let quotes = value
             .at("coretime_quotes")
-            .map(tuple_pairs)
+            .map(coretime_quotes)
             .unwrap_or_default();
         let funded_periods = value
             .at("funded_coretime_periods")
-            .map(composite_u64s)
+            .map(composite_u32s)
             .unwrap_or_default()
             .into_iter()
             .collect();
@@ -1126,17 +1143,22 @@ fn market_set_ids<C>(value: &Value<C>) -> Vec<u64> {
     ids
 }
 
-fn tuple_pairs<C>(value: &Value<C>) -> Vec<(u64, u128)> {
+fn coretime_quotes<C>(value: &Value<C>) -> Vec<CoretimeQuoteSnapshot> {
     composite_values(value)
-        .filter_map(|pair| {
-            let mut values = composite_values(pair);
-            Some((as_u64(values.next()?)?, values.next()?.as_u128()?))
+        .filter_map(|quote| {
+            Some(CoretimeQuoteSnapshot {
+                period_index: u32::try_from(quote.at("period_index").and_then(as_u64)?).ok()?,
+                price: quote.at("price")?.as_u128()?,
+                noted_at: quote.at("noted_at").and_then(as_u64)?,
+            })
         })
         .collect()
 }
 
-fn composite_u64s<C>(value: &Value<C>) -> Vec<u64> {
-    composite_values(value).filter_map(as_u64).collect()
+fn composite_u32s<C>(value: &Value<C>) -> Vec<u32> {
+    composite_values(value)
+        .filter_map(|value| u32::try_from(as_u64(value)?).ok())
+        .collect()
 }
 
 fn tuple_key_pair(keys: &[Value<()>]) -> Option<(u64, u64)> {
@@ -1379,6 +1401,38 @@ mod tests {
             .expect("hand-encoded ParamRecord follows its type metadata");
 
         assert_eq!(param_record_u32(&decoded, &key), Some(7));
+    }
+
+    #[test]
+    fn named_coretime_quotes_decode_period_price_and_noted_at() {
+        let value = Value::unnamed_composite([
+            Value::named_composite([
+                ("period_index", Value::u128(12)),
+                ("price", Value::u128(1_000)),
+                ("noted_at", Value::u128(900)),
+            ]),
+            Value::named_composite([
+                ("period_index", Value::u128(13)),
+                ("price", Value::u128(2_000)),
+                ("noted_at", Value::u128(950)),
+            ]),
+        ]);
+
+        assert_eq!(
+            coretime_quotes(&value),
+            vec![
+                CoretimeQuoteSnapshot {
+                    period_index: 12,
+                    price: 1_000,
+                    noted_at: 900,
+                },
+                CoretimeQuoteSnapshot {
+                    period_index: 13,
+                    price: 2_000,
+                    noted_at: 950,
+                },
+            ]
+        );
     }
 
     #[test]

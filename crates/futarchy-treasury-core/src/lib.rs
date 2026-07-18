@@ -4,7 +4,10 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use futarchy_primitives::{AccountId, Balance, BlockNumber, EpochId, ProposalClass, H256};
+use futarchy_primitives::{
+    chain_identity::DOT_PLANCKS_PER_DOT, AccountId, Balance, BlockNumber, EpochId, ProposalClass,
+    H256,
+};
 use origins_core::Origin;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
@@ -203,6 +206,25 @@ pub struct Stream {
     pub cancelled: bool,
 }
 
+/// One authenticated, open Coretime renewal quote (09 §4).
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub struct CoretimeQuote {
+    pub period_index: u32,
+    pub price: Balance,
+    pub noted_at: u64,
+}
+
 /// Rolling outflow meter over a trailing window (08 §1.3, I-7).
 ///
 /// Charges accumulate in per-day buckets; `BUCKETS` is the window length in
@@ -326,6 +348,13 @@ pub enum Event {
         line: BudgetLine,
         amount: Balance,
     },
+    CoretimeQuoteNoted {
+        period_index: u32,
+        price: Balance,
+    },
+    CoretimeQuotePruned {
+        period_index: u32,
+    },
     NavFloorUnmet {
         class: ProposalClass,
         nav: Balance,
@@ -365,6 +394,12 @@ pub enum Error {
     NavFloorUnmet,
     ZeroQuote,
     Overflow,
+    QuoteExpired,
+    QuoteNotExpired,
+    RateUnset,
+    FeeBudgetUnset,
+    QuoteTtlUnset,
+    QuoteTimestampInFuture,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -392,10 +427,10 @@ pub struct Treasury {
     /// Coretime periods already funded via `execute_coretime_renewal`
     /// (09 §4 idempotency key), most recent last.
     pub funded_coretime_periods: Vec<u32>,
-    /// Open renewal quotes `(period_index, price)` noted by the runtime from
-    /// Coretime-chain state (09 §4/§6). A present quote is what makes the
-    /// renewal window open; the price never comes from the caller.
-    pub coretime_quotes: Vec<(u32, Balance)>,
+    /// Open authenticated renewal quotes (09 §4). A present fresh quote is
+    /// what makes the renewal window open; the permissionless renewal caller
+    /// can neither choose its price nor refresh its timestamp.
+    pub coretime_quotes: Vec<CoretimeQuote>,
     /// Live tunable seams (rule 4). These default to the 13 §1 defaults
     /// (`TRS_CAP_PROPOSAL_BPS`, `TRS_STREAM_THRESHOLD_BPS`), so the frame-free
     /// core and the M3 model behave identically at default parameters. The
@@ -818,13 +853,14 @@ impl Treasury {
         });
         Ok(())
     }
-    /// Note the current renewal quote for a coretime period. Runtime context
-    /// read from Coretime-chain state (09 §4/§6) — never a user-facing call;
-    /// a present quote is what makes the renewal window open.
+    /// Note an authenticated renewal quote. Re-noting an open period replaces
+    /// both price and timestamp in place, so the bound counts periods rather
+    /// than revisions (09 §4).
     pub fn note_coretime_renewal_quote(
         &mut self,
         period_index: u32,
         price: Balance,
+        now: u64,
     ) -> Result<(), Error> {
         // A real renewal costs > 0; a zero quote would let a keeper "renew" for
         // free and permanently mark the period funded, blocking a corrected
@@ -835,28 +871,65 @@ impl Treasury {
             !self.funded_coretime_periods.contains(&period_index),
             Error::PeriodAlreadyFunded
         );
-        if let Some((_, quoted)) = self
+        if let Some(quote) = self
             .coretime_quotes
             .iter_mut()
-            .find(|(p, _)| *p == period_index)
+            .find(|quote| quote.period_index == period_index)
         {
-            *quoted = price;
+            quote.price = price;
+            quote.noted_at = now;
+            self.events.push(Event::CoretimeQuoteNoted {
+                period_index,
+                price,
+            });
             return Ok(());
         }
         ensure!(
             self.coretime_quotes.len() < MAX_FUNDED_CORETIME_PERIODS,
             Error::TooManyObligations
         );
-        self.coretime_quotes.push((period_index, price));
+        self.coretime_quotes.push(CoretimeQuote {
+            period_index,
+            price,
+            noted_at: now,
+        });
+        self.events.push(Event::CoretimeQuoteNoted {
+            period_index,
+            price,
+        });
         Ok(())
     }
 
-    /// Drop a stale/superseded open quote (09 §4/§6) so the bounded quote slot
-    /// cannot be clogged by periods the keeper never renewed. Runtime-internal
-    /// (B4 prunes when it re-reads Coretime-chain state; the quote's validity
-    /// interval is PLAN SQ-53). A no-op if the period has no open quote.
-    pub fn prune_coretime_quote(&mut self, period_index: u32) {
-        self.coretime_quotes.retain(|(p, _)| *p != period_index);
+    /// Drop an open quote. Its authority may prune at any time; every other
+    /// Signed caller may prune only once `age > ttl` (09 §4).
+    pub fn prune_coretime_quote(
+        &mut self,
+        period_index: u32,
+        now: u64,
+        ttl: u64,
+        authority: bool,
+    ) -> Result<(), Error> {
+        let quote_index = self
+            .coretime_quotes
+            .iter()
+            .position(|quote| quote.period_index == period_index)
+            .ok_or(Error::RenewalWindowClosed)?;
+        if !authority {
+            ensure!(ttl > 0, Error::QuoteTtlUnset);
+            let noted_at = self
+                .coretime_quotes
+                .get(quote_index)
+                .map(|quote| quote.noted_at)
+                .ok_or(Error::RenewalWindowClosed)?;
+            let age = now
+                .checked_sub(noted_at)
+                .ok_or(Error::QuoteTimestampInFuture)?;
+            ensure!(age > ttl, Error::QuoteNotExpired);
+        }
+        self.coretime_quotes.remove(quote_index);
+        self.events
+            .push(Event::CoretimeQuotePruned { period_index });
+        Ok(())
     }
 
     /// 09 §4 `execute_coretime_renewal(period_index)`: permissionless
@@ -870,6 +943,10 @@ impl Treasury {
         &mut self,
         _keeper: AccountId,
         period_index: u32,
+        now: u64,
+        ttl: u64,
+        dot_rate: Balance,
+        fee_budget: Balance,
     ) -> Result<Balance, Error> {
         ensure!(
             !self.funded_coretime_periods.contains(&period_index),
@@ -878,10 +955,29 @@ impl Treasury {
         let quote_index = self
             .coretime_quotes
             .iter()
-            .position(|(p, _)| *p == period_index)
+            .position(|quote| quote.period_index == period_index)
             .ok_or(Error::RenewalWindowClosed)?;
-        let (_, price) = self.coretime_quotes[quote_index];
-        self.debit_line(BudgetLine::OpsCoretime, price)?;
+        ensure!(ttl > 0, Error::QuoteTtlUnset);
+        ensure!(dot_rate > 0, Error::RateUnset);
+        ensure!(fee_budget > 0, Error::FeeBudgetUnset);
+        let quote = self
+            .coretime_quotes
+            .get(quote_index)
+            .copied()
+            .ok_or(Error::RenewalWindowClosed)?;
+        let age = now
+            .checked_sub(quote.noted_at)
+            .ok_or(Error::QuoteTimestampInFuture)?;
+        ensure!(age <= ttl, Error::QuoteExpired);
+        let total_dot = quote.price.checked_add(fee_budget).ok_or(Error::Overflow)?;
+        let numerator = total_dot.checked_mul(dot_rate).ok_or(Error::Overflow)?;
+        let quotient = numerator / DOT_PLANCKS_PER_DOT;
+        let converted_debit = if numerator % DOT_PLANCKS_PER_DOT == 0 {
+            quotient
+        } else {
+            quotient.checked_add(1).ok_or(Error::Overflow)?
+        };
+        self.debit_line(BudgetLine::OpsCoretime, converted_debit)?;
         self.coretime_quotes.remove(quote_index);
         if self.funded_coretime_periods.len() >= MAX_FUNDED_CORETIME_PERIODS {
             self.funded_coretime_periods.remove(0);
@@ -889,9 +985,9 @@ impl Treasury {
         self.funded_coretime_periods.push(period_index);
         self.events.push(Event::CoretimeRenewalCalled {
             line: BudgetLine::OpsCoretime,
-            amount: price,
+            amount: converted_debit,
         });
-        Ok(price)
+        Ok(quote.price)
     }
     pub fn set_reserve_impaired(&mut self, epoch: EpochId, flag: bool) {
         if self.reserve_impaired != flag {
@@ -1016,12 +1112,49 @@ impl Treasury {
             self.coretime_quotes.len() <= MAX_FUNDED_CORETIME_PERIODS,
             Error::TooManyObligations
         );
+        for (index, quote) in self.coretime_quotes.iter().enumerate() {
+            ensure!(quote.price > 0, Error::ZeroQuote);
+            ensure!(
+                !self.funded_coretime_periods.contains(&quote.period_index),
+                Error::PeriodAlreadyFunded
+            );
+            ensure!(
+                !self
+                    .coretime_quotes
+                    .iter()
+                    .skip(index.saturating_add(1))
+                    .any(|other| other.period_index == quote.period_index),
+                Error::TooManyObligations
+            );
+        }
+        for (index, period) in self.funded_coretime_periods.iter().enumerate() {
+            ensure!(
+                !self
+                    .funded_coretime_periods
+                    .iter()
+                    .skip(index.saturating_add(1))
+                    .any(|other| other == period),
+                Error::TooManyObligations
+            );
+        }
         // The live keeper budget may shrink mid-epoch, so `spent <= budget`
         // is intentionally not a standing invariant. Likewise, an over-budget
         // first attempt may set `exhausted_emitted` while `spent == 0`.
         ensure!(
             self.keeper_meter.general_spent <= self.keeper_meter.spent,
             Error::Overflow
+        );
+        Ok(())
+    }
+
+    /// Runtime-aware extension of [`Self::try_state`] for quote timestamps.
+    pub fn try_state_at(&self, now: u64) -> Result<(), Error> {
+        self.try_state()?;
+        ensure!(
+            self.coretime_quotes
+                .iter()
+                .all(|quote| quote.noted_at <= now),
+            Error::QuoteTimestampInFuture
         );
         Ok(())
     }
@@ -1510,52 +1643,147 @@ mod tests {
         // closed on paper only, since no decision can execute under a freeze.
         let mut t = funded();
         t.set_reserve_impaired(1, true);
+        let now = 10;
+        let ttl = 100;
+        let rate = 10_000_000_000;
+        let fee = 100;
         // No runtime-noted quote: the renewal window is closed.
         assert_eq!(
-            t.execute_coretime_renewal(acct(7), 42).unwrap_err(),
-            Error::RenewalWindowClosed
+            t.execute_coretime_renewal(acct(7), 42, now, ttl, rate, fee),
+            Err(Error::RenewalWindowClosed)
         );
-        // The paid amount is the noted quote (Codex review, PR #32): a
-        // permissionless keeper can neither fund a period for free nor pick
-        // the amount.
-        t.note_coretime_renewal_quote(42, 100_000 * USDC).unwrap();
+        // The dispatcher receives the authority-noted DOT quote, while the
+        // USDC line pays ceil((quote + fee) * rate / 1 DOT).
+        let quote = 100_000 * USDC;
+        assert_eq!(t.note_coretime_renewal_quote(42, quote, now), Ok(()));
         let line_before = t.line_balance(BudgetLine::OpsCoretime);
         assert_eq!(
-            t.execute_coretime_renewal(acct(7), 42).unwrap(),
-            100_000 * USDC
+            t.execute_coretime_renewal(acct(7), 42, now, ttl, rate, fee),
+            Ok(quote)
         );
         assert_eq!(
             t.line_balance(BudgetLine::OpsCoretime),
-            line_before - 100_000 * USDC
+            line_before - quote - fee
         );
         assert!(matches!(
             t.events.last(),
             Some(Event::CoretimeRenewalCalled {
                 amount,
                 ..
-            }) if *amount == 100_000 * USDC
+            }) if *amount == quote + fee
         ));
         // Idempotent per period_index - even against a re-noted quote.
         assert_eq!(
-            t.note_coretime_renewal_quote(42, 1).unwrap_err(),
-            Error::PeriodAlreadyFunded
+            t.note_coretime_renewal_quote(42, 1, now),
+            Err(Error::PeriodAlreadyFunded)
         );
         assert_eq!(
-            t.execute_coretime_renewal(acct(8), 42).unwrap_err(),
-            Error::PeriodAlreadyFunded
+            t.execute_coretime_renewal(acct(8), 42, now, ttl, rate, fee),
+            Err(Error::PeriodAlreadyFunded)
         );
         // Bounded solely by the pre-authorized line balance.
-        t.note_coretime_renewal_quote(43, 500_000 * USDC).unwrap();
         assert_eq!(
-            t.execute_coretime_renewal(acct(8), 43).unwrap_err(),
-            Error::InsufficientFunds
+            t.note_coretime_renewal_quote(43, 500_000 * USDC, now),
+            Ok(())
         );
-        t.note_coretime_renewal_quote(43, 400_000 * USDC).unwrap();
         assert_eq!(
-            t.execute_coretime_renewal(acct(8), 43).unwrap(),
-            400_000 * USDC
+            t.execute_coretime_renewal(acct(8), 43, now, ttl, rate, fee),
+            Err(Error::InsufficientFunds)
         );
-        t.try_state().unwrap();
+        assert_eq!(
+            t.note_coretime_renewal_quote(43, 399_999 * USDC, now),
+            Ok(())
+        );
+        assert_eq!(
+            t.execute_coretime_renewal(acct(8), 43, now, ttl, rate, fee),
+            Ok(399_999 * USDC)
+        );
+        assert_eq!(t.try_state(), Ok(()));
+    }
+
+    #[test]
+    fn coretime_quote_supersession_and_strict_prune_boundary() {
+        let mut t = funded();
+        assert_eq!(t.note_coretime_renewal_quote(7, 10, 20), Ok(()));
+        assert_eq!(t.note_coretime_renewal_quote(7, 15, 30), Ok(()));
+        assert_eq!(
+            t.coretime_quotes,
+            vec![CoretimeQuote {
+                period_index: 7,
+                price: 15,
+                noted_at: 30,
+            }]
+        );
+
+        assert_eq!(
+            t.prune_coretime_quote(7, 130, 100, false),
+            Err(Error::QuoteNotExpired)
+        );
+        assert_eq!(t.coretime_quotes.len(), 1);
+        assert_eq!(t.prune_coretime_quote(7, 131, 100, false), Ok(()));
+        assert!(t.coretime_quotes.is_empty());
+
+        assert_eq!(t.note_coretime_renewal_quote(8, 10, 200), Ok(()));
+        assert_eq!(t.prune_coretime_quote(8, 200, 0, true), Ok(()));
+        assert!(t.coretime_quotes.is_empty());
+    }
+
+    #[test]
+    fn coretime_conversion_rounds_up_and_consumes_live_inputs() {
+        let mut t = funded();
+        let before = t.line_balance(BudgetLine::OpsCoretime);
+        assert_eq!(t.note_coretime_renewal_quote(9, 1, 10), Ok(()));
+        assert_eq!(
+            t.execute_coretime_renewal(acct(7), 9, 110, 100, 5_000_000, 100),
+            Ok(1)
+        );
+        // ceil((1 + 100) * 5_000_000 / 10_000_000_000) == 1.
+        assert_eq!(t.line_balance(BudgetLine::OpsCoretime), before - 1);
+    }
+
+    #[test]
+    fn coretime_execute_failure_paths_are_fail_static() {
+        let mut t = funded();
+        assert_eq!(t.note_coretime_renewal_quote(10, 10, 20), Ok(()));
+        let before = t.clone();
+        for (ttl, rate, fee, now, expected) in [
+            (0, 1, 1, 20, Error::QuoteTtlUnset),
+            (100, 0, 1, 20, Error::RateUnset),
+            (100, 1, 0, 20, Error::FeeBudgetUnset),
+            (100, 1, 1, 121, Error::QuoteExpired),
+            (100, 1, 1, 19, Error::QuoteTimestampInFuture),
+        ] {
+            assert_eq!(
+                t.execute_coretime_renewal(acct(7), 10, now, ttl, rate, fee),
+                Err(expected)
+            );
+            assert_eq!(t, before);
+        }
+
+        assert_eq!(t.note_coretime_renewal_quote(10, Balance::MAX, 20), Ok(()));
+        let before_add_overflow = t.clone();
+        assert_eq!(
+            t.execute_coretime_renewal(acct(7), 10, 20, 100, 1, 1),
+            Err(Error::Overflow)
+        );
+        assert_eq!(t, before_add_overflow);
+
+        assert_eq!(
+            t.note_coretime_renewal_quote(10, Balance::MAX / 2, 20),
+            Ok(())
+        );
+        let before_mul_overflow = t.clone();
+        assert_eq!(
+            t.execute_coretime_renewal(acct(7), 10, 20, 100, 3, 1),
+            Err(Error::Overflow)
+        );
+        assert_eq!(t, before_mul_overflow);
+
+        assert_eq!(
+            t.prune_coretime_quote(10, 19, 100, false),
+            Err(Error::QuoteTimestampInFuture)
+        );
+        assert_eq!(t, before_mul_overflow);
     }
 
     #[test]

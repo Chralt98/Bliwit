@@ -156,7 +156,7 @@ where
     Executor: ExecuteXcm<RuntimeCall>,
     TreasuryLocation: Get<Location>,
     FeeBudget: Get<u128>,
-    RenewalAccount: Get<[u8; 32]>,
+    RenewalAccount: Get<Option<[u8; 32]>>,
     RelayLimit: Get<Weight>,
     CoretimeLimit: Get<Weight>,
     LocalExecLimit: Get<Weight>,
@@ -164,10 +164,13 @@ where
     fn dispatch_renewal(_period_index: u32, amount: u128) -> DispatchResult {
         let relay_limit = RelayLimit::get();
         let coretime_limit = CoretimeLimit::get();
+        let renewal_account = RenewalAccount::get().ok_or(DispatchError::Other(
+            "coretime renewal account is not configured",
+        ))?;
         let plan = coretime_renewal_program(
             amount,
             FeeBudget::get(),
-            RenewalAccount::get(),
+            renewal_account,
             WeightLimit::Limited(relay_limit),
             WeightLimit::Limited(coretime_limit),
         )

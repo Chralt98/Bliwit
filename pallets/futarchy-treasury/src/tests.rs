@@ -18,11 +18,21 @@ fn to() -> RuntimeOrigin {
     RuntimeOrigin::signed(treasury_acc())
 }
 
+fn note_quote(period_index: u32, price: u128) -> frame_support::dispatch::DispatchResult {
+    Treasury::note_coretime_quote(
+        RuntimeOrigin::signed(coretime_quote_authority()),
+        period_index,
+        price,
+    )
+}
+
 /// Genesis-funded `MAIN` (25M USDC) with three lines pre-funded via the
 /// extrinsic (the realistic post-XCM funding path, 08 §2.5).
 fn funded_ext() -> sp_io::TestExternalities {
     let mut ext = new_test_ext_with(crate::GenesisConfig::<Test> {
         main_usdc: MAIN0,
+        coretime_quote_authority: Some(coretime_quote_authority()),
+        coretime_renewal_account: Some([44; 32]),
         ..Default::default()
     });
     ext.execute_with(|| {
@@ -314,11 +324,13 @@ fn reserve_haircut_zeroes_spendable_nav_and_blocks_new_commitments() {
             Error::<Test>::NavFloorUnmet
         );
 
-        // Coretime renewal stays alive (D-9 freeze-exempt).
-        assert_ok!(crate::Pallet::<Test>::note_coretime_renewal_quote(
+        // The full Coretime liveness sequence stays alive (D-9 freeze-exempt).
+        assert_ok!(note_quote(1, 100_000 * USDC));
+        assert_ok!(Treasury::prune_coretime_quote(
+            RuntimeOrigin::signed(coretime_quote_authority()),
             1,
-            100_000 * USDC
         ));
+        assert_ok!(note_quote(1, 100_000 * USDC));
         assert_ok!(Treasury::execute_coretime_renewal(
             RuntimeOrigin::signed(acc(8)),
             1
@@ -582,10 +594,7 @@ fn successful_coretime_renewal_self_rebates_the_keeper_once() {
         KeeperRebate::set(10 * USDC);
         reset_rebate_payout();
         set_rebate_pot_balance(PayoutLine::Keeper, 100 * USDC);
-        assert_ok!(crate::Pallet::<Test>::note_coretime_renewal_quote(
-            77,
-            100_000 * USDC
-        ));
+        assert_ok!(note_quote(77, 100_000 * USDC));
 
         assert_ok!(Treasury::execute_coretime_renewal(
             RuntimeOrigin::signed(acc(7)),
@@ -655,6 +664,18 @@ mod renewal_dispatch_seam {
         fn keeper_rebate() -> u128 {
             0
         }
+
+        fn coretime_dot_rate() -> u128 {
+            10_000_000_000
+        }
+
+        fn coretime_fee_dot() -> u128 {
+            100
+        }
+
+        fn coretime_quote_ttl() -> u32 {
+            100
+        }
     }
 
     std::thread_local! {
@@ -715,6 +736,8 @@ mod renewal_dispatch_seam {
             system: Default::default(),
             treasury: pallet_futarchy_treasury::GenesisConfig {
                 main_usdc: MAIN0,
+                coretime_quote_authority: Some(AccountId32::new([42; 32])),
+                coretime_renewal_account: Some([44; 32]),
                 ..Default::default()
             },
         }
@@ -738,7 +761,11 @@ mod renewal_dispatch_seam {
     fn renewal_dispatch_receives_the_committed_period_and_quote() {
         new_ext().execute_with(|| {
             let price = 100_000 * USDC;
-            assert_ok!(Treasury::note_coretime_renewal_quote(42, price));
+            assert_ok!(Treasury::note_coretime_quote(
+                RuntimeOrigin::signed(AccountId32::new([42; 32])),
+                42,
+                price,
+            ));
 
             assert_ok!(Treasury::execute_coretime_renewal(
                 RuntimeOrigin::signed(AccountId32::new([7; 32])),
@@ -751,7 +778,7 @@ mod renewal_dispatch_seam {
             assert!(!state
                 .coretime_quotes
                 .iter()
-                .any(|(period, _)| *period == 42));
+                .any(|quote| quote.period_index == 42));
         });
     }
 
@@ -759,7 +786,11 @@ mod renewal_dispatch_seam {
     fn renewal_dispatch_error_rolls_back_accounting_for_retry() {
         new_ext().execute_with(|| {
             let price = 100_000 * USDC;
-            assert_ok!(Treasury::note_coretime_renewal_quote(42, price));
+            assert_ok!(Treasury::note_coretime_quote(
+                RuntimeOrigin::signed(AccountId32::new([42; 32])),
+                42,
+                price,
+            ));
             let line_before = Treasury::line_balance(BudgetLine::OpsCoretime);
             System::reset_events();
             FAIL_DISPATCH.with(|fail| fail.set(true));
@@ -775,7 +806,9 @@ mod renewal_dispatch_seam {
             DISPATCHED.with(|calls| assert_eq!(&*calls.borrow(), &[(42, price)]));
             let state = Treasury::treasury();
             assert_eq!(Treasury::line_balance(BudgetLine::OpsCoretime), line_before);
-            assert!(state.coretime_quotes.contains(&(42, price)));
+            assert!(state.coretime_quotes.iter().any(|quote| {
+                quote.period_index == 42 && quote.price == price && quote.noted_at == 1
+            }));
             assert!(!state.funded_coretime_periods.contains(&42));
             assert!(!System::events().iter().any(|record| {
                 matches!(
@@ -795,11 +828,10 @@ fn coretime_renewal_is_permissionless_quote_priced_and_idempotent() {
             Treasury::execute_coretime_renewal(RuntimeOrigin::signed(acc(7)), 42),
             Error::<Test>::RenewalWindowClosed
         );
-        // The paid amount is the runtime-noted quote, not a caller value.
-        assert_ok!(crate::Pallet::<Test>::note_coretime_renewal_quote(
-            42,
-            100_000 * USDC
-        ));
+        // The XCM dispatcher receives the authority-noted DOT quote, while the
+        // USDC budget line pays ceil((quote + fee) * rate / 1 DOT).
+        let price = 100_000 * USDC;
+        assert_ok!(note_quote(42, price));
         let before = Treasury::line_balance(BudgetLine::OpsCoretime);
         assert_ok!(Treasury::execute_coretime_renewal(
             RuntimeOrigin::signed(acc(7)),
@@ -807,26 +839,20 @@ fn coretime_renewal_is_permissionless_quote_priced_and_idempotent() {
         ));
         assert_eq!(
             Treasury::line_balance(BudgetLine::OpsCoretime),
-            before - 100_000 * USDC
+            before - price - CoretimeFeeDot::get()
         );
         System::assert_last_event(RuntimeEvent::Treasury(Event::CoretimeRenewalCalled {
             line: BudgetLine::OpsCoretime,
-            amount: 100_000 * USDC,
+            amount: price + CoretimeFeeDot::get(),
         }));
         // Idempotent per period, even against a re-noted quote.
-        assert_noop!(
-            crate::Pallet::<Test>::note_coretime_renewal_quote(42, 1),
-            Error::<Test>::PeriodAlreadyFunded
-        );
+        assert_noop!(note_quote(42, 1), Error::<Test>::PeriodAlreadyFunded);
         assert_noop!(
             Treasury::execute_coretime_renewal(RuntimeOrigin::signed(acc(8)), 42),
             Error::<Test>::PeriodAlreadyFunded
         );
         // Bounded by the pre-authorized line balance.
-        assert_ok!(crate::Pallet::<Test>::note_coretime_renewal_quote(
-            43,
-            5_000_000 * USDC
-        ));
+        assert_ok!(note_quote(43, 5_000_000 * USDC));
         assert_noop!(
             Treasury::execute_coretime_renewal(RuntimeOrigin::signed(acc(8)), 43),
             Error::<Test>::InsufficientFunds
@@ -835,35 +861,207 @@ fn coretime_renewal_is_permissionless_quote_priced_and_idempotent() {
 }
 
 #[test]
-fn coretime_quote_rejects_zero_and_can_be_pruned() {
+fn coretime_quote_authority_can_note_supersede_and_rotate() {
     funded_ext().execute_with(|| {
-        // A zero quote is refused (a keeper must not "renew" for free and lock
-        // the period against a corrected retry).
         assert_noop!(
-            crate::Pallet::<Test>::note_coretime_renewal_quote(50, 0),
-            Error::<Test>::ZeroQuote
+            Treasury::note_coretime_quote(RuntimeOrigin::signed(acc(7)), 50, 10),
+            Error::<Test>::NotQuoteAuthority
         );
-        // A stale open quote can be pruned so it cannot be executed later.
-        assert_ok!(crate::Pallet::<Test>::note_coretime_renewal_quote(
-            50,
-            10_000 * USDC
+        assert_noop!(note_quote(50, 0), Error::<Test>::ZeroQuote);
+        assert_ok!(note_quote(50, 10));
+        System::set_block_number(9);
+        assert_ok!(note_quote(50, 20));
+        let quotes = Treasury::treasury().coretime_quotes;
+        assert_eq!(quotes.len(), 1);
+        assert_eq!(quotes[0].period_index, 50);
+        assert_eq!(quotes[0].price, 20);
+        assert_eq!(quotes[0].noted_at, 9);
+
+        assert_noop!(
+            Treasury::set_coretime_authority(RuntimeOrigin::root(), acc(8), [8; 32]),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_ok!(Treasury::set_coretime_authority(to(), acc(8), [8; 32]));
+        assert_eq!(crate::CoretimeQuoteAuthority::<Test>::get(), Some(acc(8)));
+        assert_eq!(crate::CoretimeRenewalAccount::<Test>::get(), Some([8; 32]));
+        assert_noop!(note_quote(51, 10), Error::<Test>::NotQuoteAuthority);
+        assert_ok!(Treasury::note_coretime_quote(
+            RuntimeOrigin::signed(acc(8)),
+            51,
+            10,
         ));
-        assert_ok!(crate::Pallet::<Test>::prune_coretime_quote(50));
+        crate::CoretimeQuoteAuthority::<Test>::kill();
+        let before = Treasury::treasury();
+        assert_noop!(
+            Treasury::note_coretime_quote(RuntimeOrigin::signed(acc(8)), 52, 10),
+            Error::<Test>::NotQuoteAuthority
+        );
+        assert_eq!(Treasury::treasury(), before);
+    });
+}
+
+#[test]
+fn coretime_prune_enforces_strict_ttl_but_authority_may_prune_early() {
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            100 * USDC
+        ));
+        KeeperBudgetEpoch::set(100 * USDC);
+        KeeperRebate::set(10 * USDC);
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::Keeper, 100 * USDC);
+
+        assert_ok!(note_quote(50, 10));
+        System::set_block_number(101); // age == ttl is still fresh.
+        assert_noop!(
+            Treasury::prune_coretime_quote(RuntimeOrigin::signed(acc(7)), 50),
+            Error::<Test>::QuoteNotExpired
+        );
+        System::set_block_number(102); // permissionless only when age > ttl.
+        assert_ok!(Treasury::prune_coretime_quote(
+            RuntimeOrigin::signed(acc(7)),
+            50
+        ));
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 10 * USDC, PayoutLine::Keeper)]
+        );
+        assert_eq!(Treasury::treasury().keeper_meter.general_spent, 10 * USDC);
         assert_noop!(
             Treasury::execute_coretime_renewal(RuntimeOrigin::signed(acc(7)), 50),
             Error::<Test>::RenewalWindowClosed
         );
+
+        System::set_block_number(103);
+        assert_ok!(note_quote(51, 10));
+        assert_ok!(Treasury::prune_coretime_quote(
+            RuntimeOrigin::signed(coretime_quote_authority()),
+            51,
+        ));
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 10 * USDC, PayoutLine::Keeper)],
+            "the quote authority's anytime prune is not keeper-cranked"
+        );
+        assert_eq!(Treasury::treasury().keeper_meter.general_spent, 10 * USDC);
+
+        assert_ok!(note_quote(52, 10));
+        CoretimeQuoteTtl::set(0);
+        assert_noop!(
+            Treasury::prune_coretime_quote(RuntimeOrigin::signed(acc(7)), 52),
+            Error::<Test>::QuoteTtlUnset
+        );
+        assert_ok!(Treasury::prune_coretime_quote(
+            RuntimeOrigin::signed(coretime_quote_authority()),
+            52,
+        ));
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 10 * USDC, PayoutLine::Keeper)]
+        );
+    });
+}
+
+#[test]
+fn coretime_execute_uses_live_params_ceil_and_freshness_without_migration() {
+    funded_ext().execute_with(|| {
+        let line_before = Treasury::line_balance(BudgetLine::OpsCoretime);
+        assert_ok!(note_quote(60, 1));
+        let quote_before = Treasury::treasury().coretime_quotes[0];
+
+        // Change both live Params after the quote was stored. No storage
+        // migration rewrites the quote; execution consumes the new values.
+        CoretimeDotRate::set(5_000_000);
+        CoretimeFeeDot::set(100);
+        assert_eq!(Treasury::treasury().coretime_quotes[0], quote_before);
+        System::set_block_number(101); // age == ttl remains executable.
+        assert_ok!(Treasury::execute_coretime_renewal(
+            RuntimeOrigin::signed(acc(7)),
+            60,
+        ));
+        // ceil(101 * 5_000_000 / 10_000_000_000) == 1 USDC planck.
+        assert_eq!(
+            Treasury::line_balance(BudgetLine::OpsCoretime),
+            line_before - 1
+        );
+
+        System::set_block_number(102);
+        assert_ok!(note_quote(61, 1));
+        // Move past the new quote's TTL and prove the rejection is fail-static.
+        System::set_block_number(203);
+        let before = Treasury::treasury();
+        assert_noop!(
+            Treasury::execute_coretime_renewal(RuntimeOrigin::signed(acc(7)), 61),
+            Error::<Test>::QuoteExpired
+        );
+        assert_eq!(Treasury::treasury(), before);
+    });
+}
+
+#[test]
+fn coretime_execute_without_destination_is_typed_and_fail_static() {
+    funded_ext().execute_with(|| {
+        assert_ok!(note_quote(61, 1_000));
+        let before = Treasury::treasury();
+        crate::CoretimeRenewalAccount::<Test>::kill();
+
+        assert_noop!(
+            Treasury::execute_coretime_renewal(RuntimeOrigin::signed(acc(7)), 61),
+            Error::<Test>::RenewalAccountUnset
+        );
+        assert_eq!(Treasury::treasury(), before);
+    });
+}
+
+#[test]
+fn coretime_execute_fails_static_on_unset_params_and_future_timestamp() {
+    funded_ext().execute_with(|| {
+        assert_ok!(note_quote(70, 10));
+        let before = Treasury::treasury();
+        CoretimeDotRate::set(0);
+        assert_noop!(
+            Treasury::execute_coretime_renewal(RuntimeOrigin::signed(acc(7)), 70),
+            Error::<Test>::RateUnset
+        );
+        assert_eq!(Treasury::treasury(), before);
+
+        CoretimeDotRate::set(10_000_000_000);
+        CoretimeFeeDot::set(0);
+        assert_noop!(
+            Treasury::execute_coretime_renewal(RuntimeOrigin::signed(acc(7)), 70),
+            Error::<Test>::FeeBudgetUnset
+        );
+        assert_eq!(Treasury::treasury(), before);
+
+        CoretimeFeeDot::set(100);
+        CoretimeQuoteTtl::set(0);
+        assert_noop!(
+            Treasury::execute_coretime_renewal(RuntimeOrigin::signed(acc(7)), 70),
+            Error::<Test>::QuoteTtlUnset
+        );
+        assert_eq!(Treasury::treasury(), before);
+
+        CoretimeQuoteTtl::set(100);
+        let mut future = before.clone();
+        future.coretime_quotes[0].noted_at = 2;
+        crate::Pallet::<Test>::seed(&future);
+        System::set_block_number(1);
+        assert_noop!(
+            Treasury::execute_coretime_renewal(RuntimeOrigin::signed(acc(7)), 70),
+            Error::<Test>::QuoteTimestampInFuture
+        );
+        assert_eq!(Treasury::treasury(), future);
     });
 }
 
 #[test]
 fn coretime_obligation_pair_enforces_open_quote_and_funded_history_bounds() {
     funded_ext().execute_with(|| {
-        // limit-coverage: Treasury coretime obligations
+        // First prove the funded-period history remains a rolling bound.
         for period in 0..=futarchy_treasury_core::MAX_FUNDED_CORETIME_PERIODS as u32 {
-            assert_ok!(crate::Pallet::<Test>::note_coretime_renewal_quote(
-                period, 1
-            ));
+            assert_ok!(note_quote(period, 1));
             assert_ok!(Treasury::execute_coretime_renewal(
                 RuntimeOrigin::signed(acc(7)),
                 period,
@@ -879,13 +1077,12 @@ fn coretime_obligation_pair_enforces_open_quote_and_funded_history_bounds() {
 
         let first_open = 100_u32;
         for offset in 0..futarchy_treasury_core::MAX_FUNDED_CORETIME_PERIODS as u32 {
-            assert_ok!(crate::Pallet::<Test>::note_coretime_renewal_quote(
-                first_open.saturating_add(offset),
-                1,
-            ));
+            assert_ok!(note_quote(first_open.saturating_add(offset), 1));
         }
+        // limit-coverage: Treasury coretime obligations
         assert_noop!(
-            crate::Pallet::<Test>::note_coretime_renewal_quote(
+            Treasury::note_coretime_quote(
+                RuntimeOrigin::signed(coretime_quote_authority()),
                 first_open
                     .saturating_add(futarchy_treasury_core::MAX_FUNDED_CORETIME_PERIODS as u32),
                 1,
@@ -1423,7 +1620,14 @@ fn shell_matches_core_over_a_randomized_op_stream() {
                     BudgetLine::Rewards,
                 ),
                 6 => core
-                    .execute_coretime_renewal(acc(6).into(), (r >> 3) % 4)
+                    .execute_coretime_renewal(
+                        acc(6).into(),
+                        (r >> 3) % 4,
+                        u64::from(now),
+                        u64::from(CoretimeQuoteTtl::get()),
+                        CoretimeDotRate::get(),
+                        CoretimeFeeDot::get(),
+                    )
                     .map(|_| ()),
                 _ => core.recover_foreign(
                     CoreOrigin::FutarchyTreasury,
@@ -1444,8 +1648,8 @@ fn shell_matches_core_over_a_randomized_op_stream() {
             // sometimes succeed rather than always closing the window.
             if r % 8 == 6 && core_res.is_err() {
                 let period = (r >> 3) % 4;
-                let _ = crate::Pallet::<Test>::note_coretime_renewal_quote(period, 50_000 * USDC);
-                let _ = core.note_coretime_renewal_quote(period, 50_000 * USDC);
+                let _ = note_quote(period, 50_000 * USDC);
+                let _ = core.note_coretime_renewal_quote(period, 50_000 * USDC, u64::from(now));
             }
 
             // Clear the core's transient event log (the shell never persists it)
