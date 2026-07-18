@@ -80,6 +80,8 @@ jobs:
         run: pip install pyyaml==6.0.2
       - name: Run reference model tests
         run: PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
+      - name: Run economic-simulation tests
+        run: PYTHONPATH=reference-model/src:simulation/src python3 -m unittest discover -s simulation/tests
       - name: Run tooling tests
         shell: bash
         run: |
