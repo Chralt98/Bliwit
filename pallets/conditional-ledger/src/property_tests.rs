@@ -2091,6 +2091,11 @@ fn operation_generator_is_complete_against_call_metadata() {
         LedgerCall::sweep_dust_baseline {
             epoch: BASELINE_EPOCH,
         },
+        LedgerCall::set_split_paused {
+            paused: false,
+            expiry: 0,
+        },
+        LedgerCall::set_frozen { frozen: false },
     ];
 
     let metadata = <LedgerCall as GetCallName>::get_call_names();
@@ -2106,7 +2111,12 @@ fn operation_generator_is_complete_against_call_metadata() {
         );
         seen.push(name);
 
-        let expected = call_tag(call);
+        let Some(expected) = call_tag(call) else {
+            // State-only EmergencyPlaybook controls have no monetary operation
+            // in the independent ledger oracle, but remain deliberately
+            // inventoried against metadata above.
+            continue;
+        };
         let generated = generator_arm(expected)
             .new_tree(&mut runner)
             .expect("generator arm constructs")
@@ -2119,8 +2129,8 @@ fn operation_generator_is_complete_against_call_metadata() {
     }
 }
 
-fn call_tag(call: &crate::pallet::Call<Test>) -> OpTag {
-    match call {
+fn call_tag(call: &crate::pallet::Call<Test>) -> Option<OpTag> {
+    let tag = match call {
         crate::pallet::Call::split { .. } => OpTag::Split,
         crate::pallet::Call::merge { .. } => OpTag::Merge,
         crate::pallet::Call::split_scalar { .. } => OpTag::SplitScalar,
@@ -2144,6 +2154,10 @@ fn call_tag(call: &crate::pallet::Call<Test>) -> OpTag {
         crate::pallet::Call::redeem_baseline_pair { .. } => OpTag::RedeemBaselinePair,
         crate::pallet::Call::sweep_dust { .. } => OpTag::SweepDust,
         crate::pallet::Call::sweep_dust_baseline { .. } => OpTag::SweepDustBaseline,
+        crate::pallet::Call::set_split_paused { .. } | crate::pallet::Call::set_frozen { .. } => {
+            return None
+        }
         crate::pallet::Call::__Ignore(_, _) => unreachable!("FRAME ignore variant is uninhabited"),
-    }
+    };
+    Some(tag)
 }

@@ -8,7 +8,7 @@ use frame_benchmarking::v2::*;
 use frame_support::{
     pallet_prelude::{Blake2_128Concat, OptionQuery, ValueQuery},
     storage::types::{StorageDoubleMap, StorageMap, StorageValue},
-    traits::StorageInstance,
+    traits::{EnsureOrigin, StorageInstance},
     Twox64Concat,
 };
 use frame_system::RawOrigin;
@@ -725,28 +725,6 @@ mod benches {
     }
 
     #[benchmark]
-    fn veto_upheld() -> Result<(), BenchmarkError> {
-        let mut state = callback_state::<T>(1, ProposalState::Suspended);
-        fill_epoch_state::<T>(
-            &mut state,
-            MAX_INTAKE_QUEUE,
-            MAX_LIVE_PROPOSALS,
-            MAX_NON_TERMINAL_COHORTS - 1,
-        );
-        Pallet::<T>::seed(state)?;
-        let origin = T::BenchmarkHelper::guardian_origin();
-
-        #[extrinsic_call]
-        _(origin as T::RuntimeOrigin, 1);
-
-        assert_eq!(
-            crate::Proposals::<T>::get(1).map(|p| p.state),
-            Some(ProposalState::Measuring)
-        );
-        Ok(())
-    }
-
-    #[benchmark]
     fn mark_executed() -> Result<(), BenchmarkError> {
         let mut state = callback_state::<T>(1, ProposalState::Queued);
         fill_epoch_state::<T>(
@@ -895,6 +873,20 @@ mod benches {
         assert!(crate::RecentCohortSummaries::<T>::get()
             .iter()
             .any(|summary| summary.epoch == 0 && summary.voided));
+        Ok(())
+    }
+
+    #[benchmark]
+    fn set_intake_paused() -> Result<(), BenchmarkError> {
+        let origin = T::EmergencyPlaybookOrigin::try_successful_origin()
+            .map_err(|_| BenchmarkError::Stop("EmergencyPlaybook origin unavailable"))?;
+        let now = frame_system::Pallet::<T>::block_number().saturated_into::<BlockNumber>();
+        let expiry = now.saturating_add(futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS);
+
+        #[extrinsic_call]
+        _(origin as T::RuntimeOrigin, true, expiry);
+
+        assert_eq!(crate::IntakePausedUntil::<T>::get(), Some(expiry));
         Ok(())
     }
 

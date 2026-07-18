@@ -610,4 +610,15 @@ impl<T: frame_system::Config> pallet_conditional_ledger::WeightInfo for WeightIn
 			.saturating_add(T::DbWeight::get().reads(274))
 			.saturating_add(T::DbWeight::get().writes(212))
 	}
+	/// B1b v2 benchmark stub: bounded split-pause write.
+	fn set_split_paused() -> Weight {
+		Weight::from_parts(12_000_000, 1_500)
+			.saturating_add(T::DbWeight::get().writes(1))
+	}
+	/// B1b v2 benchmark stub: bounded ledger-freeze/latch update.
+	fn set_frozen() -> Weight {
+		Weight::from_parts(15_000_000, 1_500)
+			.saturating_add(T::DbWeight::get().reads(1))
+			.saturating_add(T::DbWeight::get().writes(2))
+	}
 }

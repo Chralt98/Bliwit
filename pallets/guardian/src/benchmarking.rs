@@ -4,11 +4,15 @@
 
 use super::*;
 use crate::pallet::{
-    ActivePlaybooks, Approvals, Members, NextActionId, PendingActions, RerunUsed, ReviewDeadlines,
+    ActivePlaybooks, Approvals, FailedAction, FailedActions, Members, NextActionId, PendingActions,
+    RerunUsed, ReviewDeadlines, ReviewReferenda, VetoReviewReferenda,
 };
 
 use frame_benchmarking::v2::*;
-use frame_support::traits::OnInitialize;
+use frame_support::traits::{
+    fungible::{Mutate, MutateHold},
+    OnInitialize,
+};
 use futarchy_primitives::H256;
 
 /// A distinct member account by index (matches the genesis council).
@@ -20,16 +24,20 @@ fn member<T: Config>(i: u8) -> T::AccountId {
 fn seed_council<T: Config>() -> [T::AccountId; GUARDIAN_SEATS] {
     let members: [T::AccountId; GUARDIAN_SEATS] = core::array::from_fn(|i| member::<T>(i as u8));
     let raw = Pallet::<T>::members_to_core(&members);
-    Members::<T>::put(raw);
+    let reason: T::RuntimeHoldReason = HoldReason::SeatBond.into();
+    for who in &members {
+        T::Currency::mint_into(who, GUARDIAN_BOND.saturating_mul(2)).expect("benchmark mint");
+        T::Currency::hold(&reason, who, GUARDIAN_BOND).expect("benchmark seat hold");
+    }
+    Members::<T>::put(raw.map(Some));
     crate::pallet::MemberBonds::<T>::put([GUARDIAN_BOND; GUARDIAN_SEATS]);
     members
 }
 
 /// Drive a `ForceRerun` action to four approvals (proposer + three), leaving the
 /// fifth for the measured call.
-fn action_at_four<T: Config>() -> ActionId {
+fn action_at_four<T: Config>(power: GuardianPower) -> ActionId {
     T::BenchmarkHelper::prime_for_worst_case();
-    let power = GuardianPower::ForceRerun { pid: 1 };
     Pallet::<T>::propose_action(T::BenchmarkHelper::signed([1; 32]), power, H256::default())
         .expect("propose");
     let id = 0;
@@ -144,6 +152,9 @@ mod benches {
         fill_read_collections::<T>();
         let members: [T::AccountId; GUARDIAN_SEATS] =
             core::array::from_fn(|i| member::<T>((i as u8) + 10));
+        for who in &members {
+            T::Currency::mint_into(who, GUARDIAN_BOND.saturating_mul(2)).expect("benchmark mint");
+        }
 
         #[extrinsic_call]
         _(T::BenchmarkHelper::values() as T::RuntimeOrigin, members);
@@ -182,7 +193,7 @@ mod benches {
     #[benchmark]
     fn approve_action() {
         seed_council::<T>();
-        let id = action_at_four::<T>();
+        let id = action_at_four::<T>(GuardianPower::DelayOnce { pid: 1 });
         fill_pending_with_five::<T>(1);
         fill_reviews::<T>(MAX_REVIEWS - 1);
         fill_playbooks::<T>(ACTION_EXPIRY_BLOCKS);
@@ -198,9 +209,10 @@ mod benches {
     #[benchmark]
     fn ratify_action() {
         seed_council::<T>();
-        let id = action_at_four::<T>();
+        let id = action_at_four::<T>(GuardianPower::DelayOnce { pid: 1 });
         Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), id).expect("dispatch");
-        T::BenchmarkHelper::prime_review_approved(id);
+        let referendum = ReviewReferenda::<T>::get(id).expect("review referendum");
+        T::BenchmarkHelper::close_review(referendum).expect("close review");
         fill_pending_with_five::<T>(1);
         fill_reviews::<T>(MAX_REVIEWS);
         fill_playbooks::<T>(ACTION_EXPIRY_BLOCKS);
@@ -220,6 +232,7 @@ mod benches {
             id: PlaybookId::LedgerFreeze,
             trigger: PlaybookTrigger::LedgerDrift,
             expiry: 100,
+            target: None,
         };
         Pallet::<T>::propose_action(T::BenchmarkHelper::signed([1; 32]), power, H256::default())
             .expect("propose");
@@ -244,25 +257,101 @@ mod benches {
     }
 
     #[benchmark]
-    fn on_initialize() {
+    fn uphold_veto() -> Result<(), BenchmarkError> {
         seed_council::<T>();
-        T::BenchmarkHelper::prime_maintenance_epoch(1);
+        let id = action_at_four::<T>(GuardianPower::DelayOnce { pid: 1 });
+        Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), id)
+            .map_err(|_| BenchmarkError::Stop("dispatch"))?;
+        let referendum = VetoReviewReferenda::<T>::get(id)
+            .ok_or(BenchmarkError::Stop("veto review referendum"))?;
+        T::BenchmarkHelper::close_review(referendum)
+            .map_err(|_| BenchmarkError::Stop("close review"))?;
+
+        #[extrinsic_call]
+        _(T::BenchmarkHelper::values() as T::RuntimeOrigin, id);
+
+        assert!(ReviewDeadlines::<T>::get().iter().any(|r| r.ratified));
+        Ok(())
+    }
+
+    #[benchmark]
+    fn recall() {
+        seed_council::<T>();
+        let approvers = [
+            [1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [0; 32], [0; 32],
+        ];
+        FailedActions::<T>::insert(
+            0,
+            FailedAction {
+                approvers,
+                approver_count: GUARDIAN_THRESHOLD,
+                failed_epoch: 0,
+                recall_referendum: None,
+            },
+        );
+
+        #[extrinsic_call]
+        _(T::BenchmarkHelper::values() as T::RuntimeOrigin, 0);
+
+        assert_eq!(
+            Members::<T>::get()
+                .expect("seeded council")
+                .iter()
+                .filter(|member| member.is_some())
+                .count(),
+            GUARDIAN_SEATS - usize::from(GUARDIAN_THRESHOLD)
+        );
+    }
+
+    #[benchmark]
+    fn set_playbook_registered() {
+        #[extrinsic_call]
+        _(
+            T::BenchmarkHelper::admin() as T::RuntimeOrigin,
+            PlaybookId::Depeg,
+            false,
+        );
+
+        assert!(!crate::pallet::PlaybookRegistered::<T>::get(
+            PlaybookId::Depeg
+        ));
+    }
+
+    #[benchmark]
+    fn on_initialize() -> Result<(), BenchmarkError> {
+        seed_council::<T>();
+        let overdue = action_at_four::<T>(GuardianPower::DelayOnce { pid: 1 });
+        Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), overdue)
+            .map_err(|_| BenchmarkError::Stop("dispatch"))?;
+        let deadline = ReviewDeadlines::<T>::get()
+            .iter()
+            .find(|review| review.action_id == overdue)
+            .map(|review| review.deadline_epoch)
+            .ok_or(BenchmarkError::Stop("overdue review deadline"))?;
+        T::BenchmarkHelper::prime_maintenance_epoch(deadline);
         let approvers = [[1; 32], [2; 32], [3; 32], [4; 32], [5; 32]];
         PendingActions::<T>::mutate(|actions| {
-            for id in 0..MAX_PENDING_ACTIONS {
+            for id in 1..MAX_PENDING_ACTIONS {
                 actions.try_push(pending(id, true)).expect("pending bound");
             }
         });
         Approvals::<T>::mutate(|approvals| {
-            for id in 0..MAX_PENDING_ACTIONS {
+            for id in 1..MAX_PENDING_ACTIONS {
                 for who in approvers {
                     approvals.try_push((id, who)).expect("approval bound");
                 }
             }
         });
         ReviewDeadlines::<T>::mutate(|reviews| {
-            for id in 0..MAX_REVIEWS {
-                reviews.try_push(review(id, 0)).expect("review bound");
+            while reviews.len() < MAX_REVIEWS as usize {
+                let id = 1_000u32.saturating_add(reviews.len() as u32);
+                let mut terminal = review(id, 0);
+                // Terminal reviews exercise the full bounded reap without
+                // inventing unreachable fronting records for 128 simultaneous
+                // failures. The real `overdue` record exercises both verdict
+                // cancellations/refunds and the slash/recall path.
+                terminal.ratified = true;
+                reviews.try_push(terminal).expect("review bound");
             }
         });
         fill_playbooks::<T>(0);
@@ -277,6 +366,16 @@ mod benches {
         assert!(ActivePlaybooks::<T>::get().is_empty());
         assert!(PendingActions::<T>::get().is_empty());
         assert!(ReviewDeadlines::<T>::get().is_empty());
+        let failed = FailedActions::<T>::get(overdue).expect("overdue review settled");
+        assert!(failed.recall_referendum.is_some());
+        assert!(
+            crate::pallet::MemberBonds::<T>::get()[..usize::from(GUARDIAN_THRESHOLD)]
+                .iter()
+                .all(|bond| *bond == GUARDIAN_BOND / 2)
+        );
+        assert!(!ReviewReferenda::<T>::contains_key(overdue));
+        assert!(!VetoReviewReferenda::<T>::contains_key(overdue));
+        Ok(())
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext_empty(), crate::mock::Test);

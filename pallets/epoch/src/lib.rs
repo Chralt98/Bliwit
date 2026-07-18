@@ -280,6 +280,8 @@ pub mod pallet {
         type GuardianOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type ExecutionGuardOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type VoidAuthority: EnsureOrigin<Self::RuntimeOrigin>;
+        /// Kernel-enumerated playbook effect origin (06 §6.2).
+        type EmergencyPlaybookOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type ConstitutionalValuesOrigin: EnsureOrigin<Self::RuntimeOrigin>;
         type WeightInfo: WeightInfo;
         #[cfg(feature = "runtime-benchmarks")]
@@ -537,6 +539,17 @@ pub mod pallet {
     #[pallet::storage]
     pub type BaselineCarry<T: Config> = StorageValue<_, (EpochId, u8), OptionQuery>;
 
+    /// PB-HALT-INTAKE's source-scoped intake pause. The value is a hard
+    /// pallet-level backstop: a stale guardian maintenance crank cannot keep
+    /// intake paused once `now >= until` (06 §6.2).
+    #[pallet::storage]
+    pub type IntakePausedUntil<T: Config> = StorageValue<_, BlockNumber, OptionQuery>;
+
+    /// The direct guardian `pause_intake` contribution, kept separate so a
+    /// playbook expiry cannot clear a longer direct pause (06 §5.2/§6.2).
+    #[pallet::storage]
+    pub type GuardianIntakePausedUntil<T: Config> = StorageValue<_, BlockNumber, OptionQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -590,6 +603,12 @@ pub mod pallet {
             reason: RejectReason,
             amount: Balance,
         },
+        /// Operational event outside the frozen 02 ingest schema.
+        IntakePauseSet {
+            until: BlockNumber,
+        },
+        /// Operational event outside the frozen 02 ingest schema.
+        IntakePauseCleared,
     }
 
     #[pallet::error]
@@ -614,6 +633,10 @@ pub mod pallet {
         Welfare,
         TryStateViolation,
         BadProposalShape,
+        /// Intake is paused by a guardian action or PB-HALT-INTAKE.
+        IntakePaused,
+        /// The requested pause is in the past or exceeds the kernel window.
+        IntakePauseOutOfBounds,
     }
 
     #[pallet::hooks]
@@ -652,6 +675,7 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
             let now = Self::now();
+            ensure!(!Self::intake_paused(now), Error::<T>::IntakePaused);
             let epoch = EpochOf::<T>::get().index;
             proposal.id = NextProposalId::<T>::get();
             ensure!(
@@ -1048,24 +1072,6 @@ pub mod pallet {
             })
         }
 
-        #[pallet::call_index(7)]
-        #[pallet::weight(T::WeightInfo::veto_upheld())]
-        pub fn veto_upheld(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
-            T::GuardianOrigin::ensure_origin(origin)?;
-            let result = Self::mutate(|state, ledger| {
-                // T24: a `Suspended` proposal was `Queued` before `delay_once`, so A11
-                // still owns its queue entry, preimage pin and resource locks. Upholding
-                // the veto drives it to the terminal rejected/measuring outcome; release
-                // the guard state in lockstep (idempotent — a no-op if nothing is queued).
-                state.veto_upheld(CoreOrigin::GuardianHold, ledger, pid)?;
-                T::ExecutionGuard::dequeue_terminal(pid).map_err(|_| CoreError::ExecutionGuard)
-            });
-            if result.is_ok() {
-                GuardianReviewDeadlines::<T>::remove(pid);
-            }
-            result
-        }
-
         #[pallet::call_index(8)]
         #[pallet::weight(T::WeightInfo::mark_executed())]
         pub fn mark_executed(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
@@ -1163,6 +1169,25 @@ pub mod pallet {
                 }
                 Ok(())
             })
+        }
+
+        /// PB-HALT-INTAKE effect endpoint (06 §6.2). Clearing ignores the
+        /// supplied expiry; setting is bounded independently of guardian state.
+        #[pallet::call_index(14)]
+        #[pallet::weight(T::WeightInfo::set_intake_paused())]
+        pub fn set_intake_paused(
+            origin: OriginFor<T>,
+            paused: bool,
+            expiry: BlockNumber,
+        ) -> DispatchResult {
+            T::EmergencyPlaybookOrigin::ensure_origin(origin)?;
+            if paused {
+                Self::set_intake_pause_for_source::<IntakePausedUntil<T>>(expiry)
+            } else {
+                IntakePausedUntil::<T>::kill();
+                Self::deposit_event(Event::IntakePauseCleared);
+                Ok(())
+            }
         }
     }
 
@@ -1379,6 +1404,60 @@ pub mod pallet {
                 })?;
                 Self::persist(state)
             })
+        }
+
+        /// Runtime-internal producer for the guardian `pause_intake` power.
+        /// The bound is rechecked here so the downstream effect remains safe if
+        /// a caller bypasses the guardian core in a test/runtime adapter.
+        pub fn set_intake_paused_internal(until: BlockNumber) -> DispatchResult {
+            Self::set_intake_pause_for_source::<GuardianIntakePausedUntil<T>>(until)
+        }
+
+        fn set_intake_pause_for_source<S>(until: BlockNumber) -> DispatchResult
+        where
+            S: frame_support::storage::StorageValue<BlockNumber, Query = Option<BlockNumber>>,
+        {
+            let now = Self::now();
+            ensure!(
+                until >= now
+                    && until.saturating_sub(now)
+                        <= futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS,
+                Error::<T>::IntakePauseOutOfBounds
+            );
+            S::put(until);
+            Self::deposit_event(Event::IntakePauseSet { until });
+            Ok(())
+        }
+
+        /// Effective source-composed deadline. Storage may retain historical
+        /// timestamps, but neither source has effect at or after its boundary.
+        pub fn intake_paused_until() -> Option<BlockNumber> {
+            match (
+                IntakePausedUntil::<T>::get(),
+                GuardianIntakePausedUntil::<T>::get(),
+            ) {
+                (Some(playbook), Some(guardian)) => Some(playbook.max(guardian)),
+                (playbook, guardian) => playbook.or(guardian),
+            }
+        }
+
+        /// Lazy expiry predicate over the maximum source-scoped deadline.
+        pub fn intake_paused(now: BlockNumber) -> bool {
+            Self::intake_paused_until().is_some_and(|until| now < until)
+        }
+
+        /// Sole T24 producer, called by `guardian.uphold_veto` after its
+        /// ratify-track origin and live review have been validated. This is not
+        /// a dispatchable: GuardianHold alone cannot reject a proposal.
+        pub fn veto_upheld_from_review(pid: ProposalId) -> DispatchResult {
+            let result = Self::mutate(|state, ledger| {
+                state.veto_upheld(CoreOrigin::GuardianReview, ledger, pid)?;
+                T::ExecutionGuard::dequeue_terminal(pid).map_err(|_| CoreError::ExecutionGuard)
+            });
+            if result.is_ok() {
+                GuardianReviewDeadlines::<T>::remove(pid);
+            }
+            result
         }
 
         /// Bind the retrospective-review deadline to a delayed proposal. This

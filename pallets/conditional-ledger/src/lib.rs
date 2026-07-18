@@ -90,7 +90,10 @@ pub mod pallet {
         kernel, Balance, Branch, EpochId, FixedU64, GateType, MetricSpecVersion, PositionId,
         PositionKind, ProposalId, ScalarSide,
     };
-    use sp_runtime::{traits::AccountIdConversion, Saturating};
+    use sp_runtime::{
+        traits::{AccountIdConversion, CheckedAdd},
+        Saturating,
+    };
 
     /// The concrete asset identifier the configured collateral fungible uses. The
     /// ledger never names it (rule 7 — no XCM types here); the runtime pins it to
@@ -130,6 +133,9 @@ pub mod pallet {
         /// Internal — the single welfare→ledger settlement path:
         /// `settle_scalar`/`settle_gate`/`settle_baseline` (03 §5.2).
         type SettleAuthority: EnsureOrigin<Self::RuntimeOrigin>;
+
+        /// Kernel-enumerated playbook effect origin (06 §6.2/§6.3).
+        type EmergencyPlaybookOrigin: EnsureOrigin<Self::RuntimeOrigin>;
 
         /// `MinSplit = MinTransfer = ledger.min_split` (13 §1; K floor
         /// `kernel::MIN_SPLIT_USDC`). Wired to `pallet-constitution::Params` in the
@@ -240,6 +246,19 @@ pub mod pallet {
     pub type BaselineTerminalAt<T: Config> =
         StorageMap<_, Blake2_128Concat, EpochId, BlockNumberFor<T>, OptionQuery>;
 
+    /// PB-RESERVE backstop. Only public split inflows consult this timestamp;
+    /// merge/redeem/transfer and authority recovery paths remain live.
+    #[pallet::storage]
+    pub type SplitPausedUntil<T: Config> = StorageValue<_, BlockNumberFor<T>, OptionQuery>;
+
+    /// PB-LEDGER-FREEZE backstop for every public funds-moving ledger call.
+    #[pallet::storage]
+    pub type FrozenUntil<T: Config> = StorageValue<_, BlockNumberFor<T>, OptionQuery>;
+
+    /// Independent one-renewal latch (06 §6.3).
+    #[pallet::storage]
+    pub type FreezeRenewed<T: Config> = StorageValue<_, bool, ValueQuery>;
+
     // -------------------------------------------------------------------- events
 
     #[pallet::event]
@@ -336,6 +355,16 @@ pub mod pallet {
         VaultReaped { pid: ProposalId, residue: Balance },
         /// `sweep_dust_baseline(epoch)` completed.
         BaselineVaultReaped { epoch: EpochId, residue: Balance },
+        /// Operational event outside the frozen 02 ingest schema.
+        SplitPauseSet { until: BlockNumberFor<T> },
+        /// Operational event outside the frozen 02 ingest schema.
+        SplitPauseCleared,
+        /// Operational event outside the frozen 02 ingest schema.
+        FreezeSet { until: BlockNumberFor<T> },
+        /// Operational event outside the frozen 02 ingest schema.
+        FreezeCleared,
+        /// Operational event outside the frozen 02 ingest schema.
+        FreezeExtended { until: BlockNumberFor<T> },
     }
 
     // -------------------------------------------------------------------- errors
@@ -377,6 +406,14 @@ pub mod pallet {
         /// The position-storage deposit could not be taken from the entry owner
         /// (03 §4 / §8).
         DepositFailed,
+        /// PB-RESERVE currently blocks public split inflows.
+        SplitPaused,
+        /// PB-LEDGER-FREEZE currently blocks public ledger funds movement.
+        Frozen,
+        /// The requested expiry is in the past or beyond the kernel window.
+        FreezeOutOfBounds,
+        /// The one pallet-level LedgerFreeze renewal was already consumed.
+        FreezeRenewalExhausted,
     }
 
     impl<T: Config> From<conditional_ledger_core::Error> for Error<T> {
@@ -443,6 +480,8 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::split())]
         pub fn split(origin: OriginFor<T>, pid: ProposalId, amount: Balance) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
+            Self::ensure_splits_open()?;
             ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.split(LedgerOrigin::Signed, pid, &who, amount)
@@ -454,6 +493,7 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::merge())]
         pub fn merge(origin: OriginFor<T>, pid: ProposalId, amount: Balance) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.merge(LedgerOrigin::Signed, pid, &who, amount)
             })
@@ -469,6 +509,8 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
+            Self::ensure_splits_open()?;
             // 03 §7 R-2 creation floor at the LIVE `ledger.min_split`: the minted
             // LONG/SHORT legs are new non-protocol entries, which R-2 forbids below
             // the floor even though the §5.1 row omits it. The core guards only the
@@ -490,6 +532,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.merge_scalar(LedgerOrigin::Signed, pid, branch, &who, amount)
             })
@@ -506,6 +549,8 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
+            Self::ensure_splits_open()?;
             // 03 §7 R-2 creation floor at the LIVE `ledger.min_split` (as
             // `split_scalar`): the minted gate legs are new non-protocol entries.
             ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
@@ -525,6 +570,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.merge_gate(LedgerOrigin::Signed, pid, branch, gate, &who, amount)
             })
@@ -542,6 +588,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let from = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             let (pid, epoch, is_proposal) = Self::id_home(position);
             // 03 §7 R-2, both sub-rules enforced at the LIVE `ledger.min_split` (the
             // core only guards the compile-time K floor, which is stale once META
@@ -587,6 +634,8 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
+            Self::ensure_splits_open()?;
             ensure!(amount >= T::MinSplit::get(), Error::<T>::BelowMinimum);
             Self::run_baseline(epoch, core::slice::from_ref(&who), &who, |st| {
                 st.split_baseline(LedgerOrigin::Signed, epoch, &who, amount)
@@ -602,6 +651,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             Self::run_baseline(epoch, core::slice::from_ref(&who), &who, |st| {
                 st.merge_baseline(LedgerOrigin::Signed, epoch, &who, amount)
             })
@@ -680,6 +730,7 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::redeem())]
         pub fn redeem(origin: OriginFor<T>, pid: ProposalId, amount: Balance) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.redeem(pid, &who, amount)
             })
@@ -695,6 +746,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.redeem_scalar(pid, side, &who, amount)
             })
@@ -710,6 +762,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.redeem_scalar_pair(pid, &who, amount)
             })
@@ -725,6 +778,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.redeem_gate(pid, gate, &who, amount)
             })
@@ -741,6 +795,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.redeem_void(pid, branch, kind, &who, amount)
             })
@@ -756,6 +811,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             Self::run_baseline(epoch, core::slice::from_ref(&who), &who, |st| {
                 st.redeem_baseline(epoch, side, &who, amount)
             })
@@ -770,6 +826,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            Self::ensure_not_frozen()?;
             Self::run_baseline(epoch, core::slice::from_ref(&who), &who, |st| {
                 st.redeem_baseline_pair(epoch, &who, amount)
             })
@@ -804,11 +861,100 @@ pub mod pallet {
             }
             Ok(())
         }
+
+        /// PB-RESERVE effect endpoint (06 §6.2). Only public split inflows are
+        /// gated; every exit/recovery path remains live.
+        #[pallet::call_index(23)]
+        #[pallet::weight(T::WeightInfo::set_split_paused())]
+        pub fn set_split_paused(
+            origin: OriginFor<T>,
+            paused: bool,
+            expiry: BlockNumberFor<T>,
+        ) -> DispatchResult {
+            T::EmergencyPlaybookOrigin::ensure_origin(origin)?;
+            if paused {
+                let now = frame_system::Pallet::<T>::block_number();
+                let max: BlockNumberFor<T> = kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS.into();
+                ensure!(
+                    expiry >= now && expiry.saturating_sub(now) <= max,
+                    Error::<T>::FreezeOutOfBounds
+                );
+                SplitPausedUntil::<T>::put(expiry);
+                Self::deposit_event(Event::SplitPauseSet { until: expiry });
+            } else {
+                SplitPausedUntil::<T>::kill();
+                Self::deposit_event(Event::SplitPauseCleared);
+            }
+            Ok(())
+        }
+
+        /// PB-LEDGER-FREEZE effect endpoint (06 §6.3). No balances or
+        /// positions move in this call; it only installs/removes the gate.
+        #[pallet::call_index(24)]
+        #[pallet::weight(T::WeightInfo::set_frozen())]
+        pub fn set_frozen(origin: OriginFor<T>, frozen: bool) -> DispatchResult {
+            T::EmergencyPlaybookOrigin::ensure_origin(origin)?;
+            if frozen {
+                let now = frame_system::Pallet::<T>::block_number();
+                ensure!(
+                    FrozenUntil::<T>::get().is_none_or(|until| now >= until),
+                    Error::<T>::Frozen
+                );
+                let until = now
+                    .checked_add(&kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS.into())
+                    .ok_or(Error::<T>::ArithmeticOverflow)?;
+                FrozenUntil::<T>::put(until);
+                FreezeRenewed::<T>::put(false);
+                Self::deposit_event(Event::FreezeSet { until });
+            } else {
+                FrozenUntil::<T>::kill();
+                FreezeRenewed::<T>::put(false);
+                Self::deposit_event(Event::FreezeCleared);
+            }
+            Ok(())
+        }
     }
 
     // ------------------------------------------- internal MarketAuthority API (§5.5)
 
     impl<T: Config> Pallet<T> {
+        /// Runtime renewal hook for PB-LEDGER-FREEZE. Installs one fresh kernel
+        /// window from ratification time and fails before any write on misuse.
+        pub fn extend_freeze_once() -> DispatchResult {
+            let now = frame_system::Pallet::<T>::block_number();
+            let current = FrozenUntil::<T>::get().ok_or(Error::<T>::Frozen)?;
+            ensure!(now < current, Error::<T>::Frozen);
+            ensure!(
+                !FreezeRenewed::<T>::get(),
+                Error::<T>::FreezeRenewalExhausted
+            );
+            let until = now
+                .checked_add(&kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS.into())
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            FrozenUntil::<T>::put(until);
+            FreezeRenewed::<T>::put(true);
+            Self::deposit_event(Event::FreezeExtended { until });
+            Ok(())
+        }
+
+        fn ensure_splits_open() -> DispatchResult {
+            let now = frame_system::Pallet::<T>::block_number();
+            ensure!(
+                SplitPausedUntil::<T>::get().is_none_or(|until| now >= until),
+                Error::<T>::SplitPaused
+            );
+            Ok(())
+        }
+
+        fn ensure_not_frozen() -> DispatchResult {
+            let now = frame_system::Pallet::<T>::block_number();
+            ensure!(
+                FrozenUntil::<T>::get().is_none_or(|until| now >= until),
+                Error::<T>::Frozen
+            );
+            Ok(())
+        }
+
         /// Create an `Open` proposal vault at book-seed time. `MarketAuthority`
         /// only (03 §5.5; vault creation rides book deployment).
         pub fn create_vault(
@@ -841,6 +987,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_splits_open()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.do_split(pid, &who, amount)
             })
@@ -875,6 +1022,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_splits_open()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.do_split_scalar(pid, branch, &who, amount)
             })
@@ -890,6 +1038,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_splits_open()?;
             Self::run_proposal(pid, core::slice::from_ref(&who), &who, |st| {
                 st.split_gate(
                     LedgerOrigin::MarketAuthority,
@@ -910,6 +1059,7 @@ pub mod pallet {
             amount: Balance,
         ) -> DispatchResult {
             T::MarketAuthority::ensure_origin(origin)?;
+            Self::ensure_splits_open()?;
             Self::run_baseline(epoch, core::slice::from_ref(&who), &who, |st| {
                 st.do_split_baseline(epoch, &who, amount)
             })

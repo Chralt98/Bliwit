@@ -57,6 +57,7 @@ mod apis;
 mod classifier;
 mod configs;
 mod genesis;
+pub mod track_origins;
 pub mod views;
 pub mod weights;
 
@@ -227,6 +228,8 @@ construct_runtime!(
         Epoch: pallet_epoch = 61,
         ExecutionGuard: pallet_execution_guard = 62,
         InflowCaps: pallet_inflow_caps = 63,
+        // Runtime-internal origin-only shim for the five scoped values tracks.
+        TrackOrigins: track_origins = 64,
     }
 );
 

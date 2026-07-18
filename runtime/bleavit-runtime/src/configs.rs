@@ -1,8 +1,6 @@
 //! Runtime configuration and the B1a fail-closed cross-pallet adapters.
 
-#[cfg(feature = "runtime-benchmarks")]
-use alloc::vec;
-use alloc::{borrow::Cow, boxed::Box, vec::Vec};
+use alloc::{borrow::Cow, boxed::Box, vec, vec::Vec};
 
 use frame_support::{
     derive_impl,
@@ -13,7 +11,7 @@ use frame_support::{
         tokens::Preservation,
         ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly, Get,
         InstanceFilter, Nothing, OriginTrait, QueryPreimage, StorageInstance, StorePreimage,
-        TransformOrigin, VariantCountOf, WithdrawReasons,
+        TransformOrigin, UnfilteredDispatchable, VariantCountOf, WithdrawReasons,
     },
     weights::{
         constants::{
@@ -30,7 +28,7 @@ use frame_system::{
 #[cfg(feature = "runtime-benchmarks")]
 use futarchy_primitives::keeper::CrankClass;
 use futarchy_primitives::{bounds, chain_identity, currency, kernel, EpochId, FixedU64, ParamKey};
-use parity_scale_codec::{Decode, Encode};
+use parity_scale_codec::Encode;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 #[cfg(feature = "runtime-benchmarks")]
 use sp_runtime::AccountId32;
@@ -41,10 +39,11 @@ use sp_runtime::{
 
 use crate::{
     usdc_location, AccountId, AssetId, Aura, Balance, Balances, Block, BlockNumber,
-    CollatorSelection, ConditionalLedger, ConsensusHook, Epoch, ForeignAssets, FutarchyTreasury,
-    Hash, MessageQueue, Migrations, Nonce, PalletInfo, ParachainSystem, PolkadotXcm, Preimage,
-    Referenda, Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason, RuntimeHoldReason,
-    RuntimeOrigin, RuntimeTask, Scheduler, Session, SessionKeys, System, XcmpQueue, VERSION,
+    CollatorSelection, ConditionalLedger, ConsensusHook, Epoch, ExecutionGuard, ForeignAssets,
+    FutarchyTreasury, Hash, Market, MessageQueue, Migrations, Nonce, PalletInfo, ParachainSystem,
+    PolkadotXcm, Preimage, Referenda, Runtime, RuntimeCall, RuntimeEvent, RuntimeFreezeReason,
+    RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler, Session, SessionKeys, System,
+    XcmpQueue, VERSION,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -851,43 +850,103 @@ const fn percent(x: i32) -> sp_runtime::FixedI64 {
 // every track (support requirement wraps; the values layer cannot confirm).
 // Approval is flat (floor == ceil), so its order is immaterial.
 //
-// **Values-track collapse (PR #57 Codex-bot P1).** Stock `pallet-referenda`
-// selects the track from the proposal origin (`track_for`), so the five 06 §2.1
-// tracks that all produce `ConstitutionalValues` (metric/constitution/
-// entrenched/guardian/ratify) collapse onto ONE track. To ensure no values
-// action enacts below its required bar, the shared track uses the **strongest
-// (entrenched) thresholds** — 80% approval, 20%→10% support (06 §2.1 entrenched
-// row). Over-strict but G-1-safe; `OracleResolution` keeps its own track. True
-// per-track discrimination (distinct enactment origins + per-call track scope)
-// is the values-layer milestone (SQ-103). `CV_*` therefore = entrenched values.
-pub(crate) const CV_APPROVAL: pallet_referenda::Curve =
+pub(crate) const METRIC_APPROVAL: pallet_referenda::Curve =
+    pallet_referenda::Curve::make_linear(1, 1, percent(50), percent(60));
+pub(crate) const METRIC_SUPPORT: pallet_referenda::Curve =
+    pallet_referenda::Curve::make_reciprocal(1, 14, percent(10), percent(2), percent(10));
+pub(crate) const CONSTITUTION_APPROVAL: pallet_referenda::Curve =
+    pallet_referenda::Curve::make_linear(1, 1, percent(67), percent(67));
+pub(crate) const CONSTITUTION_SUPPORT: pallet_referenda::Curve =
+    pallet_referenda::Curve::make_linear(1, 1, percent(5), percent(15));
+pub(crate) const ENTRENCHED_APPROVAL: pallet_referenda::Curve =
     pallet_referenda::Curve::make_linear(1, 1, percent(80), percent(80));
-pub(crate) const CV_SUPPORT: pallet_referenda::Curve =
+pub(crate) const ENTRENCHED_SUPPORT: pallet_referenda::Curve =
     pallet_referenda::Curve::make_linear(1, 1, percent(10), percent(20));
+pub(crate) const GUARDIAN_APPROVAL: pallet_referenda::Curve =
+    pallet_referenda::Curve::make_linear(1, 1, percent(55), percent(55));
+pub(crate) const GUARDIAN_SUPPORT: pallet_referenda::Curve =
+    pallet_referenda::Curve::make_linear(1, 1, percent(5), percent(5));
+pub(crate) const RATIFY_APPROVAL: pallet_referenda::Curve =
+    pallet_referenda::Curve::make_linear(1, 1, percent(50), percent(50));
+pub(crate) const RATIFY_SUPPORT: pallet_referenda::Curve =
+    pallet_referenda::Curve::make_linear(1, 1, percent(5), percent(5));
 pub(crate) const ORACLE_APPROVAL: pallet_referenda::Curve =
     pallet_referenda::Curve::make_linear(1, 1, percent(60), percent(60));
 pub(crate) const ORACLE_SUPPORT: pallet_referenda::Curve =
     pallet_referenda::Curve::make_linear(1, 1, percent(3), percent(10));
-const TRACKS: [pallet_referenda::Track<u16, Balance, u32>; 2] = [
+pub(crate) const TRACKS: [pallet_referenda::Track<u16, Balance, u32>; 6] = [
     pallet_referenda::Track {
         id: 0,
         info: pallet_referenda::TrackInfo {
-            // The shared ConstitutionalValues track at entrenched strength (the
-            // strongest 06 §2.1 values track): 50,000-VIT deposit, 7 d/28 d/7 d,
-            // 4-epoch enactment (approximated at the 21-day default epoch).
-            name: sp_runtime::str_array("constitutional_values"),
+            name: sp_runtime::str_array("metric"),
+            max_deciding: 10,
+            decision_deposit: 10_000 * currency::VIT,
+            prepare_period: 2 * BLOCKS_PER_DAY,
+            decision_period: 14 * BLOCKS_PER_DAY,
+            confirm_period: 2 * BLOCKS_PER_DAY,
+            min_enactment_period: 14 * BLOCKS_PER_DAY,
+            min_approval: METRIC_APPROVAL,
+            min_support: METRIC_SUPPORT,
+        },
+    },
+    pallet_referenda::Track {
+        id: 1,
+        info: pallet_referenda::TrackInfo {
+            name: sp_runtime::str_array("constitution"),
+            max_deciding: 10,
+            decision_deposit: 25_000 * currency::VIT,
+            prepare_period: 2 * BLOCKS_PER_DAY,
+            decision_period: 21 * BLOCKS_PER_DAY,
+            confirm_period: 3 * BLOCKS_PER_DAY,
+            min_enactment_period: 28 * BLOCKS_PER_DAY,
+            min_approval: CONSTITUTION_APPROVAL,
+            min_support: CONSTITUTION_SUPPORT,
+        },
+    },
+    pallet_referenda::Track {
+        id: 2,
+        info: pallet_referenda::TrackInfo {
+            name: sp_runtime::str_array("entrenched"),
             max_deciding: 10,
             decision_deposit: 50_000 * currency::VIT,
             prepare_period: 7 * BLOCKS_PER_DAY,
             decision_period: 28 * BLOCKS_PER_DAY,
             confirm_period: 7 * BLOCKS_PER_DAY,
             min_enactment_period: 4 * 21 * BLOCKS_PER_DAY,
-            min_approval: CV_APPROVAL,
-            min_support: CV_SUPPORT,
+            min_approval: ENTRENCHED_APPROVAL,
+            min_support: ENTRENCHED_SUPPORT,
         },
     },
     pallet_referenda::Track {
-        id: 1,
+        id: 3,
+        info: pallet_referenda::TrackInfo {
+            name: sp_runtime::str_array("guardian"),
+            max_deciding: 10,
+            decision_deposit: 5_000 * currency::VIT,
+            prepare_period: BLOCKS_PER_DAY,
+            decision_period: 7 * BLOCKS_PER_DAY,
+            confirm_period: BLOCKS_PER_DAY,
+            min_enactment_period: 2 * BLOCKS_PER_DAY,
+            min_approval: GUARDIAN_APPROVAL,
+            min_support: GUARDIAN_SUPPORT,
+        },
+    },
+    pallet_referenda::Track {
+        id: 4,
+        info: pallet_referenda::TrackInfo {
+            name: sp_runtime::str_array("ratify"),
+            max_deciding: 10,
+            decision_deposit: 1_000 * currency::VIT,
+            prepare_period: BLOCKS_PER_DAY,
+            decision_period: 7 * BLOCKS_PER_DAY,
+            confirm_period: BLOCKS_PER_DAY,
+            min_enactment_period: 0,
+            min_approval: RATIFY_APPROVAL,
+            min_support: RATIFY_SUPPORT,
+        },
+    },
+    pallet_referenda::Track {
+        id: 5,
         info: pallet_referenda::TrackInfo {
             name: sp_runtime::str_array("oracle"),
             max_deciding: 10,
@@ -910,23 +969,84 @@ impl pallet_referenda::TracksInfo<Balance, u32> for BleavitTracks {
         TRACKS.iter().map(Cow::Borrowed)
     }
     fn track_for(origin: &Self::RuntimeOrigin) -> Result<Self::Id, ()> {
+        let scoped: Result<crate::track_origins::Origin, _> = origin.clone().try_into();
+        if let Ok(scoped) = scoped {
+            return Ok(match scoped {
+                crate::track_origins::Origin::Metric => 0,
+                crate::track_origins::Origin::Constitution => 1,
+                crate::track_origins::Origin::Entrenched => 2,
+                crate::track_origins::Origin::GuardianTrack => 3,
+                crate::track_origins::Origin::Ratify => 4,
+            });
+        }
         #[cfg(feature = "runtime-benchmarks")]
         {
             // Upstream `pallet-referenda` benchmarks submit a proposal whose
             // enactment origin is Root. Map that fixture origin onto the
-            // existing strongest values track in benchmark Wasm only; no
-            // production track or origin mapping is added.
+            // strongest values track (entrenched, id 2) in benchmark Wasm only;
+            // no production track or origin mapping is added.
             let system: Result<frame_system::RawOrigin<AccountId>, _> = origin.clone().try_into();
             if matches!(system, Ok(frame_system::RawOrigin::Root)) {
-                return Ok(0);
+                return Ok(2);
             }
         }
         let candidate: Result<pallet_origins::Origin, _> = origin.clone().try_into();
         match candidate {
-            Ok(pallet_origins::Origin::ConstitutionalValues) => Ok(0),
-            Ok(pallet_origins::Origin::OracleResolution) => Ok(1),
+            // Conservative backwards-compatible mapping for callers which have
+            // not selected a scoped origin explicitly.
+            Ok(pallet_origins::Origin::ConstitutionalValues) => Ok(2),
+            Ok(pallet_origins::Origin::OracleResolution) => Ok(5),
             _ => Err(()),
         }
+    }
+}
+
+pub trait AllowedValuesTracks {
+    fn allows(origin: crate::track_origins::Origin) -> bool;
+}
+
+pub struct MetricTrack;
+impl AllowedValuesTracks for MetricTrack {
+    fn allows(origin: crate::track_origins::Origin) -> bool {
+        matches!(origin, crate::track_origins::Origin::Metric)
+    }
+}
+
+pub struct GuardianTrack;
+impl AllowedValuesTracks for GuardianTrack {
+    fn allows(origin: crate::track_origins::Origin) -> bool {
+        matches!(origin, crate::track_origins::Origin::GuardianTrack)
+    }
+}
+
+pub struct RatifyTrack;
+impl AllowedValuesTracks for RatifyTrack {
+    fn allows(origin: crate::track_origins::Origin) -> bool {
+        matches!(origin, crate::track_origins::Origin::Ratify)
+    }
+}
+
+pub struct EnsureValuesScoped<Allowed>(core::marker::PhantomData<Allowed>);
+impl<Allowed: AllowedValuesTracks> frame_support::traits::EnsureOrigin<RuntimeOrigin>
+    for EnsureValuesScoped<Allowed>
+{
+    type Success = ();
+
+    fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
+        let legacy: Result<pallet_origins::Origin, RuntimeOrigin> = origin.clone().into();
+        if matches!(legacy, Ok(pallet_origins::Origin::ConstitutionalValues)) {
+            return Ok(());
+        }
+        let scoped: Result<crate::track_origins::Origin, RuntimeOrigin> = origin.clone().into();
+        match scoped {
+            Ok(track) if Allowed::allows(track) => Ok(()),
+            _ => Err(origin),
+        }
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
+        Ok(pallet_origins::Origin::ConstitutionalValues.into())
     }
 }
 
@@ -985,10 +1105,20 @@ impl pallet_origins::Config for Runtime {
     type WeightInfo = crate::weights::pallet_origins::WeightInfo<Runtime>;
 }
 
+impl crate::track_origins::Config for Runtime {}
+
 pub struct ConstitutionGovernanceOrigin;
 impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for ConstitutionGovernanceOrigin {
     type Success = pallet_constitution::ConstitutionOrigin;
     fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
+        let scoped: Result<crate::track_origins::Origin, RuntimeOrigin> = origin.clone().into();
+        if let Ok(track) = scoped {
+            return match track {
+                crate::track_origins::Origin::Constitution => Ok(Self::Success::ConstitutionTrack),
+                crate::track_origins::Origin::Entrenched => Ok(Self::Success::EntrenchedTrack),
+                _ => Err(origin),
+            };
+        }
         let custom: Result<pallet_origins::Origin, RuntimeOrigin> = origin.clone().into();
         if let Ok(custom) = custom {
             return match custom {
@@ -1287,6 +1417,7 @@ parameter_types! {
     pub const MarketPalletId: PalletId = PalletId(*b"bl/mrket");
     pub const EpochPalletId: PalletId = PalletId(*b"bl/epoch");
     pub const ExecutionGuardPalletId: PalletId = PalletId(*b"bl/exgrd");
+    pub const GuardianPalletId: PalletId = PalletId(*b"bl/guard");
     pub const TreasuryPalletId: PalletId = PalletId(*b"bl/trsry");
     pub const IncidentPalletId: PalletId = PalletId(*b"bl/reg/i");
     pub const MilestonePalletId: PalletId = PalletId(*b"bl/reg/m");
@@ -1299,6 +1430,12 @@ pub(crate) fn epoch_account() -> AccountId {
 }
 pub(crate) fn execution_guard_account() -> AccountId {
     ExecutionGuardPalletId::get().into_account_truncating()
+}
+pub(crate) fn guardian_account() -> AccountId {
+    GuardianPalletId::get().into_account_truncating()
+}
+parameter_types! {
+    pub GuardianAccount: AccountId = guardian_account();
 }
 pub fn welfare_settlement_account() -> AccountId {
     PalletId(*b"bl/welfr").into_account_truncating()
@@ -1415,6 +1552,7 @@ impl pallet_conditional_ledger::Config for Runtime {
     type MarketAuthority = EnsureMarketAccount;
     type ResolveAuthority = EnsureEpochAccount;
     type SettleAuthority = EnsureWelfareAccount;
+    type EmergencyPlaybookOrigin = pallet_origins::EnsureEmergencyPlaybook;
     type MinSplit = LedgerMinSplit;
     type PositionDeposit = LedgerPositionDeposit;
     type MaxPositionsPerAccount = ConstU32<{ bounds::MAX_ACCOUNT_POSITIONS }>;
@@ -2251,6 +2389,7 @@ impl pallet_market::Config for Runtime {
     type ObsInterval = MarketObsInterval;
     type Kappa1e9 = MarketKappa;
     type MarketAdmin = EnsureEpochAccount;
+    type EmergencyPlaybookOrigin = pallet_origins::EnsureEmergencyPlaybook;
     type ArchiveDelay = LedgerArchiveDelay;
     type PalletId = MarketPalletId;
     type KeeperRebate = FutarchyTreasury;
@@ -2328,9 +2467,7 @@ fn proposal_calls(
     if u32::try_from(bytes.len()).ok()? != proposal.payload_len {
         return None;
     }
-    let mut input = &bytes[..];
-    let calls = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::decode(&mut input).ok()?;
-    input.is_empty().then_some(calls)
+    pallet_execution_guard::Pallet::<Runtime>::decode_batch(&bytes).ok()
 }
 
 /// Re-derive the committed USDC outflow (`Ask`) from the only Treasury leaves
@@ -2572,6 +2709,18 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         let Some(calls) = proposal_calls(proposal) else {
             return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
         };
+        let footprint = crate::classifier::derive_resource_footprint(&calls);
+        let footprint_failure = |error: crate::classifier::FootprintError| {
+            if error == crate::classifier::FootprintError::Unclassifiable
+                && proposal.resources.is_empty()
+            {
+                StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold)
+            } else {
+                StaticCheckDisposition::SlashAll(
+                    futarchy_primitives::RejectReason::ConstitutionViolation,
+                )
+            }
+        };
         // 05 §1/T4 requires every proposal payload to derive at least one
         // class domain. Empty batches and call carriers with no classifiable
         // leaf (for example an empty utility batch) are verifiable no-ops,
@@ -2582,20 +2731,17 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         let mut has_classifiable_domain = false;
         for call in &calls {
             let Ok(analysis) = crate::classifier::RuntimeDispatcher::rederive_call(call) else {
-                return StaticCheckDisposition::Refund(
-                    futarchy_primitives::RejectReason::ProcessHold,
-                );
+                return match footprint.as_ref() {
+                    Err(error) => footprint_failure(*error),
+                    Ok(_) => StaticCheckDisposition::Refund(
+                        futarchy_primitives::RejectReason::ProcessHold,
+                    ),
+                };
             };
             has_classifiable_domain |= !analysis.domains.is_empty();
         }
         if !has_classifiable_domain {
-            return if proposal.resources.is_empty() {
-                StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold)
-            } else {
-                StaticCheckDisposition::SlashAll(
-                    futarchy_primitives::RejectReason::ConstitutionViolation,
-                )
-            };
+            return footprint_failure(crate::classifier::FootprintError::Unclassifiable);
         }
         if !calls
             .iter()
@@ -2611,10 +2757,26 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         {
             return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
         }
-        // SQ-172: no canonical RuntimeCall→8-byte resource-key mapping exists.
-        // A non-empty payload is therefore implementation-unverifiable, never
-        // evidence of a false declaration. Cancel status quo and refund.
-        StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold)
+        let footprint = match footprint {
+            Ok(footprint) => footprint,
+            Err(error) => return footprint_failure(error),
+        };
+        let declared_matches_footprint = proposal
+            .resources
+            .iter()
+            .all(|resource| footprint.iter().any(|derived| derived == resource))
+            && footprint.iter().all(|resource| {
+                proposal
+                    .resources
+                    .iter()
+                    .any(|declared| declared == resource)
+            });
+        if !declared_matches_footprint {
+            return StaticCheckDisposition::SlashAll(
+                futarchy_primitives::RejectReason::ConstitutionViolation,
+            );
+        }
+        StaticCheckDisposition::Eligible
     }
 
     fn queue_time_check(proposal: &futarchy_primitives::Proposal<AccountId>) -> bool {
@@ -2848,6 +3010,7 @@ impl pallet_epoch::Config for Runtime {
     type GuardianOrigin = pallet_origins::EnsureGuardianHold;
     type ExecutionGuardOrigin = EnsureExecutionGuardAccount;
     type VoidAuthority = pallet_origins::EnsureEmergencyPlaybook;
+    type EmergencyPlaybookOrigin = pallet_origins::EnsureEmergencyPlaybook;
     type ConstitutionalValuesOrigin = pallet_origins::EnsureConstitutionalValues;
     type WeightInfo = crate::weights::pallet_epoch::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
@@ -3057,7 +3220,7 @@ impl pallet_welfare::LedgerSettlement for WelfareLedger {
     }
 }
 impl pallet_welfare::Config for Runtime {
-    type MetricGovernanceOrigin = pallet_origins::EnsureConstitutionalValues;
+    type MetricGovernanceOrigin = EnsureValuesScoped<MetricTrack>;
     type Params = WelfareParams;
     type MetricInputs = RuntimeMetricInputs;
     type Ledger = WelfareLedger;
@@ -3452,10 +3615,13 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
             dead_man: phase_flags & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED != 0,
             reserve_health: phase_flags & pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG
                 != 0,
-            // The relay-abort bit is guardian-visible but deliberately does
-            // not freeze the normal re-proposal lane: Abort preserves the old
-            // code and must not replace one wedge with another.
-            migration_halt: MigrationHaltSources::get() != 0,
+            // A relay abort preserves the old code and is not the 09 §3.2
+            // halt-at-fault trigger. Only the execution-halt projection of a
+            // failed/stalled/applied-invalid migration admits PB-MIGRATION.
+            migration_halt: pallet_execution_guard::MigrationHalt::<Runtime>::get(),
+            void_in_flight: crate::Guardian::playbook_active(
+                pallet_guardian::PlaybookId::OracleVoid,
+            ),
             ..pallet_guardian::TriggerState::none()
         };
         // Benchmark Wasm must exercise every verified-trigger branch, but the
@@ -3480,6 +3646,125 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
     }
 }
 pub struct RuntimeGuardianEffects;
+
+impl RuntimeGuardianEffects {
+    fn dispatch_emergency(call: RuntimeCall) -> Result<(), DispatchError> {
+        frame_support::ensure!(
+            crate::classifier::RuntimeBaseCallFilter::contains_for(
+                origins_core::Origin::EmergencyPlaybook,
+                &call,
+            ),
+            DispatchError::Other("emergency playbook call is not admissible")
+        );
+        call.dispatch_bypass_filter(pallet_origins::Origin::EmergencyPlaybook.into())
+            .map(|_| ())
+            .map_err(|error| error.error)
+    }
+
+    fn dispatch_emergency_all(calls: Vec<RuntimeCall>) -> Result<(), DispatchError> {
+        for call in calls {
+            Self::dispatch_emergency(call)?;
+        }
+        Ok(())
+    }
+
+    /// Kernel-enumerated 06 §6.2 activation routine. Keeping construction
+    /// separate from dispatch gives the conformance suite one exact surface
+    /// to compare with the playbook table.
+    pub(crate) fn playbook_calls(
+        id: pallet_guardian::PlaybookId,
+        expiry: BlockNumber,
+        target: Option<EpochId>,
+    ) -> Result<Vec<RuntimeCall>, DispatchError> {
+        let now = System::block_number();
+        let bounded_expiry = now
+            .checked_add(kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS)
+            .ok_or(DispatchError::Arithmetic(
+                sp_runtime::ArithmeticError::Overflow,
+            ))?;
+        frame_support::ensure!(
+            expiry >= now && expiry <= bounded_expiry,
+            DispatchError::Other("playbook expiry exceeds kernel window")
+        );
+
+        let calls = match id {
+            pallet_guardian::PlaybookId::Depeg => {
+                frame_support::ensure!(
+                    target.is_none(),
+                    DispatchError::Other("unexpected playbook target")
+                );
+                let epoch_bound = now.checked_add(kernel::MIN_EPOCH_LENGTH_BLOCKS).ok_or(
+                    DispatchError::Arithmetic(sp_runtime::ArithmeticError::Overflow),
+                )?;
+                frame_support::ensure!(
+                    expiry <= epoch_bound,
+                    DispatchError::Other("depeg expiry exceeds one epoch")
+                );
+                vec![RuntimeCall::Market(pallet_market::Call::freeze_creation {
+                    expiry,
+                })]
+            }
+            pallet_guardian::PlaybookId::Migration => {
+                frame_support::ensure!(
+                    target.is_none(),
+                    DispatchError::Other("unexpected playbook target")
+                );
+                // stable2603 exposes only Root-only destructive cursor controls.
+                // The safe recovery substrate is the automatic active-cursor
+                // continuation plus source-scoped execution halt and ratified
+                // remediation path above; fabricating Root here would widen
+                // EmergencyPlaybook beyond the pre-ratified 06 §6.2 surface.
+                return Err(DispatchError::Other(
+                    "PB-MIGRATION cursor retry has no EmergencyPlaybook-safe runtime call",
+                ));
+            }
+            pallet_guardian::PlaybookId::OracleVoid => {
+                let epoch = target.ok_or(DispatchError::Other(
+                    "oracle-void playbook requires target epoch",
+                ))?;
+                vec![RuntimeCall::Epoch(pallet_epoch::Call::void_cohort {
+                    epoch,
+                })]
+            }
+            pallet_guardian::PlaybookId::HaltIntake => {
+                frame_support::ensure!(
+                    target.is_none(),
+                    DispatchError::Other("unexpected playbook target")
+                );
+                vec![RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused {
+                    paused: true,
+                    expiry: expiry.min(bounded_expiry),
+                })]
+            }
+            pallet_guardian::PlaybookId::Reserve => {
+                frame_support::ensure!(
+                    target.is_none(),
+                    DispatchError::Other("unexpected playbook target")
+                );
+                vec![RuntimeCall::ConditionalLedger(
+                    pallet_conditional_ledger::Call::set_split_paused {
+                        paused: true,
+                        expiry,
+                    },
+                )]
+            }
+            pallet_guardian::PlaybookId::LedgerFreeze => {
+                frame_support::ensure!(
+                    target.is_none(),
+                    DispatchError::Other("unexpected playbook target")
+                );
+                vec![
+                    RuntimeCall::ConditionalLedger(pallet_conditional_ledger::Call::set_frozen {
+                        frozen: true,
+                    }),
+                    RuntimeCall::Market(pallet_market::Call::set_frozen { frozen: true }),
+                ]
+            }
+        };
+        Ok(calls)
+    }
+}
+
 impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
     fn dispatch(
         power: pallet_guardian::GuardianPower,
@@ -3502,136 +3787,196 @@ impl pallet_guardian::GuardianEffectDispatcher for RuntimeGuardianEffects {
             pallet_guardian::GuardianPower::ForceRerun { pid } => {
                 Epoch::force_rerun_from_guardian(pid)
             }
-            // The Track-A pallets do not expose the preimage-committed
-            // pause/playbook effect calls required by 06 §5.2/§6.2. Treat
-            // those powers as unavailable instead of emitting an event-only
-            // success (SQ-144).
-            pallet_guardian::GuardianPower::PauseIntake { .. }
-            | pallet_guardian::GuardianPower::ActivatePlaybook { .. }
-            | pallet_guardian::GuardianPower::SuspendOnGate => {
-                // FIXME(SQ-144-effects closure): drop this bench success when
-                // the downstream effect calls land on chain, so the wired
-                // heavy paths enter the measured weights.
-                #[cfg(feature = "runtime-benchmarks")]
-                {
-                    Ok(())
-                }
-                #[cfg(not(feature = "runtime-benchmarks"))]
-                {
-                    Err(DispatchError::Other(
-                        "guardian downstream effect is not represented on chain",
-                    ))
-                }
+            pallet_guardian::GuardianPower::PauseIntake { until } => {
+                Epoch::set_intake_paused_internal(until)
             }
+            pallet_guardian::GuardianPower::SuspendOnGate => {
+                let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+                let breached = pallet_welfare::GateBreachFlags::<Runtime>::get(epoch)
+                    .is_some_and(|flags| flags.s_breached || flags.c_breached);
+                frame_support::ensure!(
+                    breached,
+                    DispatchError::Other("hard gate breach is not active")
+                );
+                ExecutionGuard::set_gate_suspension(epoch);
+                Ok(())
+            }
+            pallet_guardian::GuardianPower::ActivatePlaybook {
+                id, expiry, target, ..
+            } => Self::dispatch_emergency_all(Self::playbook_calls(id, expiry, target)?),
         }
     }
-}
 
-fn guardian_review_shares(
-    action: pallet_guardian::ActionId,
-) -> Result<
-    (
-        [futarchy_primitives::AccountId; pallet_guardian::GUARDIAN_SEATS],
-        u8,
-    ),
-    DispatchError,
-> {
-    let review = pallet_guardian::ReviewDeadlines::<Runtime>::get()
-        .iter()
-        .find(|review| review.action_id == action)
-        .copied()
-        .ok_or(DispatchError::Other("guardian review record missing"))?;
-    if review.approver_count == 0
-        || usize::from(review.approver_count) > pallet_guardian::GUARDIAN_SEATS
-    {
-        return Err(DispatchError::Other("guardian review approver count"));
+    fn revert_playbook(id: pallet_guardian::PlaybookId) -> Result<(), DispatchError> {
+        let calls = match id {
+            pallet_guardian::PlaybookId::Depeg => {
+                Market::clear_creation_freeze();
+                Vec::new()
+            }
+            pallet_guardian::PlaybookId::Migration | pallet_guardian::PlaybookId::OracleVoid => {
+                Vec::new()
+            }
+            pallet_guardian::PlaybookId::HaltIntake => {
+                vec![RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused {
+                    paused: false,
+                    expiry: 0,
+                })]
+            }
+            pallet_guardian::PlaybookId::Reserve => vec![RuntimeCall::ConditionalLedger(
+                pallet_conditional_ledger::Call::set_split_paused {
+                    paused: false,
+                    expiry: 0,
+                },
+            )],
+            pallet_guardian::PlaybookId::LedgerFreeze => vec![
+                RuntimeCall::ConditionalLedger(pallet_conditional_ledger::Call::set_frozen {
+                    frozen: false,
+                }),
+                RuntimeCall::Market(pallet_market::Call::set_frozen { frozen: false }),
+            ],
+        };
+        Self::dispatch_emergency_all(calls)
     }
-    Ok((review.approvers, review.approver_count))
+
+    fn renew_playbook(id: pallet_guardian::PlaybookId) -> Result<(), DispatchError> {
+        frame_support::ensure!(
+            id == pallet_guardian::PlaybookId::LedgerFreeze,
+            DispatchError::Other("only ledger-freeze is renewable")
+        );
+        frame_support::storage::with_storage_layer(|| {
+            ConditionalLedger::extend_freeze_once()?;
+            Market::extend_freeze_once()
+        })
+    }
 }
 
-/// Real retrospective-review submission. The one-VIT stock-referenda
-/// submission deposit is fronted pro-rata by the five approving guardians;
-/// enactment calls `guardian.ratify_action` with the ConstitutionalValues
-/// origin (06 §5.4).
+pub struct RuntimeGuardianProposalVeto;
+impl pallet_guardian::GuardianProposalVeto for RuntimeGuardianProposalVeto {
+    fn uphold(pid: futarchy_primitives::ProposalId) -> Result<(), DispatchError> {
+        Epoch::veto_upheld_from_review(pid)
+    }
+}
+
+/// Real retrospective-review and recall submission. The guardian pallet moves
+/// pro-rata slices from SeatBond holds into the sovereign before entering this
+/// adapter; both stock-referenda deposits are placed immediately.
 pub struct RuntimeGuardianScheduler;
 impl pallet_guardian::GuardianReviewScheduler for RuntimeGuardianScheduler {
-    fn schedule_review(action: u32) -> Result<u32, DispatchError> {
-        let (approvers, count) = guardian_review_shares(action)?;
-        let depositor = AccountId::from(approvers[0]);
-        let total = SubmissionDeposit::get();
-        let base = total / Balance::from(count);
-        let remainder = total % Balance::from(count);
-        let extra_count = usize::try_from(remainder)
-            .map_err(|_| DispatchError::Other("guardian review remainder"))?;
-        for (position, raw) in approvers
-            .iter()
-            .take(usize::from(count))
-            .enumerate()
-            .skip(1)
-        {
-            let share = base.saturating_add(Balance::from(position < extra_count));
-            <Balances as frame_support::traits::fungible::Mutate<AccountId>>::transfer(
-                &AccountId::from(*raw),
-                &depositor,
-                share,
-                Preservation::Preserve,
-            )?;
-        }
+    fn review_deposit() -> Balance {
+        SubmissionDeposit::get().saturating_add(1_000 * currency::VIT)
+    }
 
-        let call =
-            RuntimeCall::Guardian(pallet_guardian::Call::ratify_action { action_id: action });
+    fn schedule_review(
+        action: u32,
+        verdict: pallet_guardian::ReviewVerdict,
+    ) -> Result<u32, DispatchError> {
+        let call = match verdict {
+            pallet_guardian::ReviewVerdict::Ratify => {
+                RuntimeCall::Guardian(pallet_guardian::Call::ratify_action { action_id: action })
+            }
+            pallet_guardian::ReviewVerdict::UpholdVeto => {
+                RuntimeCall::Guardian(pallet_guardian::Call::uphold_veto { action_id: action })
+            }
+        };
         let proposal = <Preimage as StorePreimage>::bound(call)?;
-        let values_origin: RuntimeOrigin = pallet_origins::Origin::ConstitutionalValues.into();
+        let values_origin: RuntimeOrigin = crate::track_origins::Origin::Ratify.into();
         let proposal_origin = Box::new(values_origin.caller().clone());
         let referendum = pallet_referenda::ReferendumCount::<Runtime>::get();
         Referenda::submit(
-            RuntimeOrigin::signed(depositor),
+            RuntimeOrigin::signed(guardian_account()),
             proposal_origin,
             proposal,
             frame_support::traits::schedule::DispatchTime::After(0),
         )?;
+        Referenda::place_decision_deposit(RuntimeOrigin::signed(guardian_account()), referendum)
+            .map_err(|error| error.error)?;
         Ok(referendum)
     }
 
-    fn refund_review(action: u32, referendum: u32) -> Result<(), DispatchError> {
-        let (approvers, count) = guardian_review_shares(action)?;
-        let depositor = AccountId::from(approvers[0]);
-        Referenda::refund_submission_deposit(RuntimeOrigin::signed(epoch_account()), referendum)?;
-        let total = SubmissionDeposit::get();
-        let base = total / Balance::from(count);
-        let remainder = total % Balance::from(count);
-        let extra_count = usize::try_from(remainder)
-            .map_err(|_| DispatchError::Other("guardian review remainder"))?;
-        for (position, raw) in approvers
-            .iter()
-            .take(usize::from(count))
-            .enumerate()
-            .skip(1)
-        {
-            let share = base.saturating_add(Balance::from(position < extra_count));
-            <Balances as frame_support::traits::fungible::Mutate<AccountId>>::transfer(
-                &depositor,
-                &AccountId::from(*raw),
-                share,
-                Preservation::Expendable,
-            )?;
+    fn cancel_review(referendum: u32) -> Result<(), DispatchError> {
+        match pallet_referenda::ReferendumInfoFor::<Runtime>::get(referendum) {
+            Some(pallet_referenda::ReferendumInfo::Ongoing(_)) => Referenda::cancel(
+                pallet_origins::Origin::ConstitutionalValues.into(),
+                referendum,
+            ),
+            Some(_) => Ok(()),
+            None => Err(DispatchError::Other("guardian review referendum missing")),
         }
+    }
+
+    fn refund_review(referendum: u32) -> Result<(), DispatchError> {
+        Referenda::refund_decision_deposit(RuntimeOrigin::signed(guardian_account()), referendum)?;
+        Referenda::refund_submission_deposit(
+            RuntimeOrigin::signed(guardian_account()),
+            referendum,
+        )?;
         Ok(())
     }
 }
 impl pallet_guardian::GuardianRecallScheduler for RuntimeGuardianScheduler {
-    fn schedule_recall(_: u32) -> Result<u32, DispatchError> {
-        Err(DispatchError::Other(
-            "guardian recall bond fronting is not wired",
-        ))
+    fn schedule_recall(action: u32, slash_pool: Balance) -> Result<u32, DispatchError> {
+        let deposit = SubmissionDeposit::get().saturating_add(5_000 * currency::VIT);
+        if slash_pool < deposit {
+            return Err(DispatchError::Other("guardian recall slash pool too small"));
+        }
+        let call = RuntimeCall::Guardian(pallet_guardian::Call::recall { action_id: action });
+        let proposal = <Preimage as StorePreimage>::bound(call)?;
+        let values_origin: RuntimeOrigin = crate::track_origins::Origin::GuardianTrack.into();
+        let proposal_origin = Box::new(values_origin.caller().clone());
+        let referendum = pallet_referenda::ReferendumCount::<Runtime>::get();
+        Referenda::submit(
+            RuntimeOrigin::signed(guardian_account()),
+            proposal_origin,
+            proposal,
+            frame_support::traits::schedule::DispatchTime::After(0),
+        )?;
+        Referenda::place_decision_deposit(RuntimeOrigin::signed(guardian_account()), referendum)
+            .map_err(|error| error.error)?;
+        <Balances as frame_support::traits::fungible::Mutate<AccountId>>::transfer(
+            &guardian_account(),
+            &crate::genesis::treasury_account(),
+            slash_pool.saturating_sub(deposit),
+            Preservation::Expendable,
+        )?;
+        Ok(referendum)
+    }
+
+    fn refund_recall(referendum: u32) -> Result<(), DispatchError> {
+        Referenda::refund_decision_deposit(RuntimeOrigin::signed(guardian_account()), referendum)?;
+        Referenda::refund_submission_deposit(
+            RuntimeOrigin::signed(guardian_account()),
+            referendum,
+        )?;
+        <Balances as frame_support::traits::fungible::Mutate<AccountId>>::transfer(
+            &guardian_account(),
+            &crate::genesis::treasury_account(),
+            SubmissionDeposit::get().saturating_add(5_000 * currency::VIT),
+            Preservation::Expendable,
+        )?;
+        Ok(())
+    }
+
+    fn forward_failed_recall_pool(amount: Balance) -> Result<(), DispatchError> {
+        <Balances as frame_support::traits::fungible::Mutate<AccountId>>::transfer(
+            &guardian_account(),
+            &crate::genesis::treasury_account(),
+            amount,
+            Preservation::Expendable,
+        )?;
+        Ok(())
     }
 }
 impl pallet_guardian::Config for Runtime {
-    type ValuesOrigin = pallet_origins::EnsureConstitutionalValues;
+    type ValuesOrigin = EnsureValuesScoped<RatifyTrack>;
+    type AdminOrigin = EnsureValuesScoped<GuardianTrack>;
+    type Currency = Balances;
+    type RuntimeHoldReason = RuntimeHoldReason;
+    type SovereignAccount = GuardianAccount;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type ProposalStatusProvider = RuntimeGuardianStatus;
     type TriggerProvider = RuntimeGuardianTriggers;
     type EffectDispatcher = RuntimeGuardianEffects;
+    type ProposalVeto = RuntimeGuardianProposalVeto;
     type ReviewScheduler = RuntimeGuardianScheduler;
     type RecallScheduler = RuntimeGuardianScheduler;
     type WeightInfo = crate::weights::pallet_guardian::WeightInfo<Runtime>;
@@ -3639,9 +3984,8 @@ impl pallet_guardian::Config for Runtime {
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
 impl pallet_attestor::Config for Runtime {
-    type ValuesOrigin = pallet_origins::EnsureConstitutionalValues;
-    // Ratification shares ConstitutionalValues pending the stock-referenda track split SQ.
-    type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
+    type ValuesOrigin = EnsureValuesScoped<GuardianTrack>;
+    type RatifyOrigin = EnsureValuesScoped<RatifyTrack>;
     type WeightInfo = crate::weights::pallet_attestor::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
@@ -3723,13 +4067,8 @@ impl pallet_epoch::ExecutionGuardAccess for RuntimeEpochExecutionGuard {
         );
         let bytes = RuntimePreimages::fetch(payload_hash, proposal.payload_len)
             .ok_or(DispatchError::Other("epoch payload preimage missing"))?;
-        let mut input = &bytes[..];
-        let calls = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::decode(&mut input)
+        let calls = pallet_execution_guard::Pallet::<Runtime>::decode_batch(&bytes)
             .map_err(|_| DispatchError::Other("epoch payload batch invalid"))?;
-        frame_support::ensure!(
-            input.is_empty(),
-            DispatchError::Other("epoch payload trailing bytes")
-        );
         let mut declared_domains = pallet_execution_guard::pallet::StoredDomains::default();
         let mut artifact = None;
         for call in &calls {
@@ -3859,6 +4198,12 @@ impl pallet_execution_guard::GuardianState for RuntimeGuardianState {
     }
     fn ledger_freeze_active() -> bool {
         crate::Guardian::playbook_active(pallet_guardian::PlaybookId::LedgerFreeze)
+    }
+    fn gate_suspended() -> bool {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        pallet_execution_guard::GateSuspension::<Runtime>::get() == Some(epoch)
+            && pallet_welfare::GateBreachFlags::<Runtime>::get(epoch)
+                .is_some_and(|flags| flags.s_breached || flags.c_breached)
     }
 }
 
@@ -4281,7 +4626,7 @@ impl pallet_execution_guard::Config for Runtime {
     type UpgradeSchedule = RuntimeUpgradeSchedule;
     type Preimages = RuntimePreimages;
     type ReleaseChannel = RuntimeReleaseChannel;
-    type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
+    type RatifyOrigin = EnsureValuesScoped<RatifyTrack>;
     type Dispatcher = crate::classifier::RuntimeDispatcher;
     type MaxRuntimeCodeBytes = ConstU32<{ pallet_preimage::MAX_SIZE }>;
     type WeightInfo = crate::weights::pallet_execution_guard::WeightInfo<Runtime>;
@@ -4568,6 +4913,12 @@ impl pallet_constitution::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHel
             pallet_constitution::ConstitutionOrigin::FutarchyMeta => {
                 pallet_origins::Origin::FutarchyMeta.into()
             }
+            pallet_constitution::ConstitutionOrigin::ConstitutionTrack => {
+                crate::track_origins::Origin::Constitution.into()
+            }
+            pallet_constitution::ConstitutionOrigin::EntrenchedTrack => {
+                crate::track_origins::Origin::Entrenched.into()
+            }
             pallet_constitution::ConstitutionOrigin::ConstitutionalValues => {
                 pallet_origins::Origin::ConstitutionalValues.into()
             }
@@ -4713,6 +5064,9 @@ impl pallet_guardian::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
     fn values() -> RuntimeOrigin {
         pallet_origins::Origin::ConstitutionalValues.into()
     }
+    fn admin() -> RuntimeOrigin {
+        crate::track_origins::Origin::GuardianTrack.into()
+    }
     fn prime_for_worst_case() {
         if pallet_execution_guard::CurrentSpecName::<Runtime>::get().is_none() {
             pallet_execution_guard::CurrentSpecName::<Runtime>::put(benchmark_runtime_version());
@@ -4750,6 +5104,12 @@ impl pallet_guardian::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
     }
     fn prime_maintenance_epoch(epoch: EpochId) {
         pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = epoch);
+    }
+    fn close_review(referendum: u32) -> Result<(), DispatchError> {
+        Referenda::cancel(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            referendum,
+        )
     }
 }
 #[cfg(feature = "runtime-benchmarks")]

@@ -207,8 +207,14 @@ inventory! {
         leaf public => ["set_phase_flag"];
         leaf values => ["set_release_channel"];
     }
-    "ConditionalLedger" { leaf public => ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline"]; }
-    "Market" { leaf public => ["buy", "sell", "crank_observe", "reap"]; }
+    "ConditionalLedger" {
+        leaf public => ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline"];
+        leaf emergency_playbook => ["set_split_paused", "set_frozen"];
+    }
+    "Market" {
+        leaf public => ["buy", "sell", "crank_observe", "reap"];
+        leaf emergency_playbook => ["freeze_creation", "set_frozen"];
+    }
     "Welfare" {
         leaf values => ["register_spec"];
         leaf public => ["record_snapshot", "record_daily_gate"];
@@ -224,7 +230,7 @@ inventory! {
         leaf public => ["claim_stream", "execute_coretime_renewal"];
     }
     "Guardian" {
-        leaf values => ["set_members", "ratify_action", "renew_playbook"];
+        leaf values => ["set_members", "ratify_action", "renew_playbook", "uphold_veto", "recall", "set_playbook_registered"];
         leaf public => ["propose_action", "approve_action"];
     }
     "Attestor" {
@@ -234,8 +240,8 @@ inventory! {
     "Epoch" {
         leaf public => ["submit", "withdraw", "tick", "decide", "settle_cohort", "mark_executed", "mark_failed_executed", "retry_exhausted_to_measurement", "expire_or_stale_queue"];
         leaf values => ["set_next_epoch_length"];
-        leaf guardian_hold => ["delay_once", "veto_upheld", "force_reject_process_hold"];
-        leaf emergency_playbook => ["void_cohort"];
+        leaf guardian_hold => ["delay_once", "force_reject_process_hold"];
+        leaf emergency_playbook => ["void_cohort", "set_intake_paused"];
     }
     "ExecutionGuard" {
         leaf values => ["ratify"];
@@ -660,6 +666,38 @@ fn encode_primitive(primitive: TypeDefPrimitive) -> Vec<u8> {
 
 fn with_metadata(test: impl FnOnce(&RuntimeMetadataModel)) {
     sp_io::TestExternalities::default().execute_with(|| test(&RuntimeMetadataModel::load()));
+}
+
+#[test]
+fn track_origins_is_pinned_as_origin_only_pallet_at_index_64() {
+    sp_io::TestExternalities::default().execute_with(|| {
+        let version = Runtime::metadata_versions()
+            .into_iter()
+            .filter(|version| matches!(version, 15 | 16))
+            .max()
+            .expect("stable2603 must expose V15 or V16 metadata");
+        let encoded = Runtime::metadata_at_version(version)
+            .expect("a reported metadata version must be constructible");
+        let prefixed = RuntimeMetadataPrefixed::decode(&mut &encoded[..])
+            .expect("runtime-generated metadata must decode");
+        let pin = match prefixed.1 {
+            RuntimeMetadata::V15(metadata) => metadata
+                .pallets
+                .iter()
+                .find(|pallet| pallet.name == "TrackOrigins")
+                .map(|pallet| (pallet.index, pallet.calls.is_none())),
+            RuntimeMetadata::V16(metadata) => metadata
+                .pallets
+                .iter()
+                .find(|pallet| pallet.name == "TrackOrigins")
+                .map(|pallet| (pallet.index, pallet.calls.is_none())),
+            metadata => panic!(
+                "requested V{version}, but runtime returned V{}",
+                metadata.version()
+            ),
+        };
+        assert_eq!(pin, Some((64, true)));
+    });
 }
 
 #[test]

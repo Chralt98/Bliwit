@@ -257,6 +257,7 @@ pub enum Error {
     MetersBlocked,
     ResourceLockMissing,
     GuardianHold,
+    GateSuspended,
     FreezeActive,
     PayloadTooLarge,
     TooManyCalls,
@@ -303,6 +304,7 @@ pub trait AttestationView {
 /// only after the complete ordered check list has passed (G-1).
 pub trait GuardianView {
     fn rerun_held(&self, pid: ProposalId) -> bool;
+    fn gate_suspended(&self) -> bool;
     fn ledger_freeze_active(&self, now: BlockNumber) -> bool;
 }
 
@@ -340,6 +342,8 @@ pub struct ExecutionGuard {
     pub current_spec_name: RuntimeVersionConstraint,
     pub held_resources: Vec<(ProposalId, ResourceId)>,
     pub blocked_meters: Vec<ResourceId>,
+    /// Differential projection of the pallet's epoch-scoped gate suspension.
+    pub gate_suspended: bool,
     pub hard_gate_breach: bool,
     pub dead_man_freeze: bool,
     pub migration_halt: bool,
@@ -355,6 +359,7 @@ impl ExecutionGuard {
             current_spec_name,
             held_resources: Vec::new(),
             blocked_meters: Vec::new(),
+            gate_suspended: false,
             hard_gate_breach: false,
             dead_man_freeze: false,
             migration_halt: false,
@@ -430,7 +435,10 @@ impl ExecutionGuard {
         block_hash: H256,
         state_root: H256,
     ) -> Result<(), Error> {
-        let guardian = InMemoryGuardian(guardian);
+        let guardian = InMemoryGuardian {
+            guardian,
+            gate_suspended: self.gate_suspended,
+        };
         let attestors = InMemoryAttestations(attestors);
         let mut epoch = InMemoryEpochHandoff { epoch, ledger };
         self.execute_with(
@@ -709,7 +717,10 @@ impl ExecutionGuard {
     ) -> Result<(), Error> {
         self.check_dispatch_time_with(
             q,
-            &InMemoryGuardian(guardian),
+            &InMemoryGuardian {
+                guardian,
+                gate_suspended: self.gate_suspended,
+            },
             &InMemoryAttestations(attestors),
             payload,
             now,
@@ -767,6 +778,7 @@ impl ExecutionGuard {
             Error::ResourceLockMissing
         );
         ensure!(!guardian.rerun_held(q.pid), Error::GuardianHold);
+        ensure!(!guardian.gate_suspended(), Error::GateSuspended);
         ensure!(!guardian.ledger_freeze_active(now), Error::FreezeActive);
         ensure!(
             !self.hard_gate_breach && !self.dead_man_freeze && !self.migration_halt,
@@ -997,16 +1009,23 @@ impl AttestationView for InMemoryAttestations<'_> {
     }
 }
 
-struct InMemoryGuardian<'a>(&'a Guardian);
+struct InMemoryGuardian<'a> {
+    guardian: &'a Guardian,
+    gate_suspended: bool,
+}
 
 impl GuardianView for InMemoryGuardian<'_> {
     fn rerun_held(&self, pid: ProposalId) -> bool {
-        self.0.rerun_used.contains(&pid)
+        self.guardian.rerun_used.contains(&pid)
+    }
+
+    fn gate_suspended(&self) -> bool {
+        self.gate_suspended
     }
 
     fn ledger_freeze_active(&self, now: BlockNumber) -> bool {
-        self.0.active_playbooks.iter().any(|playbook| {
-            matches!(playbook.id, PlaybookId::LedgerFreeze) && now <= playbook.expiry
+        self.guardian.active_playbooks.iter().any(|playbook| {
+            matches!(playbook.id, PlaybookId::LedgerFreeze) && now < playbook.expiry
         })
     }
 }

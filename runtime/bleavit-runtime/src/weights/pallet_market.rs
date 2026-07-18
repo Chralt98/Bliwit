@@ -221,4 +221,15 @@ impl<T: frame_system::Config> pallet_market::WeightInfo for WeightInfo<T> {
 			.saturating_add(Weight::from_parts(0, 6366))
 			.saturating_add(T::DbWeight::get().reads(5))
 	}
+	/// B1b v2 benchmark stub: bounded creation-freeze write.
+	fn freeze_creation() -> Weight {
+		Weight::from_parts(12_000_000, 1_500)
+			.saturating_add(T::DbWeight::get().writes(1))
+	}
+	/// B1b v2 benchmark stub: bounded market-freeze/latch update.
+	fn set_frozen() -> Weight {
+		Weight::from_parts(15_000_000, 1_500)
+			.saturating_add(T::DbWeight::get().reads(1))
+			.saturating_add(T::DbWeight::get().writes(2))
+	}
 }

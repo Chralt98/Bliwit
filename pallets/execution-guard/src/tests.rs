@@ -195,6 +195,24 @@ fn execute_reject_refunds_the_inner_ceiling_to_checks_only() {
 }
 
 #[test]
+fn guardian_gate_suspension_has_its_own_check_nine_error_and_releases_cleanly() {
+    new_test_ext().execute_with(|| {
+        setup_param(1, 9);
+        GateSuspended::set(true);
+        assert_noop!(
+            GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
+            Error::<Test>::GateSuspended
+        );
+        assert!(Queue::<Test>::contains_key(1));
+        assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 0);
+
+        GateSuspended::set(false);
+        assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1));
+        assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 9);
+    });
+}
+
+#[test]
 fn post_dispatch_failure_still_charges_consumed_inner_weight() {
     new_test_ext().execute_with(|| {
         let code = b"post-dispatch-weight";

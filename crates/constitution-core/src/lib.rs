@@ -480,6 +480,8 @@ pub enum ConstitutionOrigin {
     FutarchyTreasury,
     FutarchyCode,
     FutarchyMeta,
+    ConstitutionTrack,
+    EntrenchedTrack,
     ConstitutionalValues,
     GuardianHold,
     EmergencyPlaybook,
@@ -507,6 +509,8 @@ impl ConstitutionOrigin {
                 | (Self::FutarchyTreasury, ParamClass::Treasury)
                 | (Self::FutarchyMeta, ParamClass::Meta)
                 | (Self::FutarchyMeta, ParamClass::MetaAndValues)
+                | (Self::ConstitutionTrack, ParamClass::Const)
+                | (Self::EntrenchedTrack, ParamClass::Entrenched)
                 | (Self::ConstitutionalValues, ParamClass::Const)
                 | (Self::ConstitutionalValues, ParamClass::Entrenched)
         )
@@ -521,15 +525,23 @@ impl ConstitutionOrigin {
     /// 06 §2.1 (`constitution` track) and 06 §3.2 row 4 / 13 rule 2: registry
     /// amendments are values business (`ConstitutionalValues`) and
     /// META-amendable within meta-bounds (`FutarchyMeta`).
-    pub const fn can_amend_registry(self) -> bool {
+    pub const fn can_amend_registry(self, class: ParamClass) -> bool {
         matches!(self, Self::FutarchyMeta | Self::ConstitutionalValues)
+            || matches!(
+                (self, class),
+                (Self::ConstitutionTrack, ParamClass::Const)
+                    | (Self::ConstitutionTrack, ParamClass::Meta)
+                    | (Self::ConstitutionTrack, ParamClass::MetaAndValues)
+                    | (Self::EntrenchedTrack, ParamClass::Entrenched)
+            )
     }
     /// 02 §12: the release channel's writers are exhaustive — (a) the execution
-    /// guard's runtime-internal path (not origin-mediated) and (b) the
-    /// `ConstitutionalValues` origin via `constitution.set_release_channel`.
+    /// guard's runtime-internal path (not origin-mediated) and (b) the scoped
+    /// constitution track (or its internal bare `ConstitutionalValues` form)
+    /// via `constitution.set_release_channel`.
     /// "No other origin can write it" — including bootstrap Root/sudo.
     pub const fn can_set_release_channel(self) -> bool {
-        matches!(self, Self::ConstitutionalValues)
+        matches!(self, Self::ConstitutionTrack | Self::ConstitutionalValues)
     }
     /// No document defines a phase-flag *call*; the only origin-mediated
     /// writer the spec names is bootstrap sudo — 09 §5.4 limits sudo to
@@ -651,12 +663,12 @@ impl ConstitutionState {
         max_delta: Option<MaxDelta>,
         cooldown_epochs: u32,
     ) -> Result<(), Error> {
-        ensure!(origin.can_amend_registry(), Error::BadOrigin);
         let record = self
             .params
             .iter_mut()
             .find(|r| r.key == key)
             .ok_or(Error::UnknownParam)?;
+        ensure!(origin.can_amend_registry(record.class), Error::BadOrigin);
         *record = record.checked_amend(min, max, max_delta, cooldown_epochs)?;
         Ok(())
     }
@@ -2336,8 +2348,9 @@ mod tests {
         );
         let mut good = [0u8; RELEASE_CHANNEL_LEN];
         good[0] = 1;
-        // 02 §12: exhaustive writer list — ConstitutionalValues is the only
-        // origin-mediated writer; CODE/META/Root paths must all be refused.
+        // 02 §12 / 06 §2.1: the scoped constitution track and its internal
+        // bare form are the only origin-mediated writers; CODE/META/Root paths
+        // must all be refused.
         for refused in [
             ConstitutionOrigin::FutarchyCode,
             ConstitutionOrigin::FutarchyMeta,
@@ -2348,9 +2361,14 @@ mod tests {
                 Err(Error::BadOrigin)
             );
         }
-        state
-            .dispatch_set_release_channel(ConstitutionOrigin::ConstitutionalValues, good)
-            .unwrap();
+        assert_eq!(
+            state.dispatch_set_release_channel(ConstitutionOrigin::ConstitutionTrack, good),
+            Ok(())
+        );
+        assert_eq!(
+            state.dispatch_set_release_channel(ConstitutionOrigin::ConstitutionalValues, good),
+            Ok(())
+        );
     }
 
     #[test]

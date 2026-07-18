@@ -179,6 +179,7 @@ impl pallet_conditional_ledger::Config for Test {
     type MarketAuthority = EnsureMarketPallet;
     type ResolveAuthority = EnsureResolver;
     type SettleAuthority = EnsureSettler;
+    type EmergencyPlaybookOrigin = EnsureSettler;
     type MinSplit = MinSplit;
     type PositionDeposit = PositionDeposit;
     type MaxPositionsPerAccount = MaxPositionsPerAccount;
@@ -201,6 +202,7 @@ impl pallet_market::Config for Test {
     type ObsInterval = ObsInterval;
     type Kappa1e9 = Kappa1e9;
     type MarketAdmin = EnsureMarketAdmin;
+    type EmergencyPlaybookOrigin = EnsureMarketAdmin;
     type ArchiveDelay = MarketArchiveDelay;
     type PalletId = MarketPalletId;
     type KeeperRebate = TestKeeperRebate;

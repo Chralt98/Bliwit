@@ -421,6 +421,173 @@ fn split_requires_signed() {
     });
 }
 
+#[test]
+fn reserve_pause_blocks_only_split_inflows_and_lazily_expires() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        create_base(7);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 4 * UNIT));
+        System::set_block_number(10);
+        assert_ok!(Ledger::set_split_paused(signed(SETTLER), true, 20));
+        assert_noop!(Ledger::split(signed(ALICE), 1, UNIT), E::SplitPaused);
+        assert_noop!(
+            Ledger::split_scalar(signed(ALICE), 1, Branch::Accept, UNIT),
+            E::SplitPaused
+        );
+        assert_noop!(
+            Ledger::split_gate(signed(ALICE), 1, Branch::Accept, GateType::Survival, UNIT,),
+            E::SplitPaused
+        );
+        assert_noop!(
+            Ledger::split_baseline(signed(ALICE), 7, UNIT),
+            E::SplitPaused
+        );
+        // Exit/recovery operations remain live during PB-RESERVE.
+        assert_ok!(Ledger::transfer(
+            signed(ALICE),
+            pos(1, Branch::Accept, PositionKind::BranchUsdc),
+            BOB,
+            UNIT,
+        ));
+        assert_ok!(Ledger::merge(signed(ALICE), 1, UNIT));
+        assert_noop!(
+            Ledger::set_split_paused(signed(ALICE), false, 0),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_noop!(
+            Ledger::set_split_paused(
+                signed(SETTLER),
+                true,
+                (10 + kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS + 1).into(),
+            ),
+            E::FreezeOutOfBounds
+        );
+
+        System::set_block_number(20);
+        assert_ok!(Ledger::split(signed(ALICE), 1, UNIT));
+        try_state();
+    });
+}
+
+#[test]
+fn ledger_freeze_blocks_every_funds_user_call_but_keeps_authority_recovery_live() {
+    new_test_ext().execute_with(|| {
+        create(1);
+        create(2);
+        create_base(7);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 4 * UNIT));
+        let alice_before = usdc(ALICE);
+        let sovereign_before = usdc(ledger_account());
+        let escrow_before = escrow(1);
+        let deposits_before = DepositsHeld::<Test>::get();
+        System::set_block_number(10);
+        assert_ok!(Ledger::set_frozen(signed(SETTLER), true));
+        assert_eq!(usdc(ALICE), alice_before);
+        assert_eq!(usdc(ledger_account()), sovereign_before);
+        assert_eq!(escrow(1), escrow_before);
+        assert_eq!(DepositsHeld::<Test>::get(), deposits_before);
+
+        assert_noop!(Ledger::split(signed(ALICE), 1, UNIT), E::Frozen);
+        assert_noop!(Ledger::merge(signed(ALICE), 1, UNIT), E::Frozen);
+        assert_noop!(
+            Ledger::split_scalar(signed(ALICE), 1, Branch::Accept, UNIT),
+            E::Frozen
+        );
+        assert_noop!(
+            Ledger::merge_scalar(signed(ALICE), 1, Branch::Accept, UNIT),
+            E::Frozen
+        );
+        assert_noop!(
+            Ledger::split_gate(signed(ALICE), 1, Branch::Accept, GateType::Survival, UNIT,),
+            E::Frozen
+        );
+        assert_noop!(
+            Ledger::merge_gate(signed(ALICE), 1, Branch::Accept, GateType::Survival, UNIT,),
+            E::Frozen
+        );
+        assert_noop!(
+            Ledger::transfer(
+                signed(ALICE),
+                pos(1, Branch::Accept, PositionKind::BranchUsdc),
+                BOB,
+                UNIT,
+            ),
+            E::Frozen
+        );
+        assert_noop!(Ledger::split_baseline(signed(ALICE), 7, UNIT), E::Frozen);
+        assert_noop!(Ledger::merge_baseline(signed(ALICE), 7, UNIT), E::Frozen);
+        assert_noop!(Ledger::redeem(signed(ALICE), 1, UNIT), E::Frozen);
+        assert_noop!(
+            Ledger::redeem_scalar(signed(ALICE), 1, ScalarSide::Long, UNIT),
+            E::Frozen
+        );
+        assert_noop!(
+            Ledger::redeem_scalar_pair(signed(ALICE), 1, UNIT),
+            E::Frozen
+        );
+        assert_noop!(
+            Ledger::redeem_gate(signed(ALICE), 1, GateType::Survival, UNIT),
+            E::Frozen
+        );
+        assert_noop!(
+            Ledger::redeem_void(
+                signed(ALICE),
+                1,
+                Branch::Accept,
+                PositionKind::BranchUsdc,
+                UNIT,
+            ),
+            E::Frozen
+        );
+        assert_noop!(
+            Ledger::redeem_baseline(signed(ALICE), 7, ScalarSide::Long, UNIT),
+            E::Frozen
+        );
+        assert_noop!(
+            Ledger::redeem_baseline_pair(signed(ALICE), 7, UNIT),
+            E::Frozen
+        );
+
+        // Resolution and settlement recovery paths do not move through the
+        // signed-user freeze gate.
+        assert_ok!(Ledger::resolve(signed(RESOLVER), 1, Branch::Accept));
+        assert_ok!(Ledger::settle_scalar(
+            signed(SETTLER),
+            1,
+            FixedU64(500_000_000)
+        ));
+        assert_ok!(Ledger::settle_gate(
+            signed(SETTLER),
+            1,
+            GateType::Survival,
+            false,
+        ));
+        assert_ok!(Ledger::void(signed(RESOLVER), 2));
+        assert_ok!(Ledger::settle_baseline(
+            signed(SETTLER),
+            7,
+            FixedU64(500_000_000)
+        ));
+        assert_ok!(Ledger::extend_freeze_once());
+        assert_noop!(Ledger::extend_freeze_once(), E::FreezeRenewalExhausted);
+        assert_noop!(
+            Ledger::set_frozen(signed(ALICE), false),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_ok!(Ledger::set_frozen(signed(SETTLER), false));
+        try_state();
+    });
+
+    new_test_ext().execute_with(|| {
+        create(1);
+        System::set_block_number(10);
+        assert_ok!(Ledger::set_frozen(signed(SETTLER), true));
+        System::set_block_number((10 + kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS).into());
+        assert_ok!(Ledger::split(signed(ALICE), 1, UNIT));
+        try_state();
+    });
+}
+
 // ----------------------------------------------------- bounds / cap coverage
 
 #[test]

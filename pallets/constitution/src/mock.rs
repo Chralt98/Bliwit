@@ -93,7 +93,9 @@ impl pallet_constitution::BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper
             ConstitutionOrigin::FutarchyTreasury => RuntimeOrigin::signed(TREASURY_ACC),
             ConstitutionOrigin::FutarchyCode => RuntimeOrigin::signed(CODE_ACC),
             ConstitutionOrigin::FutarchyMeta => RuntimeOrigin::signed(META_ACC),
-            ConstitutionOrigin::ConstitutionalValues => RuntimeOrigin::signed(VALUES_ACC),
+            ConstitutionOrigin::ConstitutionTrack
+            | ConstitutionOrigin::EntrenchedTrack
+            | ConstitutionOrigin::ConstitutionalValues => RuntimeOrigin::signed(VALUES_ACC),
             ConstitutionOrigin::GuardianHold => RuntimeOrigin::signed(GUARDIAN_ACC),
             ConstitutionOrigin::EmergencyPlaybook => RuntimeOrigin::signed(PLAYBOOK_ACC),
             ConstitutionOrigin::Root => RuntimeOrigin::root(),

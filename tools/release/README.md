@@ -188,9 +188,11 @@ Strict mode is expected to fail today:
 
 - B7 owns the per-release `run-evidence.json` for the committed `zombienet/`
   and `chopsticks/` environment definitions;
-- B1b's compliance gaps SQ-172…SQ-182 remain release-blocking (canonical
-  resource keys/call effects, values and prize backing, phase/playbook mirrors,
-  and the remaining epoch integration gaps tracked in `PLAN.md`) — enforced by
+- the residual adoption-input gaps from B1b's compliance review (SQ-173…SQ-175,
+  SQ-177, SQ-180…SQ-182: values/prize backing, oracle VaR snapshot, MetricSpec
+  targets, P_ref simulation, POL budget, telemetry sources — tracked in
+  `PLAN.md`; SQ-172/176/178 themselves were resolved by the B1b completion)
+  remain release-blocking — enforced by
   the manifest's `release_blockers` row `b1b.compliance`;
 - SQ-205 (owner B1a): the oracle's authoritative reserve health never reaches
   `treasury::set_reserve_impaired`, so 08 §1.2's fail-static NAV is not
