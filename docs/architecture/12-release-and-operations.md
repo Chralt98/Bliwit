@@ -240,6 +240,8 @@ New rows owned by this document:
 | ReleaseChannel | staleness vs latest repoint, flag changes | update missing 600 blocks after repoint; any `SECURITY` flip | RB-RELEASE |
 | Keeper budget | metered-budget utilization | > 80% of 12,000 USDC/epoch | RB-KEEPER |
 
+**Runtime telemetry source (added 2026-07-18, B13).** The audited sources for the runtime-side series above that no frozen [02](02-integration-contract.md) view exposes (book P&L and its b·ln2 bound, live mid-window TWAP coverage, effective POL vs floor, collateral drift, migration-cursor stall, numerics anomaly counters, and the storage-bound remainder invisible to portable metadata) are the methods of the runtime's **`TelemetryApi`** — a monitoring-only `decl_runtime_apis!` trait that is **explicitly outside the 02 integration contract**: the frontend never consumes it, it carries no contract version, and its shape may change additively or otherwise without a 02 §13 bump or joint sign-off (this document owns it). The §6.3 exporter consumes it via `state_call` under the same per-family fail-closed degradation as every other family (failures degrade to absent series, never healthy zeros). Solvency-relevant methods (collateral drift) MUST be computed from the same quantities the owning pallet's try-state checks compare — the API is a window onto audited state, never a second bookkeeping.
+
 The frontend itself still has **no telemetry of any kind**; its only diagnostic channel is user-initiated copy-to-clipboard reports (unchanged). Everything above monitors *infrastructure*, not users.
 
 ### 6.4 Incident response
