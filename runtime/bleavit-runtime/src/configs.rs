@@ -2539,8 +2539,16 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
         pallet_oracle::Rounds::<Runtime>::iter().any(|(_, round)| {
             round.spec_version == spec
                 && round.challenger.is_some()
-                && pallet_oracle::stored_round_bond(round.round_one_bond, 1, round.round_cap)
-                    .map_or(true, |floor| round.bond >= floor)
+                && pallet_oracle::RoundSchedules::<Runtime>::get((
+                    round.component,
+                    round.epoch,
+                    round.spec_version,
+                ))
+                .and_then(|schedule| {
+                    pallet_oracle::stored_round_bond(schedule.round_one_bond, 1, schedule.round_cap)
+                        .ok()
+                })
+                .is_none_or(|floor| round.bond >= floor)
         })
     }
 }

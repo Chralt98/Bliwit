@@ -1421,17 +1421,7 @@ pub mod pallet {
         /// Internal epoch-authority API: close a book and start its archive delay.
         pub fn close(origin: OriginFor<T>, id: MarketId) -> DispatchResult {
             T::MarketAdmin::ensure_origin(origin).map_err(|_| Error::<T>::BadOrigin)?;
-            frame_support::storage::with_storage_layer(|| -> DispatchResult {
-                let mut book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
-                let now = Self::now_u64();
-                Self::seal_due_windows(id, &book, now, true)?;
-                Self::accrue_contest(id, &book, now);
-                book.phase = MarketPhase::Closed;
-                Markets::<T>::insert(id, book);
-                ClosedAt::<T>::insert(id, frame_system::Pallet::<T>::block_number());
-                Self::deposit_event(Event::MarketClosed { market: id });
-                Ok(())
-            })
+            frame_support::storage::with_storage_layer(|| Self::close_book(id))
         }
 
         /// Epoch-authority boundary seal for a particular proposal window.
@@ -1471,6 +1461,9 @@ pub mod pallet {
                         ),
                         Error::<T>::TryStateViolation
                     );
+                    if !matches!(book.phase, MarketPhase::Closed) {
+                        Self::close_book(id)?;
+                    }
                     if let Some(observed) = SettlementObservedAt::<T>::get(id) {
                         ensure!(observed == terminal, Error::<T>::TryStateViolation);
                     } else {
@@ -1513,6 +1506,21 @@ pub mod pallet {
             }
             let _ = book;
             !SettlementObservedAt::<T>::contains_key(id)
+        }
+
+        /// Shared close sequence for the ordinary decision boundary and an
+        /// early terminal VOID. Callers provide the surrounding storage layer
+        /// so close, terminal latching, and POL release can commit atomically.
+        fn close_book(id: MarketId) -> DispatchResult {
+            let mut book = Markets::<T>::get(id).ok_or(Error::<T>::UnknownMarket)?;
+            let now = Self::now_u64();
+            Self::seal_due_windows(id, &book, now, true)?;
+            Self::accrue_contest(id, &book, now);
+            book.phase = MarketPhase::Closed;
+            Markets::<T>::insert(id, book);
+            ClosedAt::<T>::insert(id, frame_system::Pallet::<T>::block_number());
+            Self::deposit_event(Event::MarketClosed { market: id });
+            Ok(())
         }
 
         fn register_market_accounts(
@@ -2019,7 +2027,9 @@ pub mod pallet {
                 let book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;
                 ensure!(
                     terminal <= frame_system::Pallet::<T>::block_number()
-                        && !commitments.iter().any(|(market, _)| *market == id),
+                        && !commitments.iter().any(|(market, _)| *market == id)
+                        && matches!(book.phase, MarketPhase::Closed)
+                        && ClosedAt::<T>::get(id).is_some_and(|closed| closed <= terminal),
                     Error::<T>::TryStateViolation
                 );
                 match book.kind {

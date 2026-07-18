@@ -162,12 +162,16 @@ pub struct RoundState {
     pub stake_at_risk: Balance,
     pub cumulative_reporter_bond: Balance,
     pub cumulative_challenger_bond: Balance,
-    /// Round-one bond snapshotted when the game opens. Every later `B_r` is
-    /// checked doubling from this value, so live amendments cannot reprice an
-    /// in-flight dispute (07 §6.1/§13).
+}
+
+/// Internal per-game schedule frozen when round one opens. This deliberately
+/// lives beside [`RoundState`], whose SCALE layout is frozen by contract v4.
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+pub struct StoredRoundSchedule {
+    /// Every later `B_r` doubles from this value, so live amendments cannot
+    /// reprice an in-flight dispute (07 §6.1/§13).
     pub round_one_bond: Balance,
-    /// `orc.rounds` snapshotted when the game opens. Terminal adjudication is
-    /// always gated by this per-game cap, never the live parameter.
+    /// Terminal adjudication is gated by this frozen `orc.rounds` value.
     pub round_cap: u8,
 }
 
@@ -335,6 +339,9 @@ pub struct Oracle {
     pub reporters: Vec<(AccountId, ReporterInfo)>,
     pub watchtowers: Vec<(AccountId, WatchtowerInfo)>,
     pub rounds: Vec<RoundState>,
+    /// Parallel internal schedule state, one entry per live round. The FRAME
+    /// shell persists this outside the contract-frozen `Rounds` value.
+    pub round_schedules: Vec<(RoundKey, StoredRoundSchedule)>,
     pub component_values: Vec<((MetricId, EpochId, MetricSpecVersion), SettledComponent)>,
     pub reserve_health: ReserveHealth,
     pub events: Vec<Event>,
@@ -491,9 +498,18 @@ impl Oracle {
             stake_at_risk: input.stake_at_risk,
             cumulative_reporter_bond: bond,
             cumulative_challenger_bond: 0,
-            round_one_bond: bond,
-            round_cap: params.rounds,
         });
+        self.round_schedules.push((
+            RoundKey {
+                component: input.component,
+                epoch: input.epoch,
+                spec_version: input.spec_version,
+            },
+            StoredRoundSchedule {
+                round_one_bond: bond,
+                round_cap: params.rounds,
+            },
+        ));
         self.events.push(Event::Reported {
             component: input.component,
             epoch: input.epoch,
@@ -669,6 +685,11 @@ impl Oracle {
                 self.rounds[i].epoch,
                 self.rounds[i].round,
             );
+            let schedule = self.round_schedule(RoundKey {
+                component,
+                epoch,
+                spec_version: self.rounds[i].spec_version,
+            })?;
             if self.rounds[i].challenger.is_none() {
                 if self.rounds[i].acks >= params.watchtower_quorum {
                     let value = self.rounds[i].value;
@@ -692,13 +713,10 @@ impl Oracle {
                     let carried = self.last_valid_value(component, epoch);
                     self.neutral_at(i, carried, 1)?;
                 }
-            } else if self.rounds[i].round < self.rounds[i].round_cap {
+            } else if self.rounds[i].round < schedule.round_cap {
                 let next_round = self.rounds[i].round.checked_add(1).ok_or(Error::Overflow)?;
-                let next_bond = stored_round_bond(
-                    self.rounds[i].round_one_bond,
-                    next_round,
-                    self.rounds[i].round_cap,
-                )?;
+                let next_bond =
+                    stored_round_bond(schedule.round_one_bond, next_round, schedule.round_cap)?;
                 self.rounds[i].round = next_round;
                 self.rounds[i].bond = next_bond;
                 self.rounds[i].challenge_deadline = now.saturating_add(params.window);
@@ -786,8 +804,9 @@ impl Oracle {
     pub fn request_adjudication(&mut self, key: RoundKey, referendum: u32) -> Result<(), Error> {
         let (component, epoch) = (key.component, key.epoch);
         let idx = self.find_round(key).ok_or(Error::RoundNotFound)?;
+        let schedule = self.round_schedule(key)?;
         ensure!(
-            self.rounds[idx].round >= self.rounds[idx].round_cap,
+            self.rounds[idx].round >= schedule.round_cap,
             Error::WindowOpen
         );
         ensure!(self.rounds[idx].challenger.is_some(), Error::QuorumPending);
@@ -812,13 +831,14 @@ impl Oracle {
         ensure!(value.0 <= COMPONENT_VALUE_MAX, Error::ValueOutOfBounds);
         let (component, epoch) = (key.component, key.epoch);
         let idx = self.find_round(key).ok_or(Error::RoundNotFound)?;
+        let schedule = self.round_schedule(key)?;
         // 07 §5.4: adjudication is the TERMINAL step of the game — the values
         // track resolves a round-`R_max` dispute that carries a live challenge.
         // A fresh or unchallenged round is not adjudicable, so the
         // `OracleResolution` origin cannot bypass the escalation ladder and
         // settle an arbitrary round (Codex F10).
         ensure!(
-            self.rounds[idx].round >= self.rounds[idx].round_cap,
+            self.rounds[idx].round >= schedule.round_cap,
             Error::WindowOpen
         );
         ensure!(self.rounds[idx].challenger.is_some(), Error::QuorumPending);
@@ -956,6 +976,10 @@ impl Oracle {
         );
         ensure!(self.rounds.len() <= MAX_ROUNDS, Error::RoundLimit);
         ensure!(
+            self.round_schedules.len() == self.rounds.len(),
+            Error::RoundLimit
+        );
+        ensure!(
             self.component_values.len() <= MAX_COMPONENT_VALUES,
             Error::AlreadyFinal
         );
@@ -969,13 +993,21 @@ impl Oracle {
             ensure!(self.is_watchtower(who), Error::NotRegistered);
         }
         for r in &self.rounds {
+            let schedule = self.round_schedule(RoundKey {
+                component: r.component,
+                epoch: r.epoch,
+                spec_version: r.spec_version,
+            })?;
             ensure!(
-                (ORC_ROUND_CAP_MIN..=ORC_ROUND_CAP_MAX).contains(&r.round_cap),
+                (ORC_ROUND_CAP_MIN..=ORC_ROUND_CAP_MAX).contains(&schedule.round_cap),
                 Error::RoundNotFound
             );
-            ensure!((1..=r.round_cap).contains(&r.round), Error::RoundNotFound);
             ensure!(
-                r.bond == stored_round_bond(r.round_one_bond, r.round, r.round_cap)?,
+                (1..=schedule.round_cap).contains(&r.round),
+                Error::RoundNotFound
+            );
+            ensure!(
+                r.bond == stored_round_bond(schedule.round_one_bond, r.round, schedule.round_cap,)?,
                 Error::BondBelowMinimum
             );
             // A live round for an already settled key would let a second
@@ -999,6 +1031,9 @@ impl Oracle {
                 .count();
             ensure!(usize::from(r.acks) == recorded_acks, Error::QuorumPending);
         }
+        for (key, _) in &self.round_schedules {
+            ensure!(self.find_round(*key).is_some(), Error::RoundNotFound);
+        }
         Ok(())
     }
 
@@ -1013,7 +1048,15 @@ impl Oracle {
             self.component_values.len() < MAX_COMPONENT_VALUES,
             Error::AlreadyFinal
         );
+        let round = self.rounds.get(idx).ok_or(Error::RoundNotFound)?;
+        let key = RoundKey {
+            component: round.component,
+            epoch: round.epoch,
+            spec_version: round.spec_version,
+        };
+        let schedule_idx = self.round_schedule_index(key).ok_or(Error::RoundNotFound)?;
         let r = self.rounds.remove(idx);
+        self.round_schedules.remove(schedule_idx);
         // The game for this `(component, epoch, version)` is terminal: its
         // acknowledgment records are dead weight, so reap them — scoped to this
         // version so a sibling per-version game's acks survive (G-6/I-20;
@@ -1188,6 +1231,17 @@ impl Oracle {
                 && r.epoch == key.epoch
                 && r.spec_version == key.spec_version
         })
+    }
+    fn round_schedule_index(&self, key: RoundKey) -> Option<usize> {
+        self.round_schedules
+            .iter()
+            .position(|(stored, _)| *stored == key)
+    }
+    fn round_schedule(&self, key: RoundKey) -> Result<StoredRoundSchedule, Error> {
+        self.round_schedules
+            .iter()
+            .find_map(|(stored, schedule)| (*stored == key).then_some(*schedule))
+            .ok_or(Error::RoundNotFound)
     }
 }
 
@@ -2098,12 +2152,9 @@ mod tests {
     }
 
     #[test]
-    fn round_state_schedule_snapshots_are_trailing_scale_fields() {
+    fn round_state_fields_match_contract_v4() {
         use scale_info::TypeDef;
-        // Preserve the existing SCALE prefix and append the per-game schedule
-        // snapshots. Appending keeps every pre-existing field's order stable
-        // while making mid-game repricing structurally impossible.
-        const ROUND_STATE_FIELDS: [&str; 19] = [
+        const ROUND_STATE_FIELDS: [&str; 17] = [
             "component",
             "epoch",
             "round",
@@ -2121,8 +2172,6 @@ mod tests {
             "stake_at_risk",
             "cumulative_reporter_bond",
             "cumulative_challenger_bond",
-            "round_one_bond",
-            "round_cap",
         ];
         let type_info = RoundState::type_info();
         let names: Vec<&str> = match &type_info.type_def {

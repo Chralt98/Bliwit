@@ -7713,22 +7713,27 @@ fn live_book_pol_commitments_include_baseline_and_release_only_at_settlement() {
 }
 
 #[test]
-fn seeded_force_reject_void_releases_pol_and_try_state_is_immediately_green() {
+fn seeded_force_reject_void_closes_and_reaps_all_proposal_books() {
     use pallet_epoch::{EpochParamsProvider, MarketAccess};
 
     development_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 8_017;
         let params = <crate::configs::RuntimeEpochParams as EpochParamsProvider>::get();
-        let decision_b = crate::configs::balance_param(b"pol.b.param");
+        let decision_b = crate::configs::balance_param(b"pol.b.code");
+        let gate_b = crate::configs::balance_param(b"pol.b_gate");
         let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
         let decision_headroom =
             pallet_market::core_market::seed_headroom(decision_b).expect("bounded decision b");
+        let gate_headroom =
+            pallet_market::core_market::seed_headroom(gate_b).expect("bounded gate b");
         let baseline_headroom =
             pallet_market::core_market::seed_headroom(baseline_b).expect("bounded baseline b");
         assert_ok!(ForeignAssets::mint_into(
             usdc_location(),
             &crate::configs::pol_account(),
-            decision_headroom.saturating_add(currency::USDC),
+            decision_headroom
+                .saturating_add(gate_headroom.saturating_mul(2))
+                .saturating_add(currency::USDC),
         ));
         assert_ok!(ForeignAssets::mint_into(
             usdc_location(),
@@ -7737,11 +7742,14 @@ fn seeded_force_reject_void_releases_pol_and_try_state_is_immediately_green() {
         ));
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
             state.main_usdc = decision_headroom
-                .saturating_mul(4)
-                .saturating_add(baseline_headroom.saturating_mul(2));
+                .saturating_mul(2)
+                .saturating_add(gate_headroom.saturating_mul(4))
+                .saturating_add(baseline_headroom)
+                .saturating_mul(2);
         });
 
         let mut proposal = empty_param_proposal(PID, account(154), H256::zero(), 0);
+        proposal.class = ProposalClass::Code;
         proposal.metric_spec = 1;
         proposal.state = ProposalState::Trading;
         proposal.decide_at = System::block_number().saturating_add(params.decision_window);
@@ -7772,7 +7780,11 @@ fn seeded_force_reject_void_releases_pol_and_try_state_is_immediately_green() {
         pallet_epoch::NextProposalId::<Runtime>::mutate(|next| {
             *next = (*next).max(PID.saturating_add(1));
         });
-        assert_eq!(FutarchyTreasury::treasury().pol_commitments.len(), 3);
+        let mut proposal_books = Vec::from([markets.accept, markets.reject]);
+        proposal_books.extend(markets.gates.expect("CODE market set has gate books"));
+        let protocol_accounts_before = pallet_market::MarketProtocolAccounts::<Runtime>::count();
+        assert_eq!(FutarchyTreasury::treasury().pol_commitments.len(), 7);
+        let void_block = System::block_number();
 
         assert_ok!(Epoch::force_reject_process_hold(
             pallet_origins::Origin::GuardianHold.into(),
@@ -7786,13 +7798,46 @@ fn seeded_force_reject_void_releases_pol_and_try_state_is_immediately_green() {
             FutarchyTreasury::treasury().pol_commitments.as_slice(),
             &[baseline_headroom],
         );
-        for id in [markets.accept, markets.reject] {
-            assert!(pallet_market::SettlementObservedAt::<Runtime>::contains_key(id));
+        assert_eq!(
+            pallet_conditional_ledger::VaultTerminalAt::<Runtime>::get(PID),
+            Some(void_block),
+        );
+        for id in &proposal_books {
+            let book = pallet_market::Markets::<Runtime>::get(id).expect("voided book remains");
+            assert_eq!(book.phase, pallet_market::core_market::MarketPhase::Closed);
+            assert_eq!(
+                pallet_market::ClosedAt::<Runtime>::get(id),
+                Some(void_block)
+            );
+            assert_eq!(
+                pallet_market::SettlementObservedAt::<Runtime>::get(id),
+                Some(void_block),
+                "the durable terminal latch is the reap-delay anchor",
+            );
             assert!(!pallet_market::Pallet::<Runtime>::pol_obligation_live(
-                id,
-                &pallet_market::Markets::<Runtime>::get(id).expect("voided book remains")
+                *id, &book
             ));
         }
+        assert!(Market::do_try_state().is_ok());
+        assert!(FutarchyTreasury::do_try_state().is_ok());
+
+        System::set_block_number(
+            void_block.saturating_add(crate::configs::LedgerArchiveDelay::get()),
+        );
+        for id in &proposal_books {
+            assert_ok!(Market::reap(RuntimeOrigin::signed(account(153)), *id));
+        }
+        assert!(!pallet_market::ProposalMarketIds::<Runtime>::contains_key(
+            PID
+        ));
+        let removed_accounts = u32::try_from(proposal_books.len())
+            .unwrap_or_default()
+            .saturating_mul(2);
+        assert_eq!(
+            pallet_market::MarketProtocolAccounts::<Runtime>::count(),
+            protocol_accounts_before.saturating_sub(removed_accounts),
+        );
+        assert_eq!(pallet_market::Markets::<Runtime>::count(), 1);
         assert!(Market::do_try_state().is_ok());
         assert!(FutarchyTreasury::do_try_state().is_ok());
     });
@@ -9643,12 +9688,17 @@ fn invalid_frozen_oracle_schedule_holds_the_decision_fail_closed() {
             stake_at_risk: Balance::MAX,
             cumulative_reporter_bond: 0,
             cumulative_challenger_bond: 0,
-            round_one_bond: 0,
-            // Outside the supported envelope, so frozen-schedule validation
-            // fails and G-1 conservatively holds the decision.
-            round_cap: kernel::ORC_ROUNDS_MAX.saturating_add(1),
         };
         pallet_oracle::Rounds::<Runtime>::insert((COMPONENT, round.epoch, SPEC), round);
+        pallet_oracle::RoundSchedules::<Runtime>::insert(
+            (COMPONENT, round.epoch, SPEC),
+            pallet_oracle::StoredRoundSchedule {
+                round_one_bond: 0,
+                // Outside the supported envelope, so frozen-schedule validation
+                // fails and G-1 conservatively holds the decision.
+                round_cap: kernel::ORC_ROUNDS_MAX.saturating_add(1),
+            },
+        );
 
         assert!(
             crate::configs::RuntimeEpochOracle::any_open_dispute_touching(SPEC),
@@ -9686,6 +9736,11 @@ fn open_oracle_dispute_merit_floor_uses_its_frozen_game_bond() {
                 stake_at_risk: 400_000_000_000,
                 cumulative_reporter_bond: FROZEN_BOND,
                 cumulative_challenger_bond: FROZEN_BOND,
+            },
+        );
+        pallet_oracle::RoundSchedules::<Runtime>::insert(
+            (COMPONENT, epoch, SPEC),
+            pallet_oracle::StoredRoundSchedule {
                 round_one_bond: FROZEN_BOND,
                 round_cap: pallet_oracle::ORC_ROUNDS,
             },
@@ -10892,8 +10947,6 @@ fn view_open_oracle_rounds_sorts_triple_keys_and_marks_prior_escalation() {
             stake_at_risk: 10,
             cumulative_reporter_bond: 11,
             cumulative_challenger_bond: 12,
-            round_one_bond: 1_000 + u128::from(component),
-            round_cap: pallet_oracle::ORC_ROUNDS,
         }
     }
 
@@ -10906,6 +10959,13 @@ fn view_open_oracle_rounds_sorts_triple_keys_and_marks_prior_escalation() {
             pallet_oracle::Rounds::<Runtime>::insert(
                 (state.component, state.epoch, state.spec_version),
                 state,
+            );
+            pallet_oracle::RoundSchedules::<Runtime>::insert(
+                (state.component, state.epoch, state.spec_version),
+                pallet_oracle::StoredRoundSchedule {
+                    round_one_bond: 1_000 + u128::from(state.component),
+                    round_cap: pallet_oracle::ORC_ROUNDS,
+                },
             );
         }
         let view = crate::views::open_oracle_rounds();

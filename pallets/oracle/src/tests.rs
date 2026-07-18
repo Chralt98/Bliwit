@@ -11,7 +11,7 @@
 
 use crate::mock::*;
 use crate::pallet::{
-    Recomputable, Reporters, ReserveHealth, Rounds, WatchtowerActive, Watchtowers,
+    Recomputable, Reporters, ReserveHealth, RoundSchedules, Rounds, WatchtowerActive, Watchtowers,
 };
 use crate::{Error, Event};
 use frame_support::traits::ConstU32;
@@ -19,8 +19,8 @@ use frame_support::{assert_noop, assert_ok, pallet_prelude::DispatchResult, Boun
 use futarchy_primitives::{Balance, EpochId, FixedU64, MetricId, MetricSpecVersion, H256};
 use oracle_core::{
     hash_evidence, hash_report, round_bond, OracleParams, RoundState, SettlePath,
-    COMPONENT_VALUE_MAX, ORC_EXT_WINDOW_BLOCKS, ORC_REPORTER_STAKE, ORC_ROUNDS, ORC_WINDOW_BLOCKS,
-    RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT, WT_STAKE,
+    StoredRoundSchedule, COMPONENT_VALUE_MAX, ORC_EXT_WINDOW_BLOCKS, ORC_REPORTER_STAKE,
+    ORC_ROUNDS, ORC_WINDOW_BLOCKS, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT, WT_STAKE,
 };
 use parity_scale_codec::{Compact, Decode, Encode};
 use sp_runtime::DispatchError;
@@ -319,11 +319,13 @@ fn live_round_bound_rejects_the_129th_game() {
         register_reporter(1);
         assert_ok!(do_report(1, E, reported_value(), h(9)));
         let template = Rounds::<Test>::get((C, E, V)).expect("first round exists");
+        let schedule = RoundSchedules::<Test>::get((C, E, V)).expect("first schedule exists");
         let mut epoch = 100u32;
         while Rounds::<Test>::iter().count() < oracle_core::MAX_ROUNDS {
             let mut round = template;
             round.epoch = epoch;
             Rounds::<Test>::insert((C, epoch, V), round);
+            RoundSchedules::<Test>::insert((C, epoch, V), schedule);
             epoch = epoch.saturating_add(1);
         }
 
@@ -391,8 +393,13 @@ fn report_happy_path_opens_round_with_scaled_bond() {
         // 07 §6.2: `B_1 = max(10k, 250 bps × StakeAtRisk)` — the mock's 400k
         // scaled hits the floor exactly (`= 10_000_000_000`).
         assert_eq!(round.bond, bond(1));
-        assert_eq!(round.round_one_bond, bond(1));
-        assert_eq!(round.round_cap, ORC_ROUNDS);
+        assert_eq!(
+            RoundSchedules::<Test>::get((C, E, V)),
+            Some(StoredRoundSchedule {
+                round_one_bond: bond(1),
+                round_cap: ORC_ROUNDS,
+            })
+        );
         // 07 §5.2: 72 h (`orc.window`) challenge window from the report block.
         assert_eq!(round.challenge_deadline, 1 + ORC_WINDOW_BLOCKS);
         assert!(!round.extended);
@@ -1201,6 +1208,8 @@ fn adjudicate_happy_path_settles_adjudicated() {
         let settled = Oracle::settled_component(C, E, V).unwrap();
         assert_eq!(settled.path, SettlePath::Adjudicated);
         assert_eq!(settled.value, verdict);
+        assert!(!Rounds::<Test>::contains_key((C, E, V)));
+        assert!(!RoundSchedules::<Test>::contains_key((C, E, V)));
         assert_eq!(
             oracle_events(),
             vec![
@@ -1414,11 +1423,11 @@ fn amended_round_cap_moves_terminal_boundary_for_next_game_only() {
         ParamsValue::set(amended);
         assert_ok!(do_report(1, E + 1, reported_value(), h(19)));
         assert_eq!(
-            Rounds::<Test>::get((C, E, V)).map(|round| round.round_cap),
+            RoundSchedules::<Test>::get((C, E, V)).map(|schedule| schedule.round_cap),
             Some(ORC_ROUNDS)
         );
         assert_eq!(
-            Rounds::<Test>::get((C, E + 1, V)).map(|round| round.round_cap),
+            RoundSchedules::<Test>::get((C, E + 1, V)).map(|schedule| schedule.round_cap),
             Some(2)
         );
 
@@ -1506,7 +1515,8 @@ fn mid_game_bond_amendment_does_not_reprice_later_rounds() {
         };
         ParamsValue::set(amended);
         assert_ok!(do_report(1, E + 1, reported_value(), h(19)));
-        let next_game = Rounds::<Test>::get((C, E + 1, V)).expect("next game opens");
+        let next_game =
+            RoundSchedules::<Test>::get((C, E + 1, V)).expect("next game schedule freezes");
         assert_eq!(
             next_game.round_one_bond,
             round_bond(StakeAtRiskValue::get(), 1, &amended)
@@ -1525,7 +1535,10 @@ fn mid_game_bond_amendment_does_not_reprice_later_rounds() {
         assert_ok!(Oracle::crank_round_close(RuntimeOrigin::signed(acc(9)), 20));
         let round_two = Rounds::<Test>::get((C, E, V)).expect("old game escalates");
         assert_eq!(round_two.round, 2);
-        assert_eq!(round_two.round_one_bond, opening_bond);
+        assert_eq!(
+            RoundSchedules::<Test>::get((C, E, V)).map(|schedule| schedule.round_one_bond),
+            Some(opening_bond)
+        );
         assert_eq!(round_two.bond, opening_bond.saturating_mul(2));
         assert_ok!(Oracle::do_try_state());
 
@@ -2400,9 +2413,22 @@ fn valid_round(round: u8) -> RoundState {
         stake_at_risk: stake,
         cumulative_reporter_bond: bond(round),
         cumulative_challenger_bond: 0,
+    }
+}
+
+fn valid_schedule() -> StoredRoundSchedule {
+    StoredRoundSchedule {
         round_one_bond: bond(1),
         round_cap: ORC_ROUNDS,
     }
+}
+
+fn insert_round_with_schedule(round: RoundState) {
+    Rounds::<Test>::insert((round.component, round.epoch, round.spec_version), round);
+    RoundSchedules::<Test>::insert(
+        (round.component, round.epoch, round.spec_version),
+        valid_schedule(),
+    );
 }
 
 #[test]
@@ -2412,7 +2438,7 @@ fn try_state_rejects_an_out_of_range_round() {
         assert_ok!(Oracle::do_try_state());
         let mut bad = valid_round(1);
         bad.round = 5; // out of `1..=3`
-        Rounds::<Test>::insert((C, E, V), bad);
+        insert_round_with_schedule(bad);
         assert!(Oracle::do_try_state().is_err());
     });
 }
@@ -2422,7 +2448,7 @@ fn try_state_rejects_a_bond_outside_the_frozen_schedule() {
     new_test_ext().execute_with(|| {
         let mut bad = valid_round(2);
         bad.bond = bad.bond.saturating_add(1);
-        Rounds::<Test>::insert((C, E, V), bad);
+        insert_round_with_schedule(bad);
         assert!(Oracle::do_try_state().is_err());
     });
 }
@@ -2430,9 +2456,30 @@ fn try_state_rejects_a_bond_outside_the_frozen_schedule() {
 #[test]
 fn try_state_rejects_a_round_cap_outside_the_kernel_envelope() {
     new_test_ext().execute_with(|| {
-        let mut bad = valid_round(1);
-        bad.round_cap = futarchy_primitives::kernel::ORC_ROUNDS_MAX.saturating_add(1);
-        Rounds::<Test>::insert((C, E, V), bad);
+        Rounds::<Test>::insert((C, E, V), valid_round(1));
+        RoundSchedules::<Test>::insert(
+            (C, E, V),
+            StoredRoundSchedule {
+                round_one_bond: bond(1),
+                round_cap: futarchy_primitives::kernel::ORC_ROUNDS_MAX.saturating_add(1),
+            },
+        );
+        assert!(Oracle::do_try_state().is_err());
+    });
+}
+
+#[test]
+fn try_state_rejects_a_live_round_without_its_frozen_schedule() {
+    new_test_ext().execute_with(|| {
+        Rounds::<Test>::insert((C, E, V), valid_round(1));
+        assert!(Oracle::do_try_state().is_err());
+    });
+}
+
+#[test]
+fn try_state_rejects_a_frozen_schedule_without_its_live_round() {
+    new_test_ext().execute_with(|| {
+        RoundSchedules::<Test>::insert((C, E, V), valid_schedule());
         assert!(Oracle::do_try_state().is_err());
     });
 }
@@ -2448,7 +2495,7 @@ fn try_state_rejects_a_live_round_for_a_settled_key() {
         assert_ok!(Oracle::do_try_state()); // settled, no live round
 
         // Inject a live round shadowing the settled entry.
-        Rounds::<Test>::insert((C, E, V), valid_round(1));
+        insert_round_with_schedule(valid_round(1));
         assert!(Oracle::do_try_state().is_err());
     });
 }
