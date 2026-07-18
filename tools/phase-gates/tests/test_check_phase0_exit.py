@@ -921,15 +921,34 @@ class SimulationEvidenceTests(PhaseGateTestCase):
         document["false_pass_rate"] = rates
         self.assert_sim_fails(document, "strictly < 0.01")
 
-    def test_rate_must_be_a_finite_float_in_unit_interval(self) -> None:
-        for value in (1, -0.001, 1.001):
+    def test_rate_must_be_a_finite_number_in_unit_interval(self) -> None:
+        for value in (-0.001, 1.001, -1, 2, "0.001", True, False, None):
             with self.subTest(value=value):
                 document = valid_sim_document()
                 rates = copy.deepcopy(document["false_pass_rate"])
                 assert isinstance(rates, dict)
                 rates["param"] = value
                 document["false_pass_rate"] = rates
-                self.assert_sim_fails(document, "finite float in [0,1]")
+                self.assert_sim_fails(document, "finite number in [0,1]")
+
+    def test_in_range_integer_rate_still_fails_the_strict_threshold(self) -> None:
+        document = valid_sim_document()
+        rates = copy.deepcopy(document["false_pass_rate"])
+        assert isinstance(rates, dict)
+        rates["param"] = 1
+        document["false_pass_rate"] = rates
+        self.assert_sim_fails(document, "strictly < 0.01")
+
+    def test_zero_rate_encoded_as_json_integer_passes(self) -> None:
+        document = valid_sim_document()
+        rates = copy.deepcopy(document["false_pass_rate"])
+        assert isinstance(rates, dict)
+        rates["param"] = 0
+        document["false_pass_rate"] = rates
+
+        criterion = GATE.criterion_sim_false_pass(self.evidence(document))
+
+        self.assertEqual(criterion["status"], "pass")
 
     def test_nonfinite_json_rate_is_rejected_before_validation(self) -> None:
         for value in (float("inf"), float("nan")):

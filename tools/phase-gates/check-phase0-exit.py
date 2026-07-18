@@ -1010,10 +1010,14 @@ def criterion_sim_false_pass(
         }
     for name in ("param", "trs", "code", "meta"):
         value = rates[name]
-        if type(value) is not float or not math.isfinite(value) or not 0.0 <= value <= 1.0:
+        if (
+            type(value) not in (int, float)
+            or not math.isfinite(value)
+            or not 0.0 <= value <= 1.0
+        ):
             return {
                 "status": "fail",
-                "detail": f"false_pass_rate.{name} must be a finite float in [0,1]",
+                "detail": f"false_pass_rate.{name} must be a finite number in [0,1]",
             }
         if value >= 0.01:
             return {
