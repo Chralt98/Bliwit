@@ -235,8 +235,12 @@ pub mod pallet {
         Balance, BlockNumber, EpochId, ProposalClass,
     };
 
-    /// The in-code storage version of this pallet.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+    /// The in-code storage version of this pallet. Stays 0 while no persistent
+    /// network exists (every environment rebuilds from genesis, which stamps
+    /// the then-current version): a bump without an accompanying
+    /// `OnRuntimeUpgrade` translation would leave stored state undecodable on
+    /// upgrade. The first real bump must land together with its migration.
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]

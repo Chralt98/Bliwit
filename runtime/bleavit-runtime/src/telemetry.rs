@@ -175,15 +175,28 @@ pub fn mid_window_coverage() -> Option<BoundedVec<WindowCoverageTelemetry, MAX_W
 
 /// Independently funded POL components and their matching requirements.
 pub fn pol() -> Option<BoundedVec<PolTelemetry, MAX_POL_TELEMETRY_ROWS>> {
-    let treasury = FutarchyTreasury::treasury();
-    let live_commitments = treasury
-        .pol_commitments
-        .iter()
-        .try_fold(0_u128, |total, amount| total.checked_add(*amount))?;
-    // Existing Baseline books are already present in `pol_commitments` (08
-    // §1.2). The dedicated line is standing funding: it must also retain the
-    // live-Params capacity to seed the next epoch's mandatory Baseline book,
-    // even when the current epoch has no proposals (08 §4.3).
+    // Live obligations split by book kind at the market pallet's identity-keyed
+    // source (the treasury mirror is amount-only): Baseline books are seeded
+    // from the dedicated `POL_BASELINE` line (08 §4.3), so their obligations
+    // belong to the Baseline component's floor — held against `POL`, a live
+    // Baseline book would fire the `pol` alert while its dedicated funding is
+    // correct.
+    let mut proposal_live: Balance = 0;
+    let mut baseline_live: Balance = 0;
+    for (market, amount) in pallet_market::LivePolCommitments::<Runtime>::get() {
+        // A missing backing book makes collection itself impossible, so the
+        // family degrades absent per 12 §6.3.
+        let book = pallet_market::Markets::<Runtime>::get(market)?;
+        let component = if matches!(book.kind, BookKind::Baseline { .. }) {
+            &mut baseline_live
+        } else {
+            &mut proposal_live
+        };
+        *component = component.checked_add(amount)?;
+    }
+    // Besides its live books, the dedicated line is standing funding: it must
+    // retain the live-Params capacity to seed the next epoch's mandatory
+    // Baseline book, even when the current epoch has no proposals (08 §4.3).
     let standing_baseline =
         pallet_market::core_market::seed_headroom(crate::configs::balance_param(b"pol.b_baseline"))
             .ok()?;
@@ -191,12 +204,12 @@ pub fn pol() -> Option<BoundedVec<PolTelemetry, MAX_POL_TELEMETRY_ROWS>> {
         PolTelemetry {
             component: PolComponent::Pol,
             effective_pol_usdc: FutarchyTreasury::line_balance(BudgetLine::Pol),
-            pol_floor_usdc: live_commitments,
+            pol_floor_usdc: proposal_live,
         },
         PolTelemetry {
             component: PolComponent::Baseline,
             effective_pol_usdc: FutarchyTreasury::line_balance(BudgetLine::PolBaseline),
-            pol_floor_usdc: standing_baseline,
+            pol_floor_usdc: baseline_live.checked_add(standing_baseline)?,
         },
     ])
     .ok()

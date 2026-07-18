@@ -408,22 +408,20 @@ fn telemetry_mid_window_coverage_projects_only_active_unsealed_windows() -> Resu
 #[test]
 fn telemetry_pol_compares_each_line_with_only_its_matching_requirement() -> Result<(), &'static str>
 {
+    use futarchy_primitives::Branch;
     use futarchy_runtime_api::PolComponent;
     use pallet_futarchy_treasury::BudgetLine;
+    use pallet_market::core_market::{BookKind, MarketBook};
 
     tests::development_ext().execute_with(|| {
+        let proposal_b = crate::configs::balance_param(b"pol.b.param");
+        let baseline_b = crate::configs::balance_param(b"pol.b_baseline");
         let proposal_headroom = required(
-            pallet_market::core_market::seed_headroom(crate::configs::balance_param(
-                b"pol.b.param",
-            ))
-            .ok(),
+            pallet_market::core_market::seed_headroom(proposal_b).ok(),
             "live proposal b must admit a seed bound",
         )?;
         let baseline_headroom = required(
-            pallet_market::core_market::seed_headroom(crate::configs::balance_param(
-                b"pol.b_baseline",
-            ))
-            .ok(),
+            pallet_market::core_market::seed_headroom(baseline_b).ok(),
             "live Baseline b must admit a seed bound",
         )?;
         let pol_funding = proposal_headroom.saturating_add(19);
@@ -437,8 +435,38 @@ fn telemetry_pol_compares_each_line_with_only_its_matching_requirement() -> Resu
                 (BudgetLine::PolBaseline, baseline_funding),
             ]);
             state.lines = BoundedVec::truncate_from(lines);
-            state.pol_commitments = BoundedVec::truncate_from(vec![proposal_headroom]);
         });
+
+        // One live proposal book and one live Baseline book: the floors must
+        // split by book kind, never pooling Baseline obligations into `POL`.
+        let account = |seed: u8| crate::AccountId::from([seed; 32]);
+        pallet_market::Markets::<Runtime>::insert(
+            1,
+            MarketBook::open(
+                1,
+                BookKind::Decision {
+                    proposal: 1,
+                    branch: Branch::Accept,
+                },
+                account(1),
+                account(2),
+                proposal_b,
+            ),
+        );
+        pallet_market::Markets::<Runtime>::insert(
+            2,
+            MarketBook::open(
+                2,
+                BookKind::Baseline { epoch: 1 },
+                account(3),
+                account(4),
+                baseline_b,
+            ),
+        );
+        pallet_market::LivePolCommitments::<Runtime>::put(BoundedVec::truncate_from(vec![
+            (1, proposal_headroom),
+            (2, baseline_headroom),
+        ]));
 
         let rows = required(
             crate::telemetry::pol(),
@@ -457,15 +485,54 @@ fn telemetry_pol_compares_each_line_with_only_its_matching_requirement() -> Resu
             "Baseline component must be present",
         )?;
         assert_eq!(baseline.effective_pol_usdc, baseline_funding);
-        assert_eq!(baseline.pol_floor_usdc, baseline_headroom);
+        assert_eq!(
+            baseline.pol_floor_usdc,
+            baseline_headroom.saturating_add(baseline_headroom),
+            "Baseline floor must carry its live obligation plus next-epoch headroom"
+        );
 
-        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
-            state.pol_commitments =
-                BoundedVec::truncate_from(vec![Balance::MAX, proposal_headroom]);
-        });
+        // Overflowing live obligations must fail closed, not publish a
+        // truncated floor — in both the per-kind commitment sum and the
+        // Baseline standing-headroom addition.
+        pallet_market::Markets::<Runtime>::insert(
+            3,
+            MarketBook::open(
+                3,
+                BookKind::Decision {
+                    proposal: 2,
+                    branch: Branch::Reject,
+                },
+                account(5),
+                account(6),
+                proposal_b,
+            ),
+        );
+        pallet_market::LivePolCommitments::<Runtime>::put(BoundedVec::truncate_from(vec![
+            (1, Balance::MAX),
+            (3, proposal_headroom),
+        ]));
         assert!(
             crate::telemetry::pol().is_none(),
-            "commitment overflow must fail closed"
+            "proposal commitment overflow must fail closed"
+        );
+        pallet_market::LivePolCommitments::<Runtime>::put(BoundedVec::truncate_from(vec![(
+            2,
+            Balance::MAX,
+        )]));
+        assert!(
+            crate::telemetry::pol().is_none(),
+            "Baseline floor overflow must fail closed"
+        );
+
+        // A commitment whose backing book is gone is a collection failure: the
+        // family degrades absent per 12 §6.3.
+        pallet_market::LivePolCommitments::<Runtime>::put(BoundedVec::truncate_from(vec![(
+            7,
+            proposal_headroom,
+        )]));
+        assert!(
+            crate::telemetry::pol().is_none(),
+            "an unbacked commitment must fail closed"
         );
         Ok(())
     })
