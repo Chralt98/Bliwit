@@ -1861,28 +1861,10 @@ pub mod pallet {
                 Error::<T>::TryStateViolation
             );
 
-            // L-2: sovereign USDC covers all escrow plus held deposits (checked — an
-            // overflow is itself a conservation violation, never masked by saturation).
-            let mut escrow: Balance = 0;
-            for v in st.vaults.iter() {
-                escrow = escrow
-                    .checked_add(v.info.escrowed)
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
-            }
-            for v in st.baseline_vaults.iter() {
-                escrow = escrow
-                    .checked_add(v.info.escrowed)
-                    .ok_or(Error::<T>::ArithmeticOverflow)?;
-            }
-            let held = DepositsHeld::<T>::get();
-            let bal = <T::Collateral as fungibles::Inspect<T::AccountId>>::balance(
-                Self::usdc(),
-                &Self::account_id(),
-            );
-            let liability = escrow
-                .checked_add(held)
-                .ok_or(Error::<T>::ArithmeticOverflow)?;
-            ensure!(liability <= bal, Error::<T>::TryStateViolation);
+            // L-2: sovereign USDC covers all escrow plus held deposits. The
+            // helper is the single checked definition shared with telemetry.
+            let (custody, liability) = Self::collateral_totals()?;
+            ensure!(liability <= custody, Error::<T>::TryStateViolation);
             Ok(())
         }
     }

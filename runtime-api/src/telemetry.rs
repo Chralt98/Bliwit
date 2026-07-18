@@ -14,7 +14,10 @@ pub const MAX_STORAGE_UTILIZATION_ROWS: u32 = bounds::MAX_METERS;
 /// Stable snake-case map names are deliberately short and bounded.
 pub const MAX_STORAGE_NAME_BYTES: u32 = 48;
 /// Every live market may carry eight overlapping registered windows.
-pub const MAX_WINDOW_COVERAGE_ROWS: u32 = bounds::MAX_LIVE_MARKETS * 8;
+pub const MAX_WINDOW_COVERAGE_ROWS: u32 =
+    bounds::MAX_LIVE_MARKETS * bounds::MAX_TWAP_WINDOWS_PER_MARKET;
+/// The POL telemetry view has one row for each independently funded component.
+pub const MAX_POL_TELEMETRY_ROWS: u32 = 2;
 
 /// Audited maker-loss state for one live LMSR book.
 #[derive(
@@ -39,11 +42,30 @@ pub struct WindowCoverageTelemetry {
     pub coverage_percent: u8,
 }
 
-/// Effective POL funding and its matching live requirement.
+/// Independently funded POL components (SQ-266).
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub enum PolComponent {
+    Pol,
+    Baseline,
+}
+
+/// Effective funding and matching floor for one POL component.
 #[derive(
     Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
 )]
 pub struct PolTelemetry {
+    pub component: PolComponent,
     pub effective_pol_usdc: Balance,
     pub pol_floor_usdc: Balance,
 }
@@ -76,8 +98,8 @@ sp_api::decl_runtime_apis! {
         fn market_books() -> Option<BoundedVec<MarketTelemetry, { bounds::MAX_LIVE_MARKETS }>>;
         /// Every currently active, unsealed decision window.
         fn mid_window_coverage() -> Option<BoundedVec<WindowCoverageTelemetry, MAX_WINDOW_COVERAGE_ROWS>>;
-        /// Combined POL/POL_BASELINE funding versus live obligations and standing Baseline capacity.
-        fn pol() -> Option<PolTelemetry>;
+        /// POL and Baseline funding compared independently to their matching requirements.
+        fn pol() -> Option<BoundedVec<PolTelemetry, MAX_POL_TELEMETRY_ROWS>>;
         /// Ledger L-2 custody and liability, plus the anomalous positive residue component.
         fn collateral() -> Option<CollateralTelemetry>;
         /// Canonical PB-MIGRATION cursor-stall detector state.

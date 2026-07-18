@@ -58,7 +58,7 @@ class CoverageCheckerTests(unittest.TestCase):
         failures, rows, inventory = checker.validate(ROOT)
         self.assertEqual(failures, [])
         self.assertEqual(len(rows), 20)
-        self.assertEqual(len(inventory), 31)
+        self.assertEqual(len(inventory), 32)
 
     def test_strict_extractor_rejects_table_header_drift(self) -> None:
         document = (ROOT / "docs" / "architecture" / "12-release-and-operations.md").read_text(encoding="utf-8")

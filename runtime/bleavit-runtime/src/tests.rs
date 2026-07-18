@@ -3623,62 +3623,138 @@ fn coretime_authority_quote_and_keeper_execution_use_live_conversion() {
     });
 }
 
-#[test]
-fn coretime_liveness_calls_dispatch_while_dead_man_freeze_is_active() {
+fn assert_coretime_liveness_calls_dispatch_during(
+    period_index: u32,
+    activate_degraded_state: impl FnOnce(),
+) {
     use crate::configs::take_test_coretime_renewals;
     use pallet_futarchy_treasury::BudgetLine;
 
+    let authority = AccountId::new(crate::genesis::ALICE_PUBLIC);
+    let line_funding = 10 * currency::USDC;
+    pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+        state.main_usdc = line_funding;
+    });
+    assert_ok!(FutarchyTreasury::fund_budget_line(
+        pallet_origins::Origin::FutarchyTreasury.into(),
+        BudgetLine::OpsCoretime,
+        line_funding,
+    ));
+
+    activate_degraded_state();
+
+    let note = RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::note_coretime_quote {
+        period_index,
+        price: 1,
+    });
+    let prune =
+        RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::prune_coretime_quote {
+            period_index,
+        });
+    let execute =
+        RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::execute_coretime_renewal {
+            period_index,
+        });
+    assert!(RuntimeBaseCallFilter::contains(&note));
+    assert!(RuntimeBaseCallFilter::contains(&prune));
+    assert!(RuntimeBaseCallFilter::contains(&execute));
+
+    assert_ok!(note.dispatch(RuntimeOrigin::signed(authority.clone())));
+    assert_ok!(prune.dispatch(RuntimeOrigin::signed(authority.clone())));
+    assert_ok!(RuntimeCall::FutarchyTreasury(
+        pallet_futarchy_treasury::Call::note_coretime_quote {
+            period_index,
+            price: 1,
+        }
+    )
+    .dispatch(RuntimeOrigin::signed(authority)));
+    let _ = take_test_coretime_renewals();
+    assert_ok!(execute.dispatch(RuntimeOrigin::signed(account(208))));
+    assert_eq!(take_test_coretime_renewals(), vec![(period_index, 1)]);
+}
+
+#[test]
+fn coretime_liveness_calls_dispatch_while_dead_man_freeze_is_active() {
     development_ext().execute_with(|| {
-        let authority = AccountId::new(crate::genesis::ALICE_PUBLIC);
-        let line_funding = 10 * currency::USDC;
-        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
-            state.main_usdc = line_funding;
+        assert_coretime_liveness_calls_dispatch_during(88, || {
+            assert_ok!(Constitution::note_dead_man_engaged(true));
+            assert_ne!(
+                Constitution::phase_flags()
+                    & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED,
+                0
+            );
         });
-        assert_ok!(FutarchyTreasury::fund_budget_line(
-            pallet_origins::Origin::FutarchyTreasury.into(),
-            BudgetLine::OpsCoretime,
-            line_funding,
-        ));
-        pallet_constitution::PhaseFlags::<Runtime>::mutate(|flags| {
-            *flags |= pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED;
+    });
+}
+
+#[test]
+fn coretime_liveness_calls_dispatch_while_hard_gate_suspension_is_active() {
+    use pallet_execution_guard::GuardianState;
+    use pallet_guardian::GuardianEffectDispatcher;
+
+    development_ext().execute_with(|| {
+        assert_coretime_liveness_calls_dispatch_during(89, || {
+            System::set_block_number(10);
+            let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+            pallet_welfare::GateBreachFlags::<Runtime>::insert(
+                epoch,
+                pallet_welfare::CoreGateBreachFlags {
+                    s_breached: true,
+                    c_breached: false,
+                    day_bitmap: [1, 0],
+                },
+            );
+            assert_ok!(crate::configs::RuntimeGuardianEffects::dispatch(
+                pallet_guardian::GuardianPower::SuspendOnGate,
+                H256::zero().into(),
+            ));
+            assert!(crate::configs::RuntimeGuardianState::gate_suspended());
         });
+    });
+}
 
-        let note =
-            RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::note_coretime_quote {
-                period_index: 88,
-                price: 1,
-            });
-        let prune =
-            RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::prune_coretime_quote {
-                period_index: 88,
-            });
-        let execute = RuntimeCall::FutarchyTreasury(
-            pallet_futarchy_treasury::Call::execute_coretime_renewal { period_index: 88 },
-        );
-        assert!(RuntimeBaseCallFilter::contains(&note));
-        assert!(RuntimeBaseCallFilter::contains(&prune));
-        assert!(RuntimeBaseCallFilter::contains(&execute));
+#[test]
+fn coretime_liveness_calls_dispatch_while_ledger_freeze_playbook_is_active() {
+    use pallet_guardian::GuardianEffectDispatcher;
 
-        assert_ok!(FutarchyTreasury::note_coretime_quote(
-            RuntimeOrigin::signed(authority.clone()),
-            88,
-            1,
-        ));
-        assert_ok!(FutarchyTreasury::prune_coretime_quote(
-            RuntimeOrigin::signed(authority.clone()),
-            88,
-        ));
-        assert_ok!(FutarchyTreasury::note_coretime_quote(
-            RuntimeOrigin::signed(authority),
-            88,
-            1,
-        ));
-        let _ = take_test_coretime_renewals();
-        assert_ok!(FutarchyTreasury::execute_coretime_renewal(
-            RuntimeOrigin::signed(account(208)),
-            88,
-        ));
-        assert_eq!(take_test_coretime_renewals(), vec![(88, 1)]);
+    development_ext().execute_with(|| {
+        assert_coretime_liveness_calls_dispatch_during(90, || {
+            System::set_block_number(10);
+            assert_ok!(crate::configs::RuntimeGuardianEffects::dispatch(
+                pallet_guardian::GuardianPower::ActivatePlaybook {
+                    id: pallet_guardian::PlaybookId::LedgerFreeze,
+                    trigger: pallet_guardian::PlaybookTrigger::LedgerDrift,
+                    expiry: 20,
+                    target: None,
+                },
+                H256::repeat_byte(180).into(),
+            ));
+            pallet_guardian::ActivePlaybooks::<Runtime>::mutate(|active| {
+                assert!(active
+                    .try_push(pallet_guardian::ActivePlaybook {
+                        id: pallet_guardian::PlaybookId::LedgerFreeze,
+                        expiry: 20,
+                        renewals_used: 0,
+                    })
+                    .is_ok());
+            });
+            assert!(Guardian::playbook_active(
+                pallet_guardian::PlaybookId::LedgerFreeze
+            ));
+            assert!(pallet_conditional_ledger::FrozenUntil::<Runtime>::get().is_some());
+            assert!(pallet_market::FrozenUntil::<Runtime>::get().is_some());
+        });
+    });
+}
+
+#[test]
+fn coretime_liveness_calls_dispatch_while_reserve_health_flag_is_set() {
+    development_ext().execute_with(|| {
+        assert_coretime_liveness_calls_dispatch_during(91, || {
+            FutarchyTreasury::set_reserve_impaired(true);
+            assert!(FutarchyTreasury::treasury().reserve_impaired);
+            assert_eq!(FutarchyTreasury::nav().spendable_nav, 0);
+        });
     });
 }
 

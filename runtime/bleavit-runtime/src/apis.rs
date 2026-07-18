@@ -154,7 +154,10 @@ impl_runtime_apis! {
             crate::telemetry::mid_window_coverage()
         }
 
-        fn pol() -> Option<futarchy_runtime_api::PolTelemetry> {
+        fn pol() -> Option<futarchy_primitives::BoundedVec<
+            futarchy_runtime_api::PolTelemetry,
+            { futarchy_runtime_api::MAX_POL_TELEMETRY_ROWS },
+        >> {
             crate::telemetry::pol()
         }
 

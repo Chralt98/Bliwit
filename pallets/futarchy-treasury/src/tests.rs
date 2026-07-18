@@ -903,6 +903,16 @@ fn coretime_quote_authority_can_note_supersede_and_rotate() {
 #[test]
 fn coretime_prune_enforces_strict_ttl_but_authority_may_prune_early() {
     funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Keeper,
+            100 * USDC
+        ));
+        KeeperBudgetEpoch::set(100 * USDC);
+        KeeperRebate::set(10 * USDC);
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::Keeper, 100 * USDC);
+
         assert_ok!(note_quote(50, 10));
         System::set_block_number(101); // age == ttl is still fresh.
         assert_noop!(
@@ -914,6 +924,11 @@ fn coretime_prune_enforces_strict_ttl_but_authority_may_prune_early() {
             RuntimeOrigin::signed(acc(7)),
             50
         ));
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 10 * USDC, PayoutLine::Keeper)]
+        );
+        assert_eq!(Treasury::treasury().keeper_meter.general_spent, 10 * USDC);
         assert_noop!(
             Treasury::execute_coretime_renewal(RuntimeOrigin::signed(acc(7)), 50),
             Error::<Test>::RenewalWindowClosed
@@ -925,6 +940,12 @@ fn coretime_prune_enforces_strict_ttl_but_authority_may_prune_early() {
             RuntimeOrigin::signed(coretime_quote_authority()),
             51,
         ));
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 10 * USDC, PayoutLine::Keeper)],
+            "the quote authority's anytime prune is not keeper-cranked"
+        );
+        assert_eq!(Treasury::treasury().keeper_meter.general_spent, 10 * USDC);
 
         assert_ok!(note_quote(52, 10));
         CoretimeQuoteTtl::set(0);
@@ -936,6 +957,10 @@ fn coretime_prune_enforces_strict_ttl_but_authority_may_prune_early() {
             RuntimeOrigin::signed(coretime_quote_authority()),
             52,
         ));
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 10 * USDC, PayoutLine::Keeper)]
+        );
     });
 }
 

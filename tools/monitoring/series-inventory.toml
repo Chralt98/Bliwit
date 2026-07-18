@@ -74,6 +74,10 @@ name = "bleavit_runtime_storage_max_utilization_ratio"
 source = "chain-exporter"
 
 [[series]]
+name = "bleavit_runtime_lmsr_domain_rejections_total"
+source = "chain-exporter"
+
+[[series]]
 name = "bleavit_runtime_numeric_anomaly_spike"
 source = "chain-exporter"
 

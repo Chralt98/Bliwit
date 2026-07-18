@@ -820,6 +820,9 @@ pub mod bounds {
     pub const MAX_LIVE_MARKETS: u32 = 196;
     pub const BOOKS_PER_PROPOSAL: u32 = 6;
     pub const BASELINE_BOOKS: u32 = 4;
+    /// Maximum TWAP checkpoints and registered decision windows per market
+    /// (13 §4). Shared by market storage and the monitoring API row bound.
+    pub const MAX_TWAP_WINDOWS_PER_MARKET: u32 = 8;
     /// 13 §4: `pallet-migrations` may consume at most half the block service
     /// weight while a multi-block migration is active.
     pub const MIGRATION_SERVICE_WEIGHT_PERCENT: u32 = 50;
@@ -853,6 +856,10 @@ pub mod chain_identity {
     pub const ASSET_HUB_PARA_ID: u32 = 1000;
     /// Coretime chain (broker), sibling parachain id — renewal funding target (09 §4).
     pub const CORETIME_PARA_ID: u32 = 1005;
+    /// Relay-native DOT decimal places (02 §8 chain identity).
+    pub const DOT_DECIMALS: u8 = 10;
+    /// One whole DOT in planck, derived from [`DOT_DECIMALS`].
+    pub const DOT_PLANCKS_PER_DOT: u128 = 10_u128.pow(DOT_DECIMALS as u32);
     /// `PalletInstance` of `pallet-assets` on Asset Hub holding USDC (D-17).
     pub const USDC_PALLET_INSTANCE: u8 = 50;
     /// USDC asset index on Asset Hub (D-17; verified Circle-native id, 2026-07-16).

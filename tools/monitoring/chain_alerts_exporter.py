@@ -75,12 +75,13 @@ SERIES: dict[str, SeriesDefinition] = {
         _series("bleavit_market_book_loss_usdc", "gauge", "Realized maker inventory loss in USDC base units.", "market"),
         _series("bleavit_market_lmsr_loss_bound_usdc", "gauge", "Canonical seed_headroom(b) loss bound in USDC base units.", "market"),
         _series("bleavit_market_mid_window_coverage_percent", "gauge", "Projected scheduled-observation coverage for an active unsealed decision window.", "market", "start", "end"),
-        _series("bleavit_market_effective_pol_usdc", "gauge", "Funded POL plus POL_BASELINE line balances in USDC base units."),
-        _series("bleavit_market_pol_floor_usdc", "gauge", "Live book commitments plus standing next-Baseline requirement in USDC base units."),
+        _series("bleavit_market_effective_pol_usdc", "gauge", "Funded balance for one independently accounted POL component in USDC base units.", "component"),
+        _series("bleavit_market_pol_floor_usdc", "gauge", "Matching requirement for one independently accounted POL component in USDC base units.", "component"),
         _series("bleavit_ledger_collateral_drift_usdc", "gauge", "Signed ledger custody minus audited L-2 liability in USDC base units."),
         _series("bleavit_runtime_migration_cursor_stalled", "gauge", "Canonical migration halt/live-stall detector state."),
         _series("bleavit_runtime_storage_max_utilization_ratio", "gauge", "Occupancy ratio for a metadata-invisible bounded storage shape.", "map"),
-        _series("bleavit_runtime_numeric_anomaly_spike", "gauge", "Per-finalized-block LMSR domain rejections or anomalous positive ledger residue.", "kind"),
+        _series("bleavit_runtime_lmsr_domain_rejections_total", "counter", "Finalized Market.PriceBoundExceeded extrinsic failures resolved from live metadata."),
+        _series("bleavit_runtime_numeric_anomaly_spike", "gauge", "Anomalous positive ledger rounding residue.", "kind"),
         _series("bleavit_chain_keeper_budget_limit", "gauge", "Live keeper.budget Param value in chain balance base units."),
         _series("bleavit_chain_keeper_budget_spent", "gauge", "Current-epoch keeper meter spend in chain balance base units."),
         _series("bleavit_chain_keeper_budget_utilization_ratio", "gauge", "Current keeper spend divided by the live keeper.budget Param."),
@@ -127,10 +128,9 @@ EVENT_FAMILIES = (
     "bleavit_chain_upgrade_authorized_total",
     "bleavit_chain_upgrade_applied_total",
     "bleavit_chain_keeper_budget_low_events_total",
+    "bleavit_runtime_lmsr_domain_rejections_total",
 )
-FINALIZED_EVENT_FAMILIES = EVENT_FAMILIES + (
-    "bleavit_runtime_numeric_anomaly_spike",
-)
+FINALIZED_EVENT_FAMILIES = EVENT_FAMILIES
 FULL_DOMAIN_FAMILIES = {
     "epoch": (
         "bleavit_chain_epoch_index",
@@ -249,14 +249,10 @@ class ChainExporter:
         self.previous_security: bool | None = None
         self.security_flips_total = 0
         self.event_totals = {name: 0 for name in EVENT_FAMILIES}
-        self.domain_rejections: int | None = 0
         self.store.set("bleavit_chain_connected", 1)
         for counter in (
             "bleavit_chain_scrape_errors_total",
-            "bleavit_chain_guardian_actions_total",
-            "bleavit_chain_upgrade_authorized_total",
-            "bleavit_chain_upgrade_applied_total",
-            "bleavit_chain_keeper_budget_low_events_total",
+            *EVENT_FAMILIES,
             "bleavit_chain_release_channel_security_flips_total",
         ):
             self.store.set(counter, 0)
@@ -444,13 +440,11 @@ class ChainExporter:
     def _events(self, block_hash: str, block: int) -> None:
         if self.last_event_block is not None and block <= self.last_event_block:
             return
-        self.domain_rejections = None
         records = self._storage("System", "Events", block_hash)
         if not isinstance(records, list):
             raise MonitoringError("System.Events did not decode to a sequence")
         observed = {name: 0 for name in EVENT_FAMILIES}
         price_bound_identity = self._price_bound_error_identity()
-        domain_rejections = 0
         for record in records:
             pallet, event = _runtime_event_names(record)
             if (pallet, event) == ("Guardian", "GuardianAction"):
@@ -465,20 +459,11 @@ class ChainExporter:
                 record, price_bound_identity
             ):
                 # Failed extrinsics roll back pallet storage, so this finalized
-                # event stream is the only auditable per-block rejection source.
-                domain_rejections += 1
+                # event stream is the only auditable rejection source.
+                observed["bleavit_runtime_lmsr_domain_rejections_total"] += 1
         for name, count in observed.items():
             self.event_totals[name] += count
             self.store.set(name, self.event_totals[name])
-        self.domain_rejections = domain_rejections
-        # Unlike the full telemetry domains, finalized events are processed on
-        # every head (including bounded catch-up). Publish this per-block gauge
-        # here so a rejection in a non-full block is not silently skipped.
-        self.store.set(
-            "bleavit_runtime_numeric_anomaly_spike",
-            domain_rejections,
-            {"kind": "domain_rejection"},
-        )
         self.last_event_block = block
 
     def _block_hash(self, block: int) -> str:
@@ -700,19 +685,33 @@ class ChainExporter:
             )
 
     def _pol(self, block_hash: str) -> None:
-        value = _required_some(
+        rows = _required_some(
             self._telemetry_api("pol", block_hash), "TelemetryApi.pol"
         )
-        if not isinstance(value, dict):
-            raise MonitoringError("TelemetryApi.pol is not a struct")
-        self.store.set(
-            "bleavit_market_effective_pol_usdc",
-            _integer_field(value, "effective_pol_usdc", "TelemetryApi.pol"),
-        )
-        self.store.set(
-            "bleavit_market_pol_floor_usdc",
-            _integer_field(value, "pol_floor_usdc", "TelemetryApi.pol"),
-        )
+        if not isinstance(rows, list):
+            raise MonitoringError("TelemetryApi.pol is not a sequence")
+        components: dict[str, tuple[int, int]] = {}
+        names = {"Pol": "pol", "Baseline": "baseline"}
+        for row in rows:
+            if not isinstance(row, dict):
+                raise MonitoringError("TelemetryApi.pol row is not a struct")
+            component = names.get(variant_name(row.get("component")))
+            if component is None:
+                raise MonitoringError("TelemetryApi.pol row has an unknown component")
+            if component in components:
+                raise MonitoringError("TelemetryApi.pol contains a duplicate component")
+            components[component] = (
+                _integer_field(row, "effective_pol_usdc", "TelemetryApi.pol row"),
+                _integer_field(row, "pol_floor_usdc", "TelemetryApi.pol row"),
+            )
+        if set(components) != {"pol", "baseline"}:
+            raise MonitoringError("TelemetryApi.pol must contain both components")
+        self.store.clear_family("bleavit_market_effective_pol_usdc")
+        self.store.clear_family("bleavit_market_pol_floor_usdc")
+        for component, (effective, floor) in components.items():
+            labels = {"component": component}
+            self.store.set("bleavit_market_effective_pol_usdc", effective, labels)
+            self.store.set("bleavit_market_pol_floor_usdc", floor, labels)
 
     def _collateral(self, block_hash: str) -> None:
         value = _required_some(
@@ -759,8 +758,6 @@ class ChainExporter:
             )
 
     def _numeric_anomalies(self, block_hash: str) -> None:
-        if self.domain_rejections is None:
-            raise MonitoringError("finalized event rejection count is unavailable")
         value = _required_some(
             self._telemetry_api("collateral", block_hash),
             "TelemetryApi.collateral",
@@ -773,11 +770,6 @@ class ChainExporter:
             "TelemetryApi.collateral",
         )
         self.store.clear_family("bleavit_runtime_numeric_anomaly_spike")
-        self.store.set(
-            "bleavit_runtime_numeric_anomaly_spike",
-            self.domain_rejections,
-            {"kind": "domain_rejection"},
-        )
         self.store.set(
             "bleavit_runtime_numeric_anomaly_spike",
             dust,

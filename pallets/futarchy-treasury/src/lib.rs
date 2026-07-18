@@ -236,7 +236,7 @@ pub mod pallet {
     };
 
     /// The in-code storage version of this pallet.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -697,7 +697,9 @@ pub mod pallet {
                     authority,
                 )
             })?;
-            Self::do_keeper_rebate(&who, CrankClass::General);
+            if !authority {
+                Self::do_keeper_rebate(&who, CrankClass::General);
+            }
             Ok(())
         }
 

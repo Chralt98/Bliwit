@@ -55,7 +55,20 @@ class TelemetryExporterTests(unittest.TestCase):
                     }
                 ]
             ),
-            "pol": some({"effective_pol_usdc": 17, "pol_floor_usdc": 19}),
+            "pol": some(
+                [
+                    {
+                        "component": {"variant": "Pol", "index": 0},
+                        "effective_pol_usdc": 17,
+                        "pol_floor_usdc": 19,
+                    },
+                    {
+                        "component": {"variant": "Baseline", "index": 1},
+                        "effective_pol_usdc": 23,
+                        "pol_floor_usdc": 29,
+                    },
+                ]
+            ),
             "collateral": some(
                 {
                     "custody_usdc": 23,
@@ -84,7 +97,6 @@ class TelemetryExporterTests(unittest.TestCase):
         exporter._collateral("0x01")
         exporter._migration_stall("0x01")
         exporter._storage_remainder("0x01")
-        exporter.domain_rejections = 4
         exporter._numeric_anomalies("0x01")
 
         market_labels = (("market", "7"),)
@@ -98,8 +110,20 @@ class TelemetryExporterTests(unittest.TestCase):
             samples(exporter, "bleavit_market_mid_window_coverage_percent"),
             {window_labels: 95},
         )
-        self.assertEqual(samples(exporter, "bleavit_market_effective_pol_usdc"), {(): 17})
-        self.assertEqual(samples(exporter, "bleavit_market_pol_floor_usdc"), {(): 19})
+        self.assertEqual(
+            samples(exporter, "bleavit_market_effective_pol_usdc"),
+            {
+                (("component", "pol"),): 17,
+                (("component", "baseline"),): 23,
+            },
+        )
+        self.assertEqual(
+            samples(exporter, "bleavit_market_pol_floor_usdc"),
+            {
+                (("component", "pol"),): 19,
+                (("component", "baseline"),): 29,
+            },
+        )
         self.assertEqual(samples(exporter, "bleavit_ledger_collateral_drift_usdc"), {(): 2})
         self.assertEqual(samples(exporter, "bleavit_runtime_migration_cursor_stalled"), {(): 1})
         self.assertEqual(
@@ -108,10 +132,7 @@ class TelemetryExporterTests(unittest.TestCase):
         )
         self.assertEqual(
             samples(exporter, "bleavit_runtime_numeric_anomaly_spike"),
-            {
-                (("kind", "domain_rejection"),): 4,
-                (("kind", "rounding_dust"),): 2,
-            },
+            {(("kind", "rounding_dust"),): 2},
         )
 
     def test_domain_rejection_identity_is_resolved_from_live_metadata(self) -> None:
@@ -151,11 +172,18 @@ class TelemetryExporterTests(unittest.TestCase):
 
         exporter._events("0x01", 7)
 
-        self.assertEqual(exporter.domain_rejections, 1)
         self.assertEqual(exporter.last_event_block, 7)
         self.assertEqual(
-            samples(exporter, "bleavit_runtime_numeric_anomaly_spike"),
-            {(("kind", "domain_rejection"),): 1},
+            samples(exporter, "bleavit_runtime_lmsr_domain_rejections_total"),
+            {(): 1},
+        )
+
+        exporter._events("0x02", 8)
+
+        self.assertEqual(exporter.last_event_block, 8)
+        self.assertEqual(
+            samples(exporter, "bleavit_runtime_lmsr_domain_rejections_total"),
+            {(): 2},
         )
 
 

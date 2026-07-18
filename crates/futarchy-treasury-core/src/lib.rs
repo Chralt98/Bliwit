@@ -4,7 +4,10 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use futarchy_primitives::{AccountId, Balance, BlockNumber, EpochId, ProposalClass, H256};
+use futarchy_primitives::{
+    chain_identity::DOT_PLANCKS_PER_DOT, AccountId, Balance, BlockNumber, EpochId, ProposalClass,
+    H256,
+};
 use origins_core::Origin;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
@@ -33,8 +36,6 @@ pub const DAYS_365_BLOCKS: BlockNumber = 5_256_000;
 pub const KEEPER_BUDGET_EPOCH: Balance = 12_000 * USDC;
 pub const COLLATOR_COMP_EPOCH: Balance = 2_000 * USDC;
 pub const MAX_FUNDED_CORETIME_PERIODS: usize = 8;
-/// DOT has ten decimal places; renewal quotes and fee budgets are in planck.
-const DOT_PLANCKS_PER_DOT: Balance = 10_000_000_000;
 
 /// The two classes governed by the 08 §6.3 keeper meter. Oracle work is paid
 /// separately by [`Treasury::oracle_line_rebate`].

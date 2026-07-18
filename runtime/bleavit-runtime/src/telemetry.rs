@@ -12,9 +12,9 @@ use alloc::{vec, vec::Vec};
 use frame_support::traits::{fungibles::Inspect, Get};
 use futarchy_primitives::{bounds, Balance, BoundedVec, PositionId, PositionKind, ScalarSide};
 use futarchy_runtime_api::{
-    CollateralTelemetry, MarketTelemetry, PolTelemetry, StorageUtilizationTelemetry,
-    WindowCoverageTelemetry, MAX_STORAGE_NAME_BYTES, MAX_STORAGE_UTILIZATION_ROWS,
-    MAX_WINDOW_COVERAGE_ROWS,
+    CollateralTelemetry, MarketTelemetry, PolComponent, PolTelemetry, StorageUtilizationTelemetry,
+    WindowCoverageTelemetry, MAX_POL_TELEMETRY_ROWS, MAX_STORAGE_NAME_BYTES,
+    MAX_STORAGE_UTILIZATION_ROWS, MAX_WINDOW_COVERAGE_ROWS,
 };
 use pallet_futarchy_treasury::BudgetLine;
 use pallet_market::core_market::{BookKind, MarketBook};
@@ -86,7 +86,6 @@ fn book_positions(book: &MarketBook<crate::AccountId>) -> (PositionId, PositionI
 fn realized_book_loss(
     book: &MarketBook<crate::AccountId>,
     seed_capital: Balance,
-    bound: Balance,
 ) -> Option<Balance> {
     let (long, short) = book_positions(book);
     let retained_sets =
@@ -102,7 +101,7 @@ fn realized_book_loss(
         (seed_capital, retained_sets)
     };
     let loss = capital.checked_sub(retained).unwrap_or_default();
-    (loss <= bound).then_some(loss)
+    Some(loss)
 }
 
 /// Per-live-book realized maker loss paired with the canonical LMSR bound.
@@ -112,26 +111,22 @@ pub fn market_books() -> Option<BoundedVec<MarketTelemetry, { bounds::MAX_LIVE_M
     // seeded books whose settlement obligation is still live. Closed-but-not-
     // settled books remain correctly visible; unseeded and terminal books do not.
     for (market, seed_capital) in pallet_market::LivePolCommitments::<Runtime>::get() {
+        // A missing backing book makes collection itself impossible, so the
+        // family degrades absent per 12 §6.3. Once a book is collected, no
+        // independently computable alert condition is allowed to suppress it.
         let book = pallet_market::Markets::<Runtime>::get(market)?;
-        let bound = pallet_market::core_market::seed_headroom(book.b).ok()?;
-        let expected_seed_capital =
-            if pallet_market::RerunSeededMarkets::<Runtime>::contains_key(market) {
-                let original_b = book.b.checked_div(2)?;
-                pallet_market::core_market::seed_headroom(original_b)
-                    .ok()?
-                    .checked_mul(2)?
-            } else {
-                bound
-            };
-        if seed_capital != expected_seed_capital
-            || !pallet_market::SeededMarkets::<Runtime>::contains_key(market)
-            || pallet_market::SettlementObservedAt::<Runtime>::contains_key(market)
-        {
-            return None;
-        }
+        let bound = match pallet_market::core_market::seed_headroom(book.b) {
+            Ok(bound) => bound,
+            Err(_) => continue,
+        };
+        let Some(book_loss_usdc) = realized_book_loss(&book, seed_capital) else {
+            // Arithmetic impossibility excludes only this row. Other live
+            // books remain observable; computed alert conditions never do.
+            continue;
+        };
         rows.try_push(MarketTelemetry {
             market,
-            book_loss_usdc: realized_book_loss(&book, seed_capital, bound)?,
+            book_loss_usdc,
             lmsr_loss_bound_usdc: bound,
         })
         .ok()?;
@@ -178,10 +173,8 @@ pub fn mid_window_coverage() -> Option<BoundedVec<WindowCoverageTelemetry, MAX_W
     BoundedVec::try_from(rows).ok()
 }
 
-/// Combined POL funding versus live obligations plus one standing Baseline seed.
-pub fn pol() -> Option<PolTelemetry> {
-    let effective_pol_usdc = FutarchyTreasury::line_balance(BudgetLine::Pol)
-        .checked_add(FutarchyTreasury::line_balance(BudgetLine::PolBaseline))?;
+/// Independently funded POL components and their matching requirements.
+pub fn pol() -> Option<BoundedVec<PolTelemetry, MAX_POL_TELEMETRY_ROWS>> {
     let treasury = FutarchyTreasury::treasury();
     let live_commitments = treasury
         .pol_commitments
@@ -194,10 +187,19 @@ pub fn pol() -> Option<PolTelemetry> {
     let standing_baseline =
         pallet_market::core_market::seed_headroom(crate::configs::balance_param(b"pol.b_baseline"))
             .ok()?;
-    Some(PolTelemetry {
-        effective_pol_usdc,
-        pol_floor_usdc: live_commitments.checked_add(standing_baseline)?,
-    })
+    BoundedVec::try_from(vec![
+        PolTelemetry {
+            component: PolComponent::Pol,
+            effective_pol_usdc: FutarchyTreasury::line_balance(BudgetLine::Pol),
+            pol_floor_usdc: live_commitments,
+        },
+        PolTelemetry {
+            component: PolComponent::Baseline,
+            effective_pol_usdc: FutarchyTreasury::line_balance(BudgetLine::PolBaseline),
+            pol_floor_usdc: standing_baseline,
+        },
+    ])
+    .ok()
 }
 
 /// Ledger custody/liability totals from the pallet's L-2 helper.
@@ -224,7 +226,8 @@ pub fn migration_cursor_stalled() -> bool {
         Some(pallet_migrations::MigrationCursor::Active(cursor)) => {
             active_migration_stall_is_live(&cursor)
         }
-        Some(pallet_migrations::MigrationCursor::Stuck) | None => false,
+        Some(pallet_migrations::MigrationCursor::Stuck) => true,
+        None => false,
     };
     halt || live
 }

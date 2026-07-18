@@ -131,7 +131,12 @@ fn testnet_genesis(
                     b"USDC".to_vec(),
                     futarchy_primitives::currency::USDC_DECIMALS,
                 ),
-                (dot_location(), b"Polkadot".to_vec(), b"DOT".to_vec(), 10),
+                (
+                    dot_location(),
+                    b"Polkadot".to_vec(),
+                    b"DOT".to_vec(),
+                    futarchy_primitives::chain_identity::DOT_DECIMALS,
+                ),
             ],
             accounts: vec![],
             next_asset_id: None,

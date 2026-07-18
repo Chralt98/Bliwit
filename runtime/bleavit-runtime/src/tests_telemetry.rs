@@ -268,6 +268,60 @@ fn telemetry_market_book_loss_tracks_real_baseline_buy_and_sell_fee_custody(
 }
 
 #[test]
+fn telemetry_market_book_loss_emits_a_value_above_the_bound() -> Result<(), &'static str> {
+    tests::development_ext().execute_with(|| {
+        const MARKET: u64 = 49;
+        let b = crate::configs::balance_param(b"pol.b_baseline");
+        let bound = required(
+            pallet_market::core_market::seed_headroom(b).ok(),
+            "live Baseline b must admit a seed bound",
+        )?;
+        let mut book = MarketBook::open(
+            MARKET,
+            BookKind::Baseline { epoch: 10 },
+            tests::account(44),
+            tests::account(45),
+            b,
+        );
+        book.fees_accrued = 1;
+        pallet_market::Markets::<Runtime>::insert(MARKET, book);
+        let impossible_market = MARKET.saturating_sub(1);
+        pallet_market::Markets::<Runtime>::insert(
+            impossible_market,
+            MarketBook::open(
+                impossible_market,
+                BookKind::Baseline { epoch: 9 },
+                tests::account(42),
+                tests::account(43),
+                Balance::MAX,
+            ),
+        );
+        pallet_market::LivePolCommitments::<Runtime>::put(BoundedVec::truncate_from(vec![
+            (impossible_market, Balance::MAX),
+            (MARKET, bound),
+        ]));
+
+        let rows = required(
+            crate::telemetry::market_books(),
+            "a computed bound violation must remain observable",
+        )?;
+        assert_eq!(
+            rows.len(),
+            1,
+            "arithmetic impossibility must exclude only the affected row"
+        );
+        let row = required(
+            rows.iter().find(|row| row.market == MARKET),
+            "the violating book row must be present",
+        )?;
+        assert_eq!(row.book_loss_usdc, bound.saturating_add(1));
+        assert_eq!(row.lmsr_loss_bound_usdc, bound);
+        assert!(row.book_loss_usdc > row.lmsr_loss_bound_usdc);
+        Ok(())
+    })
+}
+
+#[test]
 fn telemetry_mid_window_coverage_projects_only_active_unsealed_windows() -> Result<(), &'static str>
 {
     tests::development_ext().execute_with(|| {
@@ -352,8 +406,9 @@ fn telemetry_mid_window_coverage_projects_only_active_unsealed_windows() -> Resu
 }
 
 #[test]
-fn telemetry_pol_pairs_live_line_funding_with_commitments_and_baseline_capacity(
-) -> Result<(), &'static str> {
+fn telemetry_pol_compares_each_line_with_only_its_matching_requirement() -> Result<(), &'static str>
+{
+    use futarchy_runtime_api::PolComponent;
     use pallet_futarchy_treasury::BudgetLine;
 
     tests::development_ext().execute_with(|| {
@@ -385,28 +440,32 @@ fn telemetry_pol_pairs_live_line_funding_with_commitments_and_baseline_capacity(
             state.pol_commitments = BoundedVec::truncate_from(vec![proposal_headroom]);
         });
 
-        let telemetry = required(
+        let rows = required(
             crate::telemetry::pol(),
             "bounded live POL accounting must produce telemetry",
         )?;
-        assert_eq!(
-            telemetry.effective_pol_usdc,
-            pol_funding.saturating_add(baseline_funding)
-        );
-        assert_eq!(
-            telemetry.pol_floor_usdc,
-            proposal_headroom.saturating_add(baseline_headroom)
-        );
+        assert_eq!(rows.len(), 2);
+        let pol = required(
+            rows.iter().find(|row| row.component == PolComponent::Pol),
+            "POL component must be present",
+        )?;
+        assert_eq!(pol.effective_pol_usdc, pol_funding);
+        assert_eq!(pol.pol_floor_usdc, proposal_headroom);
+        let baseline = required(
+            rows.iter()
+                .find(|row| row.component == PolComponent::Baseline),
+            "Baseline component must be present",
+        )?;
+        assert_eq!(baseline.effective_pol_usdc, baseline_funding);
+        assert_eq!(baseline.pol_floor_usdc, baseline_headroom);
 
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
-            state.lines = BoundedVec::truncate_from(vec![
-                (BudgetLine::Pol, Balance::MAX),
-                (BudgetLine::PolBaseline, 1),
-            ]);
+            state.pol_commitments =
+                BoundedVec::truncate_from(vec![Balance::MAX, proposal_headroom]);
         });
         assert!(
             crate::telemetry::pol().is_none(),
-            "effective-funding overflow must fail closed"
+            "commitment overflow must fail closed"
         );
         Ok(())
     })
@@ -476,6 +535,13 @@ fn telemetry_migration_stall_reports_latched_and_live_detector_states() -> Resul
 
     tests::development_ext().execute_with(|| {
         assert!(!crate::telemetry::migration_cursor_stalled());
+
+        pallet_migrations::Cursor::<Runtime>::put(pallet_migrations::MigrationCursor::Stuck);
+        assert!(
+            crate::telemetry::migration_cursor_stalled(),
+            "a failed/stuck migration cursor is part of the exported stall union"
+        );
+        pallet_migrations::Cursor::<Runtime>::kill();
 
         crate::configs::MigrationHaltSources::put(crate::configs::MIGRATION_STALL_HALT);
         assert!(crate::telemetry::migration_cursor_stalled());
