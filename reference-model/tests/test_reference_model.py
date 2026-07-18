@@ -663,6 +663,27 @@ class ReferenceModelTests(unittest.TestCase):
             security_sizing_ok(Decimal("1.000001"), Decimal("3"))
         )
 
+    def test_code_meta_nav_floor_is_scoped_to_upgrade_payloads(self):
+        inputs = {
+            "ask": Decimal("100"),
+            "envelope": Decimal("200"),
+            "spendable_nav": Decimal("10000"),
+        }
+        for proposal_class in ("Code", "Meta"):
+            with self.subTest(proposal_class=proposal_class):
+                self.assertEqual(
+                    in_cap_prize(proposal_class, **inputs),
+                    Decimal("500.000000"),
+                )
+                self.assertEqual(
+                    in_cap_prize(
+                        proposal_class,
+                        **inputs,
+                        upgrade_payload=False,
+                    ),
+                    Decimal("200.000000"),
+                )
+
     def test_pol_commitments_and_nav_floor_worked_numbers(self):
         commitment_cases = [
             (("Param", False), 13_863),

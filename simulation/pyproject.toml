@@ -1,0 +1,6 @@
+[project]
+name = "bleavit-simulation"
+version = "0.1.0"
+description = "Deterministic doc-15 Phase-0 economic calibration for Bleavit"
+requires-python = ">=3.10"
+dependencies = []

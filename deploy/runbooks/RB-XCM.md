@@ -78,8 +78,8 @@ requires an ownership-safe disposition and an auditable recovery record
    asset set, and trap hash against finalized state. Do not submit it in the
    shipped runtime: the base-call classifier treats every `claim_assets` call as
    TREASURY-domain and the empty `ExecuteXcmOrigin` converter also cannot convert
-   Signed, so the call fails closed. Record the self-keyed trap under SQ-231.
-2. After SQ-231 is wired, use only that Signed, self-scoped route for locally keyed
+   Signed, so the call fails closed. Record the self-keyed trap under SQ-233.
+2. After SQ-233 is wired, use only that Signed, self-scoped route for locally keyed
    user traps. It cannot reclaim a protocol- or remote-keyed trap, and changing the
    beneficiary cannot widen the claim origin.
 3. For a remote-origin trap, coordinate an inbound `ClaimAsset` program from that
@@ -98,7 +98,7 @@ requires an ownership-safe disposition and an auditable recovery record
    admitted by the runtime classifier, but `pallet_xcm::ExecuteXcmOrigin` is wired
    with the empty origin converter, so a `FutarchyTreasury`-origin dispatch fails
    closed with `BadOrigin`. Record the trap and exact claim inputs against the
-   logged SQ-231 wiring gap. The Signed self-scoped route above remains the
+   logged SQ-233 wiring gap. The Signed self-scoped route above remains the
    spec-mandated route only for self-keyed traps, but is likewise unavailable
    until the classifier and origin converter are wired consistently.
 2. When `Oracle::ReserveHealth` proves reserve impairment, page guardians for
