@@ -4989,7 +4989,7 @@ fn enact_passing_referendum(index: u32) {
 fn seed_guardian_delay_action(
     pid: futarchy_primitives::ProposalId,
     first_member_seed: u8,
-) -> ([AccountId; pallet_guardian::GUARDIAN_SEATS], u32, u32) {
+) -> Option<([AccountId; pallet_guardian::GUARDIAN_SEATS], u32, u32, u32)> {
     System::set_block_number(System::block_number().max(1));
     let members = core::array::from_fn(|index| account(first_member_seed + index as u8));
     for member in &members {
@@ -5003,16 +5003,55 @@ fn seed_guardian_delay_action(
         pallet_origins::Origin::ConstitutionalValues.into(),
         members.clone(),
     ));
-    let version_constraint = pallet_execution_guard::CurrentSpecName::<Runtime>::get()
-        .expect("guard genesis binds a runtime version");
+    let version_constraint = pallet_execution_guard::CurrentSpecName::<Runtime>::get()?;
+    let payload = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![
+        RuntimeCall::System(frame_system::Call::remark {
+            remark: b"guardian-delay-review".to_vec(),
+        }),
+    ])
+    .ok()?;
+    let payload_bytes = payload.encode();
+    let payload_len = u32::try_from(payload_bytes.len()).ok()?;
+    let payload_hash = <Preimage as StorePreimage>::note(payload_bytes.into()).ok()?;
+    let maturity = System::block_number().checked_add(
+        <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_timelock(
+            ProposalClass::Treasury,
+        ),
+    )?;
+    let grace_end = maturity.checked_add(
+        <crate::configs::ExecutionParams as pallet_execution_guard::Params>::exec_grace(
+            ProposalClass::Treasury,
+        ),
+    )?;
     assert_ok!(seed_queued_epoch_proposal(
         pid,
         ProposalClass::Treasury,
-        H256::repeat_byte(first_member_seed),
-        1,
-        System::block_number().saturating_add(20),
-        System::block_number().saturating_add(30),
-        version_constraint,
+        payload_hash,
+        payload_len,
+        maturity,
+        grace_end,
+        version_constraint.clone(),
+    ));
+    assert_ok!(ExecutionGuard::enqueue(
+        RuntimeOrigin::signed(crate::configs::epoch_account()),
+        pallet_execution_guard::StoredQueuedExecution {
+            pid,
+            payload_hash: payload_hash.0,
+            payload_len,
+            class: ProposalClass::Treasury,
+            maturity,
+            grace_end,
+            version_constraint,
+            meters_declared: Default::default(),
+            ratify_ref: None,
+            ratification_passed: false,
+            attestation_id: None,
+            pre_upgrade_checkpoint: None,
+            cancelled: false,
+            declared_domains: Default::default(),
+            failed_at: None,
+        },
+        false,
     ));
     assert_ok!(Guardian::propose_action(
         RuntimeOrigin::signed(members[0].clone()),
@@ -5026,27 +5065,55 @@ fn seed_guardian_delay_action(
             action,
         ));
     }
-    let referendum = pallet_guardian::ReviewReferenda::<Runtime>::get(action)
-        .expect("fifth approval schedules review");
-    (members, action, referendum)
+    let referendum = pallet_guardian::ReviewReferenda::<Runtime>::get(action)?;
+    let veto_referendum = pallet_guardian::VetoReviewReferenda::<Runtime>::get(action)?;
+    Some((members, action, referendum, veto_referendum))
+}
+
+fn assert_guardian_review_referendum(index: u32, action: u32, uphold_veto: bool) {
+    let Some(pallet_referenda::ReferendumInfo::Ongoing(status)) =
+        pallet_referenda::ReferendumInfoFor::<Runtime>::get(index)
+    else {
+        assert!(false, "guardian review {index} must be ongoing");
+        return;
+    };
+    assert_eq!(status.track, 4);
+    assert_eq!(status.submission_deposit.amount, currency::VIT);
+    assert_eq!(
+        status.decision_deposit.map(|deposit| deposit.amount),
+        Some(1_000 * currency::VIT)
+    );
+    let Ok((call, _)) = <Preimage as QueryPreimage>::peek(&status.proposal) else {
+        assert!(false, "guardian review {index} preimage must decode");
+        return;
+    };
+    if uphold_veto {
+        assert!(matches!(
+            call,
+            RuntimeCall::Guardian(pallet_guardian::Call::uphold_veto { action_id })
+                if action_id == action
+        ));
+    } else {
+        assert!(matches!(
+            call,
+            RuntimeCall::Guardian(pallet_guardian::Call::ratify_action { action_id })
+                if action_id == action
+        ));
+    }
 }
 
 #[test]
 fn guardian_review_votes_and_enacts_on_ratify_track_with_bonds_restored() {
     development_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 8_009;
-        let (members, action, referendum) = seed_guardian_delay_action(PID, 80);
-        let Some(pallet_referenda::ReferendumInfo::Ongoing(status)) =
-            pallet_referenda::ReferendumInfoFor::<Runtime>::get(referendum)
+        let Some((members, action, referendum, veto_referendum)) =
+            seed_guardian_delay_action(PID, 80)
         else {
-            assert!(false, "review must be ongoing");
+            assert!(false, "delay action must schedule both review verdicts");
             return;
         };
-        assert_eq!(status.track, 4);
-        assert_eq!(
-            status.decision_deposit.map(|deposit| deposit.amount),
-            Some(1_000 * currency::VIT)
-        );
+        assert_guardian_review_referendum(referendum, action, false);
+        assert_guardian_review_referendum(veto_referendum, action, true);
         assert!(pallet_guardian::ReviewFrontingOf::<Runtime>::contains_key(
             action
         ));
@@ -5059,6 +5126,18 @@ fn guardian_review_votes_and_enacts_on_ratify_track_with_bonds_restored() {
         assert!(!pallet_guardian::ReviewFrontingOf::<Runtime>::contains_key(
             action
         ));
+        assert!(!pallet_guardian::ReviewReferenda::<Runtime>::contains_key(
+            action
+        ));
+        assert!(!pallet_guardian::VetoReviewReferenda::<Runtime>::contains_key(action));
+        assert!(matches!(
+            pallet_referenda::ReferendumInfoFor::<Runtime>::get(referendum),
+            Some(pallet_referenda::ReferendumInfo::Approved(_, None, None))
+        ));
+        assert!(matches!(
+            pallet_referenda::ReferendumInfoFor::<Runtime>::get(veto_referendum),
+            Some(pallet_referenda::ReferendumInfo::Cancelled(_, None, None))
+        ));
         let reason: crate::RuntimeHoldReason = pallet_guardian::HoldReason::SeatBond.into();
         for member in members.iter().take(5) {
             assert_eq!(
@@ -5066,6 +5145,22 @@ fn guardian_review_votes_and_enacts_on_ratify_track_with_bonds_restored() {
                 pallet_guardian::GUARDIAN_BOND
             );
         }
+
+        let Some(deadline) = pallet_epoch::GuardianReviewDeadlines::<Runtime>::get(PID) else {
+            assert!(false, "ratification keeps the T12 review deadline");
+            return;
+        };
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| clock.index = deadline);
+        let Ok(batch) = pallet_epoch::TickBatch::try_from(vec![PID]) else {
+            assert!(false, "one proposal fits the tick bound");
+            return;
+        };
+        assert_ok!(Epoch::tick(RuntimeOrigin::signed(account(81)), batch));
+        assert_eq!(
+            pallet_epoch::Proposals::<Runtime>::get(PID).map(|proposal| proposal.state),
+            Some(ProposalState::Rerun),
+            "ratifying the delay preserves the ordinary T12 rerun path"
+        );
         assert_ok!(Guardian::do_try_state());
     });
 }
@@ -5074,20 +5169,26 @@ fn guardian_review_votes_and_enacts_on_ratify_track_with_bonds_restored() {
 fn guardian_uphold_veto_cancels_ongoing_review_and_commits_t24() {
     development_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 8_007;
-        let (members, action, referendum) = seed_guardian_delay_action(PID, 60);
+        let Some((members, action, referendum, veto_referendum)) =
+            seed_guardian_delay_action(PID, 60)
+        else {
+            assert!(false, "delay action must schedule both review verdicts");
+            return;
+        };
         assert!(matches!(
             pallet_referenda::ReferendumInfoFor::<Runtime>::get(referendum),
             Some(pallet_referenda::ReferendumInfo::Ongoing(_))
         ));
 
-        assert_ok!(Guardian::uphold_veto(
-            crate::track_origins::Origin::Ratify.into(),
-            action,
-        ));
+        enact_passing_referendum(veto_referendum);
 
         assert!(matches!(
             pallet_referenda::ReferendumInfoFor::<Runtime>::get(referendum),
             Some(pallet_referenda::ReferendumInfo::Cancelled(_, None, None))
+        ));
+        assert!(matches!(
+            pallet_referenda::ReferendumInfoFor::<Runtime>::get(veto_referendum),
+            Some(pallet_referenda::ReferendumInfo::Approved(_, None, None))
         ));
 
         let proposal = pallet_epoch::Proposals::<Runtime>::get(PID)
@@ -5111,6 +5212,10 @@ fn guardian_uphold_veto_cancels_ongoing_review_and_commits_t24() {
         assert!(!pallet_guardian::ReviewFrontingOf::<Runtime>::contains_key(
             action
         ));
+        assert!(!pallet_guardian::ReviewReferenda::<Runtime>::contains_key(
+            action
+        ));
+        assert!(!pallet_guardian::VetoReviewReferenda::<Runtime>::contains_key(action));
         assert_ok!(Guardian::do_try_state());
     });
 }
@@ -5119,7 +5224,10 @@ fn guardian_uphold_veto_cancels_ongoing_review_and_commits_t24() {
 fn uphold_veto_after_rerun_is_benign_and_plain_ratification_still_works() {
     development_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 8_008;
-        let (_, action, referendum) = seed_guardian_delay_action(PID, 70);
+        let Some((_, action, referendum, _)) = seed_guardian_delay_action(PID, 70) else {
+            assert!(false, "delay action must schedule both review verdicts");
+            return;
+        };
         // The epoch T12/T13 path owns reopening and its queue handoff; seed the
         // resulting state here so this test isolates the review-verdict race.
         pallet_epoch::Proposals::<Runtime>::mutate(PID, |proposal| {
@@ -5276,26 +5384,18 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
         assert!(pallet_epoch::GuardianReviewDeadlines::<Runtime>::contains_key(PID));
         assert_eq!(
             pallet_referenda::ReferendumCount::<Runtime>::get(),
-            before_referenda.saturating_add(1),
+            before_referenda.saturating_add(2),
         );
         assert_eq!(
             pallet_guardian::ReviewReferenda::<Runtime>::get(action),
             Some(before_referenda),
         );
-        let review_info = pallet_referenda::ReferendumInfoFor::<Runtime>::get(before_referenda);
-        let Some(pallet_referenda::ReferendumInfo::Ongoing(review_status)) = review_info else {
-            assert!(false, "review referendum must be ongoing");
-            return;
-        };
-        assert_eq!(review_status.track, 4);
-        assert_eq!(review_status.submission_deposit.amount, currency::VIT);
         assert_eq!(
-            review_status
-                .decision_deposit
-                .as_ref()
-                .map(|deposit| deposit.amount),
-            Some(1_000 * currency::VIT),
+            pallet_guardian::VetoReviewReferenda::<Runtime>::get(action),
+            Some(before_referenda.saturating_add(1)),
         );
+        assert_guardian_review_referendum(before_referenda, action, false);
+        assert_guardian_review_referendum(before_referenda.saturating_add(1), action, true);
         let deadline = match pallet_epoch::GuardianReviewDeadlines::<Runtime>::get(PID) {
             Some(deadline) => deadline,
             None => {
@@ -5311,16 +5411,11 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
             <crate::configs::RuntimeEpochGuardian as pallet_epoch::GuardianAccess>::review_window_closed(PID),
         );
 
-        // Model the review finishing without an enacted verdict. On chain its
-        // seven-day decision period closes well before the two-epoch guardian
-        // deadline; cancellation gives this direct-storage clock jump the same
-        // refundable terminal deposit state.
-        assert_ok!(Referenda::cancel(
-            pallet_origins::Origin::ConstitutionalValues.into(),
-            before_referenda,
-        ));
         let bonds_before = pallet_guardian::MemberBonds::<Runtime>::get();
         let treasury_before = Balances::balance(&crate::genesis::treasury_account());
+        let guardian_before = <Balances as FungibleInspect<AccountId>>::total_balance(
+            &crate::configs::guardian_account(),
+        );
         pallet_epoch::EpochOf::<Runtime>::mutate(|clock| clock.index = deadline);
         let _ = Guardian::on_initialize(System::block_number());
         let bonds_after = pallet_guardian::MemberBonds::<Runtime>::get();
@@ -5348,6 +5443,22 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
         }
         assert!(pallet_guardian::ReviewDeadlines::<Runtime>::get().is_empty());
         assert!(!pallet_guardian::ReviewReferenda::<Runtime>::contains_key(action));
+        assert!(!pallet_guardian::VetoReviewReferenda::<Runtime>::contains_key(
+            action
+        ));
+        assert!(!pallet_guardian::ReviewFrontingOf::<Runtime>::contains_key(
+            action
+        ));
+        assert!(matches!(
+            pallet_referenda::ReferendumInfoFor::<Runtime>::get(before_referenda),
+            Some(pallet_referenda::ReferendumInfo::Cancelled(_, None, None))
+        ));
+        assert!(matches!(
+            pallet_referenda::ReferendumInfoFor::<Runtime>::get(
+                before_referenda.saturating_add(1)
+            ),
+            Some(pallet_referenda::ReferendumInfo::Cancelled(_, None, None))
+        ));
         let failed = pallet_guardian::FailedActions::<Runtime>::get(action)
             .expect("deadline writes the recall substrate");
         let recall = failed
@@ -5367,6 +5478,14 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
             Some(5_000 * currency::VIT),
         );
         let recall_deposits = 5_001 * currency::VIT;
+        assert_eq!(guardian_before, 2_002 * currency::VIT);
+        assert_eq!(
+            <Balances as FungibleInspect<AccountId>>::total_balance(
+                &crate::configs::guardian_account()
+            ),
+            recall_deposits,
+            "only the recall deposits may remain with the guardian sovereign"
+        );
         assert_eq!(
             Balances::balance(&crate::genesis::treasury_account()),
             treasury_before
@@ -5391,6 +5510,7 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
                 referendum,
             }) if recalled == action && referendum == recall
         )));
+        assert_ok!(Guardian::do_try_state());
 
         enact_passing_referendum(recall);
         let seated = Guardian::members().expect("council remains initialized");
@@ -11059,6 +11179,7 @@ fn dispatch_runtime_guardian_power(
 fn five_guardians_pause_intake_until_the_lazy_expiry_boundary() {
     development_ext().execute_with(|| {
         System::set_block_number(10);
+        let before_referenda = pallet_referenda::ReferendumCount::<Runtime>::get();
         let action = dispatch_runtime_guardian_power(
             pallet_guardian::GuardianPower::PauseIntake { until: 20 },
             120,
@@ -11070,6 +11191,13 @@ fn five_guardians_pause_intake_until_the_lazy_expiry_boundary() {
         assert!(pallet_guardian::ReviewReferenda::<Runtime>::contains_key(
             action
         ));
+        assert!(!pallet_guardian::VetoReviewReferenda::<Runtime>::contains_key(action));
+        assert_eq!(
+            pallet_referenda::ReferendumCount::<Runtime>::get(),
+            before_referenda.saturating_add(1),
+            "non-delay guardian actions keep exactly one review referendum"
+        );
+        assert_guardian_review_referendum(before_referenda, action, false);
 
         // 06 §5.2: PauseIntake is limited to one successful dispatch per
         // rolling four-epoch window. The rejected fifth approval is atomic.

@@ -5,7 +5,7 @@
 use super::*;
 use crate::pallet::{
     ActivePlaybooks, Approvals, FailedAction, FailedActions, Members, NextActionId, PendingActions,
-    RerunUsed, ReviewDeadlines, ReviewReferenda,
+    RerunUsed, ReviewDeadlines, ReviewReferenda, VetoReviewReferenda,
 };
 
 use frame_benchmarking::v2::*;
@@ -193,7 +193,7 @@ mod benches {
     #[benchmark]
     fn approve_action() {
         seed_council::<T>();
-        let id = action_at_four::<T>(GuardianPower::ForceRerun { pid: 1 });
+        let id = action_at_four::<T>(GuardianPower::DelayOnce { pid: 1 });
         fill_pending_with_five::<T>(1);
         fill_reviews::<T>(MAX_REVIEWS - 1);
         fill_playbooks::<T>(ACTION_EXPIRY_BLOCKS);
@@ -209,7 +209,7 @@ mod benches {
     #[benchmark]
     fn ratify_action() {
         seed_council::<T>();
-        let id = action_at_four::<T>(GuardianPower::ForceRerun { pid: 1 });
+        let id = action_at_four::<T>(GuardianPower::DelayOnce { pid: 1 });
         Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), id).expect("dispatch");
         let referendum = ReviewReferenda::<T>::get(id).expect("review referendum");
         T::BenchmarkHelper::close_review(referendum).expect("close review");
@@ -257,15 +257,21 @@ mod benches {
     }
 
     #[benchmark]
-    fn uphold_veto() {
+    fn uphold_veto() -> Result<(), BenchmarkError> {
         seed_council::<T>();
         let id = action_at_four::<T>(GuardianPower::DelayOnce { pid: 1 });
-        Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), id).expect("dispatch");
+        Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), id)
+            .map_err(|_| BenchmarkError::Stop("dispatch"))?;
+        let referendum = VetoReviewReferenda::<T>::get(id)
+            .ok_or(BenchmarkError::Stop("veto review referendum"))?;
+        T::BenchmarkHelper::close_review(referendum)
+            .map_err(|_| BenchmarkError::Stop("close review"))?;
 
         #[extrinsic_call]
         _(T::BenchmarkHelper::values() as T::RuntimeOrigin, id);
 
         assert!(ReviewDeadlines::<T>::get().iter().any(|r| r.ratified));
+        Ok(())
     }
 
     #[benchmark]
@@ -312,29 +318,33 @@ mod benches {
     }
 
     #[benchmark]
-    fn on_initialize() {
+    fn on_initialize() -> Result<(), BenchmarkError> {
         seed_council::<T>();
-        T::BenchmarkHelper::prime_maintenance_epoch(1);
+        let overdue = action_at_four::<T>(GuardianPower::DelayOnce { pid: 1 });
+        Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), overdue)
+            .map_err(|_| BenchmarkError::Stop("dispatch"))?;
+        T::BenchmarkHelper::prime_maintenance_epoch(REVIEW_DEADLINE_EPOCHS);
         let approvers = [[1; 32], [2; 32], [3; 32], [4; 32], [5; 32]];
         PendingActions::<T>::mutate(|actions| {
-            for id in 0..MAX_PENDING_ACTIONS {
+            for id in 1..MAX_PENDING_ACTIONS {
                 actions.try_push(pending(id, true)).expect("pending bound");
             }
         });
         Approvals::<T>::mutate(|approvals| {
-            for id in 0..MAX_PENDING_ACTIONS {
+            for id in 1..MAX_PENDING_ACTIONS {
                 for who in approvers {
                     approvals.try_push((id, who)).expect("approval bound");
                 }
             }
         });
         ReviewDeadlines::<T>::mutate(|reviews| {
-            for id in 0..MAX_REVIEWS {
+            while reviews.len() < MAX_REVIEWS as usize {
+                let id = 1_000u32.saturating_add(reviews.len() as u32);
                 let mut terminal = review(id, 0);
                 // Terminal reviews exercise the full bounded reap without
                 // inventing unreachable fronting records for 128 simultaneous
-                // failures. The failure path is covered by the call benchmarks
-                // and pallet tests with real held funds.
+                // failures. The real `overdue` record exercises both verdict
+                // cancellations/refunds and the slash/recall path.
                 terminal.ratified = true;
                 reviews.try_push(terminal).expect("review bound");
             }
@@ -351,6 +361,7 @@ mod benches {
         assert!(ActivePlaybooks::<T>::get().is_empty());
         assert!(PendingActions::<T>::get().is_empty());
         assert!(ReviewDeadlines::<T>::get().is_empty());
+        Ok(())
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext_empty(), crate::mock::Test);

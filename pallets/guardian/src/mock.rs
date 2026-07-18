@@ -9,7 +9,7 @@ use crate as pallet_guardian;
 use crate::{
     GuardianEffectDispatcher, GuardianPower, GuardianProposalStatus, GuardianProposalVeto,
     GuardianRecallScheduler, GuardianReviewScheduler, GuardianTriggers, PlaybookId, ProposalStatus,
-    TriggerState,
+    ReviewVerdict, TriggerState,
 };
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
 use futarchy_primitives::ProposalId;
@@ -50,6 +50,9 @@ parameter_types! {
     pub static NextReferendum: u32 = 100;
     pub static ReviewSchedulingFails: bool = false;
     pub static ReviewRefundFailsFor: Option<u32> = None;
+    pub static ScheduledReviews: Vec<(crate::ActionId, ReviewVerdict, u32)> = Vec::new();
+    pub static CancelledReviews: Vec<u32> = Vec::new();
+    pub static RefundedReviews: Vec<u32> = Vec::new();
     pub static RecallSchedulingFails: bool = false;
     pub static VetoFails: bool = false;
     pub static ReviewDepositValue: futarchy_primitives::Balance =
@@ -119,7 +122,10 @@ impl GuardianReviewScheduler for TestScheduler {
         ReviewDepositValue::get()
     }
 
-    fn schedule_review(_action_id: crate::ActionId) -> Result<u32, sp_runtime::DispatchError> {
+    fn schedule_review(
+        action_id: crate::ActionId,
+        verdict: ReviewVerdict,
+    ) -> Result<u32, sp_runtime::DispatchError> {
         if ReviewSchedulingFails::get() {
             return Err(sp_runtime::DispatchError::Other(
                 "review scheduler unavailable",
@@ -127,10 +133,12 @@ impl GuardianReviewScheduler for TestScheduler {
         }
         let n = NextReferendum::get();
         NextReferendum::set(n + 1);
+        ScheduledReviews::mutate(|reviews| reviews.push((action_id, verdict, n)));
         Ok(n)
     }
 
-    fn cancel_review(_referendum: u32) -> Result<(), sp_runtime::DispatchError> {
+    fn cancel_review(referendum: u32) -> Result<(), sp_runtime::DispatchError> {
+        CancelledReviews::mutate(|reviews| reviews.push(referendum));
         Ok(())
     }
 
@@ -140,6 +148,7 @@ impl GuardianReviewScheduler for TestScheduler {
                 "review refund unavailable",
             ));
         }
+        RefundedReviews::mutate(|reviews| reviews.push(referendum));
         Ok(())
     }
 }

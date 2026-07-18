@@ -48,14 +48,14 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(4))
     }
     fn approve_action() -> Weight {
-        Weight::from_parts(45_000_000, 9_000)
-            .saturating_add(T::DbWeight::get().reads(9))
-            .saturating_add(T::DbWeight::get().writes(9))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(T::DbWeight::get().reads(220))
+            .saturating_add(T::DbWeight::get().writes(150))
     }
     fn ratify_action() -> Weight {
-        Weight::from_parts(30_000_000, 4_000)
-            .saturating_add(T::DbWeight::get().reads(8))
-            .saturating_add(T::DbWeight::get().writes(8))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(T::DbWeight::get().reads(220))
+            .saturating_add(T::DbWeight::get().writes(150))
     }
     fn renew_playbook() -> Weight {
         Weight::from_parts(30_000_000, 4_000)
@@ -63,9 +63,9 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(8))
     }
     fn uphold_veto() -> Weight {
-        Weight::from_parts(70_000_000, 9_000)
-            .saturating_add(T::DbWeight::get().reads(12))
-            .saturating_add(T::DbWeight::get().writes(12))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(T::DbWeight::get().reads(220))
+            .saturating_add(T::DbWeight::get().writes(150))
     }
     fn recall() -> Weight {
         Weight::from_parts(75_000_000, 9_000)
@@ -78,9 +78,9 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(1))
     }
     fn on_initialize() -> Weight {
-        Weight::from_parts(40_000_000, 9_000)
-            .saturating_add(T::DbWeight::get().reads(9))
-            .saturating_add(T::DbWeight::get().writes(8))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(T::DbWeight::get().reads(220))
+            .saturating_add(T::DbWeight::get().writes(150))
     }
 }
 
@@ -97,14 +97,14 @@ impl WeightInfo for () {
             .saturating_add(RocksDbWeight::get().writes(4))
     }
     fn approve_action() -> Weight {
-        Weight::from_parts(45_000_000, 9_000)
-            .saturating_add(RocksDbWeight::get().reads(9))
-            .saturating_add(RocksDbWeight::get().writes(9))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(RocksDbWeight::get().reads(220))
+            .saturating_add(RocksDbWeight::get().writes(150))
     }
     fn ratify_action() -> Weight {
-        Weight::from_parts(30_000_000, 4_000)
-            .saturating_add(RocksDbWeight::get().reads(8))
-            .saturating_add(RocksDbWeight::get().writes(8))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(RocksDbWeight::get().reads(220))
+            .saturating_add(RocksDbWeight::get().writes(150))
     }
     fn renew_playbook() -> Weight {
         Weight::from_parts(30_000_000, 4_000)
@@ -112,9 +112,9 @@ impl WeightInfo for () {
             .saturating_add(RocksDbWeight::get().writes(8))
     }
     fn uphold_veto() -> Weight {
-        Weight::from_parts(70_000_000, 9_000)
-            .saturating_add(RocksDbWeight::get().reads(12))
-            .saturating_add(RocksDbWeight::get().writes(12))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(RocksDbWeight::get().reads(220))
+            .saturating_add(RocksDbWeight::get().writes(150))
     }
     fn recall() -> Weight {
         Weight::from_parts(75_000_000, 9_000)
@@ -127,8 +127,8 @@ impl WeightInfo for () {
             .saturating_add(RocksDbWeight::get().writes(1))
     }
     fn on_initialize() -> Weight {
-        Weight::from_parts(40_000_000, 9_000)
-            .saturating_add(RocksDbWeight::get().reads(9))
-            .saturating_add(RocksDbWeight::get().writes(8))
+        Weight::from_parts(1_950_000_000, 183_055)
+            .saturating_add(RocksDbWeight::get().reads(220))
+            .saturating_add(RocksDbWeight::get().writes(150))
     }
 }

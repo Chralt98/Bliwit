@@ -3866,9 +3866,18 @@ impl pallet_guardian::GuardianReviewScheduler for RuntimeGuardianScheduler {
         SubmissionDeposit::get().saturating_add(1_000 * currency::VIT)
     }
 
-    fn schedule_review(action: u32) -> Result<u32, DispatchError> {
-        let call =
-            RuntimeCall::Guardian(pallet_guardian::Call::ratify_action { action_id: action });
+    fn schedule_review(
+        action: u32,
+        verdict: pallet_guardian::ReviewVerdict,
+    ) -> Result<u32, DispatchError> {
+        let call = match verdict {
+            pallet_guardian::ReviewVerdict::Ratify => {
+                RuntimeCall::Guardian(pallet_guardian::Call::ratify_action { action_id: action })
+            }
+            pallet_guardian::ReviewVerdict::UpholdVeto => {
+                RuntimeCall::Guardian(pallet_guardian::Call::uphold_veto { action_id: action })
+            }
+        };
         let proposal = <Preimage as StorePreimage>::bound(call)?;
         let values_origin: RuntimeOrigin = crate::track_origins::Origin::Ratify.into();
         let proposal_origin = Box::new(values_origin.caller().clone());

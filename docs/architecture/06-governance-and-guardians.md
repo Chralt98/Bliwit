@@ -229,7 +229,7 @@ Previously "one market rerun where telemetry anomaly is flagged" with no state-m
 
 ### 5.4 Review, ratification, recall, sunset
 
-Every guardian action emits `GuardianAction { action_id, power, target, justification_hash }`, consumes its allowance, and auto-schedules a `ratify`-track retrospective review: `pallet-guardian` submits the referendum (preimage `guardian.ratify_action(action_id)`) with **both** its submission deposit and its decision deposit (the §2.1 `ratify` deposit) fronted pro-rata from the approving members' held bonds and refunded on ratification. The seat bonds are real `fungible` holds on VIT (§5.1), so fronting temporarily releases each approver's slice and ratification restores it.
+Every guardian action emits `GuardianAction { action_id, power, target, justification_hash }`, consumes its allowance, and auto-schedules a `ratify`-track retrospective review: `pallet-guardian` submits the referendum (preimage `guardian.ratify_action(action_id)`) with **both** its submission deposit and its decision deposit (the §2.1 `ratify` deposit) fronted pro-rata from the approving members' held bonds and refunded on ratification. The seat bonds are real `fungible` holds on VIT (§5.1), so fronting temporarily releases each approver's slice and ratification restores it. For `delay_once` actions the pallet submits **both verdict referenda at scheduling** — `guardian.ratify_action(action_id)` and `guardian.uphold_veto(action_id)`, deposits for both fronted the same way — so the upheld-veto verdict is on the ballot from the start rather than racing an ad-hoc submission; enacting either verdict atomically cancels the other referendum and refunds its fronted deposits.
 
 The review concludes in exactly one of three ways:
 

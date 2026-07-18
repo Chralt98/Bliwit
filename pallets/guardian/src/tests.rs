@@ -3,7 +3,7 @@
 //! seeded shell-vs-core differential. The `test-engineer` extends this suite.
 
 use crate::mock::*;
-use crate::{pallet::*, Error, Event};
+use crate::{pallet::*, Error, Event, ReviewVerdict};
 use frame_support::{
     assert_noop, assert_ok,
     traits::fungible::{InspectHold, Mutate},
@@ -39,6 +39,22 @@ fn approve_to_dispatch() {
     for n in 2..=5u8 {
         assert_ok!(Guardian::approve_action(RuntimeOrigin::signed(acct(n)), 0));
     }
+}
+
+fn reset_review_scheduler() {
+    NextReferendum::set(100);
+    ReviewSchedulingFails::set(false);
+    ReviewRefundFailsFor::set(None);
+    ScheduledReviews::set(Vec::new());
+    CancelledReviews::set(Vec::new());
+    RefundedReviews::set(Vec::new());
+}
+
+fn seat_hold(member: &AccountId32) -> futarchy_primitives::Balance {
+    <Balances as InspectHold<AccountId32>>::balance_on_hold(
+        &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+        member,
+    )
 }
 
 #[test]
@@ -189,6 +205,7 @@ fn propose_requires_membership() {
 #[test]
 fn five_of_seven_dispatches_schedules_review_with_referendum() {
     new_test_ext().execute_with(|| {
+        reset_review_scheduler();
         set_triggers(guardian_core::TriggerState {
             gate_breach: true,
             ..guardian_core::TriggerState::none()
@@ -201,6 +218,13 @@ fn five_of_seven_dispatches_schedules_review_with_referendum() {
         approve_to_dispatch();
         assert!(PendingActions::<Test>::get()[0].dispatched);
         assert_eq!(ReviewDeadlines::<Test>::get().len(), 1);
+        assert_eq!(
+            ScheduledReviews::get(),
+            vec![(0, ReviewVerdict::Ratify, 100)]
+        );
+        assert_eq!(ReviewReferenda::<Test>::get(0), Some(100));
+        assert_eq!(VetoReviewReferenda::<Test>::get(0), None);
+        assert_eq!(NextReferendum::get(), 101);
         // The frozen `ReviewScheduled { action, referendum }` carries the index
         // the scheduler seam returned (mock starts at 100).
         assert!(last_events().iter().any(|e| matches!(
@@ -1675,31 +1699,66 @@ fn maintenance_crank_reaps_dispatched_action_and_terminal_review() {
 #[test]
 fn review_failure_slashes_and_schedules_recall() {
     // 06 §5.4: a missed 2-epoch deadline slashes each approver 50% AND
-    // auto-schedules a recall referendum on the `guardian` track.
+    // auto-schedules a recall referendum on the `guardian` track. A delay
+    // review leaves both verdict referenda open for the deadline cleanup.
     new_test_ext().execute_with(|| {
-        set_triggers(all_triggers());
+        reset_review_scheduler();
+        set_status(ProposalStatus::Queued, false);
         assert_ok!(Guardian::propose_action(
             RuntimeOrigin::signed(acct(1)),
-            GuardianPower::SuspendOnGate,
+            GuardianPower::DelayOnce { pid: 4 },
             hash(4)
         ));
         approve_to_dispatch();
+        assert_eq!(
+            ScheduledReviews::get(),
+            vec![
+                (0, ReviewVerdict::Ratify, 100),
+                (0, ReviewVerdict::UpholdVeto, 101),
+            ]
+        );
+        assert_eq!(ReviewReferenda::<Test>::get(0), Some(100));
+        assert_eq!(VetoReviewReferenda::<Test>::get(0), Some(101));
+        let fronting = ReviewFrontingOf::<Test>::get(0);
+        assert!(fronting.is_some());
+        let Some(fronting) = fronting else {
+            return;
+        };
+        assert_eq!(
+            fronting.slices.iter().copied().sum::<u128>(),
+            2 * ReviewDepositValue::get()
+        );
+
         set_epoch(2); // dispatch epoch (0) + REVIEW_DEADLINE_EPOCHS (2)
         run_to_block(2);
         assert!(last_events()
             .iter()
             .any(|e| matches!(e, Event::ReviewFailed { action: 0, .. })));
-        assert!(last_events()
-            .iter()
-            .any(|e| matches!(e, Event::RecallScheduled { action: 0, .. })));
+        assert!(last_events().iter().any(|e| matches!(
+            e,
+            Event::RecallScheduled {
+                action: 0,
+                referendum: 102
+            }
+        )));
+        assert_eq!(CancelledReviews::get(), vec![100, 101]);
+        assert_eq!(RefundedReviews::get(), vec![100, 101]);
+        assert_eq!(MemberBonds::<Test>::get()[..5], [GUARDIAN_BOND / 2; 5]);
+        for member in members().iter().take(5) {
+            assert_eq!(seat_hold(member), GUARDIAN_BOND / 2);
+        }
         assert!(FailedActions::<Test>::contains_key(0));
+        assert!(!ReviewReferenda::<Test>::contains_key(0));
+        assert!(!VetoReviewReferenda::<Test>::contains_key(0));
         assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        assert_ok!(Guardian::do_try_state());
     });
 }
 
 #[test]
 fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability() {
     new_test_ext().execute_with(|| {
+        reset_review_scheduler();
         set_status(ProposalStatus::Queued, false);
         for (action, power) in [
             (0, GuardianPower::DelayOnce { pid: 10 }),
@@ -1719,10 +1778,42 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
             }
         }
         assert_eq!(ReviewDeadlines::<Test>::get().len(), 3);
+        assert_eq!(
+            ScheduledReviews::get(),
+            vec![
+                (0, ReviewVerdict::Ratify, 100),
+                (0, ReviewVerdict::UpholdVeto, 101),
+                (1, ReviewVerdict::Ratify, 102),
+                (1, ReviewVerdict::UpholdVeto, 103),
+                (2, ReviewVerdict::Ratify, 104),
+            ]
+        );
+        assert_eq!(NextReferendum::get(), 105);
+        for action in 0..2 {
+            let fronting = ReviewFrontingOf::<Test>::get(action);
+            assert!(fronting.is_some());
+            let Some(fronting) = fronting else {
+                return;
+            };
+            assert_eq!(
+                fronting.slices.iter().copied().sum::<u128>(),
+                2 * ReviewDepositValue::get()
+            );
+        }
+        let force_fronting = ReviewFrontingOf::<Test>::get(2);
+        assert!(force_fronting.is_some());
+        let Some(force_fronting) = force_fronting else {
+            return;
+        };
+        assert_eq!(
+            force_fronting.slices.iter().copied().sum::<u128>(),
+            ReviewDepositValue::get()
+        );
+        assert_ok!(Guardian::do_try_state());
 
         // Isolate the middle review's refund failure. The first and third
         // reviews must commit independently instead of sharing one rollback.
-        ReviewRefundFailsFor::set(Some(101));
+        ReviewRefundFailsFor::set(Some(102));
         set_epoch(2);
         run_to_block(2);
         assert!(FailedActions::<Test>::contains_key(0));
@@ -1731,12 +1822,22 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
         assert!(ReviewFrontingOf::<Test>::contains_key(1));
         assert!(!ReviewFrontingOf::<Test>::contains_key(0));
         assert!(!ReviewFrontingOf::<Test>::contains_key(2));
+        assert!(!ReviewReferenda::<Test>::contains_key(0));
+        assert_eq!(ReviewReferenda::<Test>::get(1), Some(102));
+        assert!(!ReviewReferenda::<Test>::contains_key(2));
+        assert!(!VetoReviewReferenda::<Test>::contains_key(0));
+        assert_eq!(VetoReviewReferenda::<Test>::get(1), Some(103));
+        assert!(!VetoReviewReferenda::<Test>::contains_key(2));
 
         let stranded = ReviewFrontingOf::<Test>::get(1);
         assert!(stranded.is_some(), "failed review must remain retryable");
         let Some(stranded) = stranded else {
             return;
         };
+        assert_eq!(
+            stranded.slices.iter().copied().sum::<u128>(),
+            2 * ReviewDepositValue::get()
+        );
         let bonds = MemberBonds::<Test>::get();
         for (position, bond) in bonds.iter().take(5).enumerate() {
             assert_eq!(
@@ -1744,6 +1845,7 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
                 "actual obligation is held balance plus outstanding fronting"
             );
         }
+        assert_ok!(Guardian::do_try_state());
 
         // Retrying only the failed review consumes the remaining bounded
         // liability. No exact transfer can demand more than the live hold.
@@ -1751,6 +1853,8 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
         run_to_block(3);
         for action in 0..3 {
             assert!(FailedActions::<Test>::contains_key(action));
+            assert!(!ReviewReferenda::<Test>::contains_key(action));
+            assert!(!VetoReviewReferenda::<Test>::contains_key(action));
             assert!(!ReviewFrontingOf::<Test>::contains_key(action));
         }
         assert!(MemberBonds::<Test>::get()[..5]
@@ -1762,6 +1866,58 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
                 <Balances as InspectHold<AccountId32>>::balance_on_hold(&reason, member),
                 0
             );
+        }
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn delay_ratification_cancels_uphold_and_refunds_both_reviews() {
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_status(ProposalStatus::Queued, false);
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::DelayOnce { pid: 42 },
+            hash(8)
+        ));
+        approve_to_dispatch();
+
+        assert_eq!(
+            ScheduledReviews::get(),
+            vec![
+                (0, ReviewVerdict::Ratify, 100),
+                (0, ReviewVerdict::UpholdVeto, 101),
+            ]
+        );
+        assert_eq!(ReviewReferenda::<Test>::get(0), Some(100));
+        assert_eq!(VetoReviewReferenda::<Test>::get(0), Some(101));
+        let fronting = ReviewFrontingOf::<Test>::get(0);
+        assert!(fronting.is_some());
+        let Some(fronting) = fronting else {
+            return;
+        };
+        assert_eq!(
+            fronting.slices.iter().copied().sum::<u128>(),
+            2 * ReviewDepositValue::get()
+        );
+        for (position, member) in members().iter().take(5).enumerate() {
+            assert_eq!(
+                seat_hold(member),
+                GUARDIAN_BOND.saturating_sub(fronting.slices[position])
+            );
+        }
+
+        assert_ok!(Guardian::ratify_action(values_origin(), 0));
+
+        assert_eq!(CancelledReviews::get(), vec![101]);
+        assert_eq!(RefundedReviews::get(), vec![100, 101]);
+        assert!(ReviewDeadlines::<Test>::get()[0].ratified);
+        assert!(!ReviewReferenda::<Test>::contains_key(0));
+        assert!(!VetoReviewReferenda::<Test>::contains_key(0));
+        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        for member in members().iter().take(5) {
+            assert_eq!(seat_hold(member), GUARDIAN_BOND);
         }
         assert_ok!(Guardian::do_try_state());
     });
@@ -1879,12 +2035,23 @@ fn recall_vacates_approvers_and_releases_residual_bonds_one_epoch_later() {
 #[test]
 fn uphold_veto_is_delay_only_and_atomic_with_the_epoch_callback() {
     new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_status(ProposalStatus::Queued, false);
         assert_ok!(Guardian::propose_action(
             RuntimeOrigin::signed(acct(1)),
             GuardianPower::DelayOnce { pid: 42 },
             hash(9)
         ));
         approve_to_dispatch();
+        assert_eq!(ReviewReferenda::<Test>::get(0), Some(100));
+        assert_eq!(VetoReviewReferenda::<Test>::get(0), Some(101));
+        assert_eq!(
+            ScheduledReviews::get(),
+            vec![
+                (0, ReviewVerdict::Ratify, 100),
+                (0, ReviewVerdict::UpholdVeto, 101),
+            ]
+        );
         VetoFails::set(true);
         assert_noop!(
             Guardian::uphold_veto(values_origin(), 0),
@@ -1892,15 +2059,25 @@ fn uphold_veto_is_delay_only_and_atomic_with_the_epoch_callback() {
         );
         assert!(!ReviewDeadlines::<Test>::get()[0].ratified);
         assert!(ReviewFrontingOf::<Test>::contains_key(0));
+        assert!(CancelledReviews::get().is_empty());
+        assert!(RefundedReviews::get().is_empty());
 
         VetoFails::set(false);
         assert_ok!(Guardian::uphold_veto(values_origin(), 0));
+        assert_eq!(CancelledReviews::get(), vec![100]);
+        assert_eq!(RefundedReviews::get(), vec![100, 101]);
         assert!(ReviewDeadlines::<Test>::get()[0].ratified);
+        assert!(!ReviewReferenda::<Test>::contains_key(0));
+        assert!(!VetoReviewReferenda::<Test>::contains_key(0));
         assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        for member in members().iter().take(5) {
+            assert_eq!(seat_hold(member), GUARDIAN_BOND);
+        }
         assert_ok!(Guardian::do_try_state());
     });
 
     new_test_ext().execute_with(|| {
+        reset_review_scheduler();
         set_triggers(all_triggers());
         assert_ok!(Guardian::propose_action(
             RuntimeOrigin::signed(acct(1)),
