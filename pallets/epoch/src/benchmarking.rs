@@ -467,6 +467,7 @@ mod benches {
         let mut state = EpochState::new();
         let mut ids = Vec::new();
         let mut payload_hashes = Vec::new();
+        let mut funded_slots = Vec::new();
         for pid in 1..=u64::from(n) {
             let mut proposal =
                 benchmark_proposal::<T>(pid, ProposalState::Qualified, TERMINAL_SETTLEMENT_EPOCH);
@@ -487,6 +488,13 @@ mod benches {
                 phase_offsets::DECIDE_NUM,
                 params.epoch_length,
             );
+            // Seed-phase deployment only opens markets for proposals the Seed
+            // boundary crossing recorded in `FundedPolSlots`; the fixture starts
+            // mid-Seed, so collect the same plans through the production seam.
+            let seed_plan = T::PolBudget::proposal_seed_plan(&proposal).ok_or(
+                BenchmarkError::Stop("tick items require a fundable POL seed plan"),
+            )?;
+            funded_slots.push((pid, seed_plan));
             state.proposals.push(proposal);
             ids.push(pid);
         }
@@ -508,6 +516,11 @@ mod benches {
             params.epoch_length,
         );
         Pallet::<T>::seed(state)?;
+        crate::FundedPolSlots::<T>::put(
+            crate::FundedPolSlotSet::try_from(funded_slots).map_err(|_| {
+                BenchmarkError::Stop("tick funded POL slots exceed the cohort bound")
+            })?,
+        );
         let traffic =
             seed_xcm_traffic_history((0..XCM_TRAFFIC_FULL_BACKLOG_EPOCHS).collect::<Vec<_>>());
         assert_eq!(

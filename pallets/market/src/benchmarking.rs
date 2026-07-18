@@ -4,12 +4,14 @@ use crate::*;
 use frame_benchmarking::v2::*;
 use frame_support::traits::{fungibles::Mutate, EnsureOrigin, Get};
 use frame_system::RawOrigin;
-use futarchy_primitives::{kernel, Balance, Branch, MarketId, ScalarSide};
+use futarchy_primitives::{kernel, Balance, Branch, FixedU64, MarketId, ScalarSide};
 use market_core::{BookKind, MarketPhase};
 use sp_runtime::traits::Saturating;
 
 const UNIT: Balance = 1_000_000;
 const B: Balance = 1_000 * UNIT;
+// Mid-range settlement score for terminal-latch fixtures (any admissible value).
+const SETTLE_SCORE: FixedU64 = FixedU64(500_000_000);
 // Generated benchmark accounts are not necessarily runtime protocol accounts;
 // keep the fee leg above the ledger's live position-creation floor.
 const TRADE: Balance = 10 * UNIT;
@@ -116,6 +118,21 @@ mod benchmarks {
         let caller: T::AccountId = whitelisted_caller();
         seeded_decision::<T>(1);
         Pallet::<T>::close(admin_origin::<T>(), 1).expect("benchmark close succeeds");
+        // The archive delay anchors at the ledger terminal marker, not ClosedAt
+        // (04 §2): drive the shared vault to its scalar-settled terminal through
+        // the production authorities and latch the market-side settlement
+        // observation so the POL obligation is released before the book ages.
+        let resolve_origin =
+            <T as pallet_conditional_ledger::Config>::ResolveAuthority::try_successful_origin()
+                .expect("benchmark resolve authority origin exists");
+        pallet_conditional_ledger::Pallet::<T>::resolve(resolve_origin, 1, Branch::Accept)
+            .expect("benchmark vault resolution succeeds");
+        let settle_origin =
+            <T as pallet_conditional_ledger::Config>::SettleAuthority::try_successful_origin()
+                .expect("benchmark settle authority origin exists");
+        pallet_conditional_ledger::Pallet::<T>::settle_scalar(settle_origin, 1, SETTLE_SCORE)
+            .expect("benchmark vault settlement succeeds");
+        Pallet::<T>::observe_proposal_terminal(1).expect("benchmark terminal observation succeeds");
         let now = frame_system::Pallet::<T>::block_number();
         frame_system::Pallet::<T>::set_block_number(
             now.saturating_add(<T as Config>::ArchiveDelay::get())

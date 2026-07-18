@@ -5362,6 +5362,101 @@ fn benchmark_market_set(
     }
 }
 
+/// Create the real (unseeded) market books behind a `benchmark_market_set`.
+///
+/// B10 latches every ledger terminal into the market pallet
+/// (`observe_proposal_terminal` / `observe_baseline_terminal` run inside the
+/// production resolve/void/settle seams), and that latch walks
+/// `ProposalMarketIds` and requires each book to exist with the owning kind.
+/// Benchmark fixtures that only fabricate market *ids* therefore make every
+/// terminal-crossing dispatch fail with `TryStateViolation`; back the ids with
+/// bounded books through the production `create_market` entry point instead.
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_ensure_market_books(
+    pid: futarchy_primitives::ProposalId,
+    epoch: EpochId,
+    gates: bool,
+) -> futarchy_primitives::MarketSet {
+    use futarchy_primitives::{Branch, GateType};
+    use pallet_market::core_market::BookKind;
+
+    let set = benchmark_market_set(pid, epoch, gates);
+    let decision_b = balance_param(b"pol.b.param");
+    let gate_b = balance_param(b"pol.b_gate");
+    let mut books = Vec::from([
+        (
+            set.accept,
+            BookKind::Decision {
+                proposal: pid,
+                branch: Branch::Accept,
+            },
+            decision_b,
+        ),
+        (
+            set.reject,
+            BookKind::Decision {
+                proposal: pid,
+                branch: Branch::Reject,
+            },
+            decision_b,
+        ),
+    ]);
+    if let Some(gate_ids) = set.gates {
+        // 05 §5.1 order: (S,C) × (adopt,reject), as in the production adapter.
+        books.extend([
+            (
+                gate_ids[0],
+                BookKind::Gate {
+                    proposal: pid,
+                    branch: Branch::Accept,
+                    gate: GateType::Survival,
+                },
+                gate_b,
+            ),
+            (
+                gate_ids[1],
+                BookKind::Gate {
+                    proposal: pid,
+                    branch: Branch::Reject,
+                    gate: GateType::Survival,
+                },
+                gate_b,
+            ),
+            (
+                gate_ids[2],
+                BookKind::Gate {
+                    proposal: pid,
+                    branch: Branch::Accept,
+                    gate: GateType::Security,
+                },
+                gate_b,
+            ),
+            (
+                gate_ids[3],
+                BookKind::Gate {
+                    proposal: pid,
+                    branch: Branch::Reject,
+                    gate: GateType::Security,
+                },
+                gate_b,
+            ),
+        ]);
+    }
+    for (id, kind, b) in books {
+        if !pallet_market::Markets::<Runtime>::contains_key(id) {
+            let _ = pallet_market::Pallet::<Runtime>::create_market(
+                epoch_signed_origin(),
+                id,
+                kind,
+                market_book_account(id),
+                market_fee_account(id),
+                b,
+            );
+        }
+    }
+    set
+}
+
 #[cfg(feature = "runtime-benchmarks")]
 fn benchmark_quote(market: futarchy_primitives::MarketId) -> FixedU64 {
     match market % 10 {
@@ -5771,7 +5866,7 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
             let payload_hash = benchmark_ensure_payload_preimage(pid).0;
             benchmark_fill_attestations(pid, payload_hash);
         }
-        benchmark_market_set(pid, epoch, gates)
+        benchmark_ensure_market_books(pid, epoch, gates)
     }
 
     fn prime_guard_enqueue(_: futarchy_primitives::ProposalId) {}
@@ -5786,16 +5881,22 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
                 );
             }
         }
-        if !pallet_conditional_ledger::BaselineVaults::<Runtime>::contains_key(epoch) {
-            let _ = ConditionalLedger::create_baseline_vault(
-                RuntimeOrigin::signed(market_account()),
-                epoch,
+        let baseline = 9_000u64.saturating_add(u64::from(epoch));
+        if !pallet_market::Markets::<Runtime>::contains_key(baseline)
+            && !pallet_conditional_ledger::BaselineVaults::<Runtime>::contains_key(epoch)
+        {
+            // The production entry point creates the baseline vault and the
+            // `BaselineMarketOf` index, and the settlement path's terminal latch
+            // (`observe_baseline_terminal`, B10) requires the real book.
+            let _ = pallet_market::Pallet::<Runtime>::create_market(
+                epoch_signed_origin(),
+                baseline,
+                pallet_market::core_market::BookKind::Baseline { epoch },
+                market_book_account(baseline),
+                market_fee_account(baseline),
+                balance_param(b"pol.b_baseline"),
             );
         }
-        pallet_market::BaselineMarketOf::<Runtime>::insert(
-            epoch,
-            9_000u64.saturating_add(u64::from(epoch)),
-        );
         for offset in 1..=pallet_welfare::MAX_SNAPSHOTS_BOUND {
             let measured_epoch = epoch.saturating_add(offset);
             pallet_welfare::Snapshots::<Runtime>::insert(
