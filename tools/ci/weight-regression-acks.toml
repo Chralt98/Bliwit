@@ -8,3 +8,7 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
+runtime/bleavit-runtime/src/weights/pallet_epoch.rs veto_upheld: B1b demoted epoch.veto_upheld from a public extrinsic to the runtime-internal review path (T24's single producer is guardian.uphold_veto, 06 §5.4; PLAN Decision log 2026-07-17) — the weight function goes with the call
+runtime/bleavit-runtime/src/weights/pallet_guardian.rs approve_action: B1b wired real effect dispatch into the fifth approval (kernel playbook routines, freeze endpoints, dual review-referenda submission with fronting) — conservative hand envelope pending the next omni-bencher regeneration sweep
+runtime/bleavit-runtime/src/weights/pallet_guardian.rs on_initialize: B1b maintenance now settles overdue reviews with real fund movement (hold-bounded slashes, recall submission, dual-referenda cleanup) in isolated layers — conservative hand envelope pending regeneration
+runtime/bleavit-runtime/src/weights/pallet_guardian.rs ratify_action: B1b ratification now cancels the paired uphold referendum and refunds/restores both fronted deposits to held bonds — conservative hand envelope pending regeneration

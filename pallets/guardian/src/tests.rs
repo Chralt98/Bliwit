@@ -3,8 +3,11 @@
 //! seeded shell-vs-core differential. The `test-engineer` extends this suite.
 
 use crate::mock::*;
-use crate::{pallet::*, Error, Event};
-use frame_support::{assert_noop, assert_ok};
+use crate::{pallet::*, Error, Event, ReviewVerdict};
+use frame_support::{
+    assert_noop, assert_ok,
+    traits::fungible::{InspectHold, Mutate},
+};
 use guardian_core::{
     ActionId, DispatchContext, GuardianOrigin, GuardianPower, PlaybookId, PlaybookTrigger,
     ProposalStatus, TriggerState, ACTION_EXPIRY_BLOCKS, FORCE_RERUN_WINDOW_BLOCKS, GUARDIAN_BOND,
@@ -38,11 +41,36 @@ fn approve_to_dispatch() {
     }
 }
 
+fn reset_review_scheduler() {
+    NextReferendum::set(100);
+    ReviewSchedulingFails::set(false);
+    ReviewRefundFailsFor::set(None);
+    ScheduledReviews::set(Vec::new());
+    CancelledReviews::set(Vec::new());
+    RefundedReviews::set(Vec::new());
+}
+
+fn seat_hold(member: &AccountId32) -> futarchy_primitives::Balance {
+    <Balances as InspectHold<AccountId32>>::balance_on_hold(
+        &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+        member,
+    )
+}
+
 #[test]
 fn genesis_seeds_council_and_try_state_holds() {
     new_test_ext().execute_with(|| {
         assert!(Members::<Test>::get().is_some());
         assert_eq!(MemberBonds::<Test>::get(), [GUARDIAN_BOND; 7]);
+        for member in members() {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    &member,
+                ),
+                GUARDIAN_BOND
+            );
+        }
         assert_ok!(Guardian::do_try_state());
     });
 }
@@ -68,6 +96,98 @@ fn set_members_is_values_origin_only() {
 }
 
 #[test]
+fn all_kernel_playbooks_are_genesis_registered_and_admin_can_fail_closed() {
+    new_test_ext().execute_with(|| {
+        for id in guardian_core::ALL_PLAYBOOKS {
+            assert!(PlaybookRegistered::<Test>::get(id));
+        }
+        assert_eq!(PlaybookRegistered::<Test>::iter_keys().count(), 6);
+        assert_noop!(
+            Guardian::set_playbook_registered(
+                RuntimeOrigin::signed(acct(1)),
+                PlaybookId::Depeg,
+                false,
+            ),
+            DispatchError::BadOrigin
+        );
+        assert_ok!(Guardian::set_playbook_registered(
+            values_origin(),
+            PlaybookId::Depeg,
+            false,
+        ));
+        set_triggers(all_triggers());
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::ActivatePlaybook {
+                id: PlaybookId::Depeg,
+                trigger: PlaybookTrigger::DepegMedian,
+                expiry: 100,
+                target: None,
+            },
+            hash(1),
+        ));
+        for n in 2..=4u8 {
+            assert_ok!(Guardian::approve_action(RuntimeOrigin::signed(acct(n)), 0));
+        }
+        assert_noop!(
+            Guardian::approve_action(RuntimeOrigin::signed(acct(5)), 0),
+            Error::<Test>::PlaybookNotRegistered
+        );
+        assert_ok!(Guardian::set_playbook_registered(
+            values_origin(),
+            PlaybookId::Depeg,
+            true,
+        ));
+        assert_ok!(Guardian::approve_action(RuntimeOrigin::signed(acct(5)), 0));
+        assert!(Guardian::playbook_active(PlaybookId::Depeg));
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn oracle_void_requires_a_target_and_other_playbooks_reject_one() {
+    new_test_ext().execute_with(|| {
+        set_triggers(all_triggers());
+        for (action, power) in [
+            (
+                0,
+                GuardianPower::ActivatePlaybook {
+                    id: PlaybookId::OracleVoid,
+                    trigger: PlaybookTrigger::OracleDeadlock,
+                    expiry: 100,
+                    target: None,
+                },
+            ),
+            (
+                1,
+                GuardianPower::ActivatePlaybook {
+                    id: PlaybookId::Depeg,
+                    trigger: PlaybookTrigger::DepegMedian,
+                    expiry: 100,
+                    target: Some(7),
+                },
+            ),
+        ] {
+            assert_ok!(Guardian::propose_action(
+                RuntimeOrigin::signed(acct(1)),
+                power,
+                hash(1),
+            ));
+            for n in 2..=4u8 {
+                assert_ok!(Guardian::approve_action(
+                    RuntimeOrigin::signed(acct(n)),
+                    action,
+                ));
+            }
+            assert_noop!(
+                Guardian::approve_action(RuntimeOrigin::signed(acct(5)), action),
+                Error::<Test>::BadPlaybookTarget
+            );
+        }
+    });
+}
+
+#[test]
 fn propose_requires_membership() {
     new_test_ext().execute_with(|| {
         let outsider = AccountId32::from([250u8; 32]);
@@ -85,6 +205,7 @@ fn propose_requires_membership() {
 #[test]
 fn five_of_seven_dispatches_schedules_review_with_referendum() {
     new_test_ext().execute_with(|| {
+        reset_review_scheduler();
         set_triggers(guardian_core::TriggerState {
             gate_breach: true,
             ..guardian_core::TriggerState::none()
@@ -97,6 +218,13 @@ fn five_of_seven_dispatches_schedules_review_with_referendum() {
         approve_to_dispatch();
         assert!(PendingActions::<Test>::get()[0].dispatched);
         assert_eq!(ReviewDeadlines::<Test>::get().len(), 1);
+        assert_eq!(
+            ScheduledReviews::get(),
+            vec![(0, ReviewVerdict::Ratify, 100)]
+        );
+        assert_eq!(ReviewReferenda::<Test>::get(0), Some(100));
+        assert_eq!(VetoReviewReferenda::<Test>::get(0), None);
+        assert_eq!(NextReferendum::get(), 101);
         // The frozen `ReviewScheduled { action, referendum }` carries the index
         // the scheduler seam returned (mock starts at 100).
         assert!(last_events().iter().any(|e| matches!(
@@ -179,6 +307,16 @@ fn ratify_action_is_values_origin_only() {
         );
         assert_ok!(Guardian::ratify_action(values_origin(), 0));
         assert!(ReviewDeadlines::<Test>::get()[0].ratified);
+        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        for member in members().into_iter().take(5) {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    &member,
+                ),
+                GUARDIAN_BOND
+            );
+        }
     });
 }
 
@@ -201,6 +339,7 @@ fn ledger_freeze_requires_drift_and_one_renewal() {
                 id: PlaybookId::LedgerFreeze,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry,
+                target: None,
             },
             hash(1)
         ));
@@ -222,6 +361,7 @@ fn ledger_freeze_requires_drift_and_one_renewal() {
                 id: PlaybookId::LedgerFreeze,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry: 100,
+                target: None,
             },
             hash(1)
         ));
@@ -244,6 +384,7 @@ fn ledger_freeze_requires_drift_and_one_renewal() {
                 id: PlaybookId::LedgerFreeze,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry: 100,
+                target: None,
             },
             hash(1)
         ));
@@ -316,12 +457,21 @@ fn maintenance_crank_expires_playbooks_and_slashes_overdue_reviews() {
             hash(2)
         ));
         approve_to_dispatch();
-        // Review deadline is `current_epoch + 2`; advance past it and crank.
-        set_epoch(3);
+        // Review deadline is `current_epoch + 2`; it fails at that boundary.
+        set_epoch(2);
         run_to_block(2);
         let bonds = MemberBonds::<Test>::get();
         assert!(bonds[..5].iter().all(|b| *b == GUARDIAN_BOND / 2));
         assert!(bonds[5..].iter().all(|b| *b == GUARDIAN_BOND));
+        for member in members().into_iter().take(5) {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    &member,
+                ),
+                GUARDIAN_BOND / 2
+            );
+        }
         assert!(last_events()
             .iter()
             .any(|e| matches!(e, Event::ReviewFailed { action: 0, .. })));
@@ -810,6 +960,7 @@ fn each_playbook_activates_on_its_matching_live_trigger() {
                     id: *pb,
                     trigger: *trig,
                     expiry: 100_000,
+                    target: (*pb == PlaybookId::OracleVoid).then_some(0),
                 },
                 hash(1)
             ));
@@ -842,6 +993,7 @@ fn activate_playbook_rejects_wrong_pairing_and_inactive_trigger() {
                 id: PlaybookId::Depeg,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry: 100,
+                target: None,
             },
             hash(1)
         ));
@@ -860,6 +1012,7 @@ fn activate_playbook_rejects_wrong_pairing_and_inactive_trigger() {
                 id: PlaybookId::Depeg,
                 trigger: PlaybookTrigger::DepegMedian,
                 expiry: 100,
+                target: None,
             },
             hash(1)
         ));
@@ -948,6 +1101,7 @@ fn all_six_playbooks_fill_and_reactivation_renews_in_place() {
                     id: *pb,
                     trigger: *trig,
                     expiry: 100_000,
+                    target: (*pb == PlaybookId::OracleVoid).then_some(0),
                 },
                 hash(1)
             ));
@@ -964,6 +1118,7 @@ fn all_six_playbooks_fill_and_reactivation_renews_in_place() {
                 id: PlaybookId::Depeg,
                 trigger: PlaybookTrigger::DepegMedian,
                 expiry: 200_000,
+                target: None,
             },
             hash(1)
         ));
@@ -996,6 +1151,7 @@ fn duplicate_depeg_activations_never_block_ledger_freeze() {
                     id: PlaybookId::Depeg,
                     trigger: PlaybookTrigger::DepegMedian,
                     expiry: 100_000 + round,
+                    target: None,
                 },
                 hash(1)
             ));
@@ -1010,6 +1166,7 @@ fn duplicate_depeg_activations_never_block_ledger_freeze() {
                 id: PlaybookId::LedgerFreeze,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry: 100_000,
+                target: None,
             },
             hash(1)
         ));
@@ -1033,6 +1190,7 @@ fn duplicate_active_ledger_freeze_is_rejected_through_the_shell() {
                     id: PlaybookId::LedgerFreeze,
                     trigger: PlaybookTrigger::LedgerDrift,
                     expiry,
+                    target: None,
                 },
                 hash(1)
             ));
@@ -1073,6 +1231,7 @@ fn maintenance_crank_expires_playbook_and_reverts() {
                 id: PlaybookId::LedgerFreeze,
                 trigger: PlaybookTrigger::LedgerDrift,
                 expiry: 5,
+                target: None,
             },
             hash(1)
         ));
@@ -1199,6 +1358,7 @@ fn rng_power(rng: &mut Lcg, now: u32) -> GuardianPower {
                 id,
                 trigger,
                 expiry,
+                target: (id == PlaybookId::OracleVoid).then_some(rng.below(8) as u32),
             }
         }
         _ => GuardianPower::SuspendOnGate,
@@ -1321,6 +1481,10 @@ fn assert_shell_matches_oracle(g: &guardian_core::Guardian, step: u32) {
 #[test]
 fn shell_and_core_agree_over_randomized_guardian_operations() {
     new_test_ext().execute_with(|| {
+        // This differential targets the frame-free state machine. Real hold
+        // custody has dedicated tests below, so suppress fronting here to keep
+        // the oracle and shell state spaces identical across 500 operations.
+        ReviewDepositValue::set(0);
         let mut rng = Lcg(0xA10B_1EA0_17C0_FFEE);
         let mut oracle = guardian_core::Guardian::new(members_raw()).unwrap();
         let mut epoch: u32 = 0;
@@ -1495,6 +1659,12 @@ fn re_election_clears_pending_and_approvals_blocking_stale_dispatch() {
         assert_eq!(Approvals::<Test>::get().len(), 4);
 
         let new_council: [AccountId32; 7] = core::array::from_fn(|i| acct((i as u8) + 10));
+        for member in &new_council {
+            assert_ok!(<Balances as Mutate<AccountId32>>::mint_into(
+                member,
+                2 * GUARDIAN_BOND
+            ));
+        }
         assert_ok!(Guardian::set_members(values_origin(), new_council));
 
         assert!(PendingActions::<Test>::get().is_empty());
@@ -1529,22 +1699,395 @@ fn maintenance_crank_reaps_dispatched_action_and_terminal_review() {
 #[test]
 fn review_failure_slashes_and_schedules_recall() {
     // 06 §5.4: a missed 2-epoch deadline slashes each approver 50% AND
-    // auto-schedules a recall referendum on the `guardian` track.
+    // auto-schedules a recall referendum on the `guardian` track. A delay
+    // review leaves both verdict referenda open for the deadline cleanup.
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_status(ProposalStatus::Queued, false);
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::DelayOnce { pid: 4 },
+            hash(4)
+        ));
+        approve_to_dispatch();
+        assert_eq!(
+            ScheduledReviews::get(),
+            vec![
+                (0, ReviewVerdict::Ratify, 100),
+                (0, ReviewVerdict::UpholdVeto, 101),
+            ]
+        );
+        assert_eq!(ReviewReferenda::<Test>::get(0), Some(100));
+        assert_eq!(VetoReviewReferenda::<Test>::get(0), Some(101));
+        let fronting = ReviewFrontingOf::<Test>::get(0);
+        assert!(fronting.is_some());
+        let Some(fronting) = fronting else {
+            return;
+        };
+        assert_eq!(
+            fronting.slices.iter().copied().sum::<u128>(),
+            2 * ReviewDepositValue::get()
+        );
+
+        set_epoch(2); // dispatch epoch (0) + REVIEW_DEADLINE_EPOCHS (2)
+        run_to_block(2);
+        assert!(last_events()
+            .iter()
+            .any(|e| matches!(e, Event::ReviewFailed { action: 0, .. })));
+        assert!(last_events().iter().any(|e| matches!(
+            e,
+            Event::RecallScheduled {
+                action: 0,
+                referendum: 102
+            }
+        )));
+        assert_eq!(CancelledReviews::get(), vec![100, 101]);
+        assert_eq!(RefundedReviews::get(), vec![100, 101]);
+        assert_eq!(MemberBonds::<Test>::get()[..5], [GUARDIAN_BOND / 2; 5]);
+        for member in members().iter().take(5) {
+            assert_eq!(seat_hold(member), GUARDIAN_BOND / 2);
+        }
+        assert!(FailedActions::<Test>::contains_key(0));
+        assert!(!ReviewReferenda::<Test>::contains_key(0));
+        assert!(!VetoReviewReferenda::<Test>::contains_key(0));
+        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability() {
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_status(ProposalStatus::Queued, false);
+        for (action, power) in [
+            (0, GuardianPower::DelayOnce { pid: 10 }),
+            (1, GuardianPower::DelayOnce { pid: 11 }),
+            (2, GuardianPower::ForceRerun { pid: 12 }),
+        ] {
+            assert_ok!(Guardian::propose_action(
+                RuntimeOrigin::signed(acct(1)),
+                power,
+                hash(action as u8),
+            ));
+            for member in 2..=5u8 {
+                assert_ok!(Guardian::approve_action(
+                    RuntimeOrigin::signed(acct(member)),
+                    action,
+                ));
+            }
+        }
+        assert_eq!(ReviewDeadlines::<Test>::get().len(), 3);
+        assert_eq!(
+            ScheduledReviews::get(),
+            vec![
+                (0, ReviewVerdict::Ratify, 100),
+                (0, ReviewVerdict::UpholdVeto, 101),
+                (1, ReviewVerdict::Ratify, 102),
+                (1, ReviewVerdict::UpholdVeto, 103),
+                (2, ReviewVerdict::Ratify, 104),
+            ]
+        );
+        assert_eq!(NextReferendum::get(), 105);
+        for action in 0..2 {
+            let fronting = ReviewFrontingOf::<Test>::get(action);
+            assert!(fronting.is_some());
+            let Some(fronting) = fronting else {
+                return;
+            };
+            assert_eq!(
+                fronting.slices.iter().copied().sum::<u128>(),
+                2 * ReviewDepositValue::get()
+            );
+        }
+        let force_fronting = ReviewFrontingOf::<Test>::get(2);
+        assert!(force_fronting.is_some());
+        let Some(force_fronting) = force_fronting else {
+            return;
+        };
+        assert_eq!(
+            force_fronting.slices.iter().copied().sum::<u128>(),
+            ReviewDepositValue::get()
+        );
+        assert_ok!(Guardian::do_try_state());
+
+        // Isolate the middle review's refund failure. The first and third
+        // reviews must commit independently instead of sharing one rollback.
+        ReviewRefundFailsFor::set(Some(102));
+        set_epoch(2);
+        run_to_block(2);
+        assert!(FailedActions::<Test>::contains_key(0));
+        assert!(!FailedActions::<Test>::contains_key(1));
+        assert!(FailedActions::<Test>::contains_key(2));
+        assert!(ReviewFrontingOf::<Test>::contains_key(1));
+        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        assert!(!ReviewFrontingOf::<Test>::contains_key(2));
+        assert!(!ReviewReferenda::<Test>::contains_key(0));
+        assert_eq!(ReviewReferenda::<Test>::get(1), Some(102));
+        assert!(!ReviewReferenda::<Test>::contains_key(2));
+        assert!(!VetoReviewReferenda::<Test>::contains_key(0));
+        assert_eq!(VetoReviewReferenda::<Test>::get(1), Some(103));
+        assert!(!VetoReviewReferenda::<Test>::contains_key(2));
+
+        let stranded = ReviewFrontingOf::<Test>::get(1);
+        assert!(stranded.is_some(), "failed review must remain retryable");
+        let Some(stranded) = stranded else {
+            return;
+        };
+        assert_eq!(
+            stranded.slices.iter().copied().sum::<u128>(),
+            2 * ReviewDepositValue::get()
+        );
+        let bonds = MemberBonds::<Test>::get();
+        for (position, bond) in bonds.iter().take(5).enumerate() {
+            assert_eq!(
+                *bond, stranded.slices[position],
+                "actual obligation is held balance plus outstanding fronting"
+            );
+        }
+        assert_ok!(Guardian::do_try_state());
+
+        // Retrying only the failed review consumes the remaining bounded
+        // liability. No exact transfer can demand more than the live hold.
+        ReviewRefundFailsFor::set(None);
+        run_to_block(3);
+        for action in 0..3 {
+            assert!(FailedActions::<Test>::contains_key(action));
+            assert!(!ReviewReferenda::<Test>::contains_key(action));
+            assert!(!VetoReviewReferenda::<Test>::contains_key(action));
+            assert!(!ReviewFrontingOf::<Test>::contains_key(action));
+        }
+        assert!(MemberBonds::<Test>::get()[..5]
+            .iter()
+            .all(|bond| *bond == 0));
+        let reason = RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond);
+        for member in members().iter().take(5) {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(&reason, member),
+                0
+            );
+        }
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn delay_ratification_cancels_uphold_and_refunds_both_reviews() {
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_status(ProposalStatus::Queued, false);
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::DelayOnce { pid: 42 },
+            hash(8)
+        ));
+        approve_to_dispatch();
+
+        assert_eq!(
+            ScheduledReviews::get(),
+            vec![
+                (0, ReviewVerdict::Ratify, 100),
+                (0, ReviewVerdict::UpholdVeto, 101),
+            ]
+        );
+        assert_eq!(ReviewReferenda::<Test>::get(0), Some(100));
+        assert_eq!(VetoReviewReferenda::<Test>::get(0), Some(101));
+        let fronting = ReviewFrontingOf::<Test>::get(0);
+        assert!(fronting.is_some());
+        let Some(fronting) = fronting else {
+            return;
+        };
+        assert_eq!(
+            fronting.slices.iter().copied().sum::<u128>(),
+            2 * ReviewDepositValue::get()
+        );
+        for (position, member) in members().iter().take(5).enumerate() {
+            assert_eq!(
+                seat_hold(member),
+                GUARDIAN_BOND.saturating_sub(fronting.slices[position])
+            );
+        }
+
+        assert_ok!(Guardian::ratify_action(values_origin(), 0));
+
+        assert_eq!(CancelledReviews::get(), vec![101]);
+        assert_eq!(RefundedReviews::get(), vec![100, 101]);
+        assert!(ReviewDeadlines::<Test>::get()[0].ratified);
+        assert!(!ReviewReferenda::<Test>::contains_key(0));
+        assert!(!VetoReviewReferenda::<Test>::contains_key(0));
+        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        for member in members().iter().take(5) {
+            assert_eq!(seat_hold(member), GUARDIAN_BOND);
+        }
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn underfunded_set_members_is_fully_atomic() {
+    new_test_ext().execute_with(|| {
+        let before_members = Members::<Test>::get();
+        let before_holds: Vec<_> = members()
+            .iter()
+            .map(|member| {
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    member,
+                )
+            })
+            .collect();
+        let new_council: [AccountId32; 7] = core::array::from_fn(|i| acct((i as u8) + 20));
+        assert!(Guardian::set_members(values_origin(), new_council).is_err());
+        assert_eq!(Members::<Test>::get(), before_members);
+        assert!(PendingBondReleases::<Test>::get().is_empty());
+        let after_holds: Vec<_> = members()
+            .iter()
+            .map(|member| {
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    member,
+                )
+            })
+            .collect();
+        assert_eq!(after_holds, before_holds);
+    });
+}
+
+#[test]
+fn outgoing_bonds_release_one_epoch_after_re_election() {
+    new_test_ext().execute_with(|| {
+        let outgoing = members();
+        let incoming: [AccountId32; 7] = core::array::from_fn(|i| acct((i as u8) + 30));
+        for member in &incoming {
+            assert_ok!(<Balances as Mutate<AccountId32>>::mint_into(
+                member,
+                2 * GUARDIAN_BOND
+            ));
+        }
+        assert_ok!(Guardian::set_members(values_origin(), incoming));
+        assert_eq!(PendingBondReleases::<Test>::get().len(), 7);
+        for member in &outgoing {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    member,
+                ),
+                GUARDIAN_BOND
+            );
+        }
+        set_epoch(1);
+        run_to_block(2);
+        assert!(PendingBondReleases::<Test>::get().is_empty());
+        for member in outgoing {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    &member,
+                ),
+                0
+            );
+        }
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn recall_vacates_approvers_and_releases_residual_bonds_one_epoch_later() {
     new_test_ext().execute_with(|| {
         set_triggers(all_triggers());
         assert_ok!(Guardian::propose_action(
             RuntimeOrigin::signed(acct(1)),
             GuardianPower::SuspendOnGate,
-            hash(4)
+            hash(7)
         ));
         approve_to_dispatch();
-        set_epoch(3); // past the dispatch epoch (0) + REVIEW_DEADLINE_EPOCHS (2)
+        set_epoch(2);
         run_to_block(2);
-        assert!(last_events()
-            .iter()
-            .any(|e| matches!(e, Event::ReviewFailed { action: 0, .. })));
-        assert!(last_events()
-            .iter()
-            .any(|e| matches!(e, Event::RecallScheduled { action: 0, .. })));
+        assert_ok!(Guardian::recall(values_origin(), 0));
+        let seats = Members::<Test>::get().expect("council remains initialized");
+        assert_eq!(seats.iter().filter(|seat| seat.is_none()).count(), 5);
+        assert_eq!(PendingBondReleases::<Test>::get().len(), 5);
+
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(6)),
+            GuardianPower::SuspendOnGate,
+            hash(8)
+        ));
+        assert_ok!(Guardian::approve_action(RuntimeOrigin::signed(acct(7)), 1));
+        assert!(!PendingActions::<Test>::get()[0].dispatched);
+
+        set_epoch(3);
+        run_to_block(3);
+        assert!(PendingBondReleases::<Test>::get().is_empty());
+        for member in members().into_iter().take(5) {
+            assert_eq!(
+                <Balances as InspectHold<AccountId32>>::balance_on_hold(
+                    &RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond),
+                    &member,
+                ),
+                0
+            );
+        }
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn uphold_veto_is_delay_only_and_atomic_with_the_epoch_callback() {
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_status(ProposalStatus::Queued, false);
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::DelayOnce { pid: 42 },
+            hash(9)
+        ));
+        approve_to_dispatch();
+        assert_eq!(ReviewReferenda::<Test>::get(0), Some(100));
+        assert_eq!(VetoReviewReferenda::<Test>::get(0), Some(101));
+        assert_eq!(
+            ScheduledReviews::get(),
+            vec![
+                (0, ReviewVerdict::Ratify, 100),
+                (0, ReviewVerdict::UpholdVeto, 101),
+            ]
+        );
+        VetoFails::set(true);
+        assert_noop!(
+            Guardian::uphold_veto(values_origin(), 0),
+            DispatchError::Other("veto callback unavailable")
+        );
+        assert!(!ReviewDeadlines::<Test>::get()[0].ratified);
+        assert!(ReviewFrontingOf::<Test>::contains_key(0));
+        assert!(CancelledReviews::get().is_empty());
+        assert!(RefundedReviews::get().is_empty());
+
+        VetoFails::set(false);
+        assert_ok!(Guardian::uphold_veto(values_origin(), 0));
+        assert_eq!(CancelledReviews::get(), vec![100]);
+        assert_eq!(RefundedReviews::get(), vec![100, 101]);
+        assert!(ReviewDeadlines::<Test>::get()[0].ratified);
+        assert!(!ReviewReferenda::<Test>::contains_key(0));
+        assert!(!VetoReviewReferenda::<Test>::contains_key(0));
+        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        for member in members().iter().take(5) {
+            assert_eq!(seat_hold(member), GUARDIAN_BOND);
+        }
+        assert_ok!(Guardian::do_try_state());
+    });
+
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_triggers(all_triggers());
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::SuspendOnGate,
+            hash(10)
+        ));
+        approve_to_dispatch();
+        assert_noop!(
+            Guardian::uphold_veto(values_origin(), 0),
+            Error::<Test>::NotDelayAction
+        );
     });
 }

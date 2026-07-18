@@ -267,6 +267,7 @@ parameter_types! {
     pub static AttestationPresent: bool = true;
     pub static AttestationQuorum: bool = true;
     pub static GuardianHeld: Vec<ProposalId> = Vec::new();
+    pub static GateSuspended: bool = false;
     pub static LedgerFrozen: bool = false;
     pub static Timelock: BlockNumber = 2;
     pub static Grace: BlockNumber = 10;
@@ -407,6 +408,9 @@ pub struct TestGuardian;
 impl GuardianState for TestGuardian {
     fn rerun_held(pid: ProposalId) -> bool {
         GuardianHeld::get().contains(&pid)
+    }
+    fn gate_suspended() -> bool {
+        GateSuspended::get()
     }
     fn ledger_freeze_active() -> bool {
         LedgerFrozen::get()
@@ -1047,6 +1051,7 @@ pub fn reset_statics() {
     AttestationPresent::set(true);
     AttestationQuorum::set(true);
     GuardianHeld::set(Vec::new());
+    GateSuspended::set(false);
     LedgerFrozen::set(false);
     Timelock::set(2);
     Grace::set(10);

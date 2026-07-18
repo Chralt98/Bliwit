@@ -68,7 +68,7 @@ permission to replace the reporting game with an operator judgment
    the §5.4 verdict is decomposed into the settled `value` and the
    `reporter_wrong` stake-discipline decision. The spec's
    `oracle.adjudicate(round_id, verdict)` shorthand diverges from that shipped
-   signature and is logged as SQ-234
+   signature and is logged as SQ-236
    ([07 §5.4](../../docs/architecture/07-oracle-and-disputes.md)).
 
 ## Remediation
@@ -99,7 +99,7 @@ permission to replace the reporting game with an operator judgment
 2. The `OracleResolution` enactment may call only the shipped
    `oracle.adjudicate(component, epoch, spec_version, value, reporter_wrong)` with
    the committed round-key triple and the verdict's settled value and
-   reporter-fault boolean; retain SQ-234 on the §5.4 shorthand divergence.
+   reporter-fault boolean; retain SQ-236 on the §5.4 shorthand divergence.
    Re-check the snapshot electorate and referendum status before enactment; a
    result arriving after the money deadline remains bond-and-reputation-only
    ([07 §5.4–§5.6](../../docs/architecture/07-oracle-and-disputes.md)).

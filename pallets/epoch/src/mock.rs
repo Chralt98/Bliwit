@@ -754,6 +754,7 @@ impl pallet_epoch::Config for Test {
     type GuardianOrigin = TestGuardianOrigin;
     type ExecutionGuardOrigin = TestExecutionGuardOrigin;
     type VoidAuthority = TestVoidAuthority;
+    type EmergencyPlaybookOrigin = TestVoidAuthority;
     type ConstitutionalValuesOrigin = TestConstitutionalValuesOrigin;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]

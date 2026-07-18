@@ -33,6 +33,8 @@ pub trait WeightInfo {
     fn redeem_baseline_pair() -> Weight;
     fn sweep_dust() -> Weight;
     fn sweep_dust_baseline() -> Weight;
+    fn set_split_paused() -> Weight;
+    fn set_frozen() -> Weight;
 }
 
 /// A conservative reference weight (03 §5 weight drivers: a handful of map
@@ -92,4 +94,6 @@ ref_impl!(
     redeem_baseline_pair,
     sweep_dust,
     sweep_dust_baseline,
+    set_split_paused,
+    set_frozen,
 );

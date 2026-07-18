@@ -734,13 +734,6 @@ fn epoch_privileged_calls() -> [(String, RuntimeCall, CallDomain); 5] {
             CallDomain::GuardianHold,
         ),
         (
-            String::from("Epoch.veto_upheld"),
-            RuntimeCall::Epoch(pallet_epoch::Call::veto_upheld {
-                pid: Default::default(),
-            }),
-            CallDomain::GuardianHold,
-        ),
-        (
             String::from("Epoch.force_reject_process_hold"),
             RuntimeCall::Epoch(pallet_epoch::Call::force_reject_process_hold {
                 pid: Default::default(),
@@ -751,6 +744,14 @@ fn epoch_privileged_calls() -> [(String, RuntimeCall, CallDomain); 5] {
             String::from("Epoch.void_cohort"),
             RuntimeCall::Epoch(pallet_epoch::Call::void_cohort {
                 epoch: Default::default(),
+            }),
+            CallDomain::EmergencyPlaybook,
+        ),
+        (
+            String::from("Epoch.set_intake_paused"),
+            RuntimeCall::Epoch(pallet_epoch::Call::set_intake_paused {
+                paused: false,
+                expiry: 0,
             }),
             CallDomain::EmergencyPlaybook,
         ),

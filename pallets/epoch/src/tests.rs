@@ -593,6 +593,54 @@ fn submit_and_withdraw_cover_happy_and_shape_error_paths() {
 }
 
 #[test]
+fn intake_pause_is_origin_gated_bounded_and_lazily_expires() {
+    new_test_ext().execute_with(|| {
+        set_block(10);
+        let until = 20;
+        assert_ok!(Epoch::set_intake_paused(
+            RuntimeOrigin::signed(void_authority()),
+            true,
+            until,
+        ));
+        assert_eq!(IntakePausedUntil::<Test>::get(), Some(until));
+        assert_noop!(
+            Epoch::submit(
+                RuntimeOrigin::signed(keeper()),
+                proposal(1, keeper(), ProposalState::Submitted, 0, 10),
+            ),
+            Error::<Test>::IntakePaused
+        );
+
+        set_block(until);
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(keeper()),
+            proposal(1, keeper(), ProposalState::Submitted, 0, until),
+        ));
+
+        for origin in [
+            RuntimeOrigin::root(),
+            RuntimeOrigin::none(),
+            RuntimeOrigin::signed(nobody()),
+        ] {
+            assert_noop!(
+                Epoch::set_intake_paused(origin, false, 0),
+                DispatchError::BadOrigin
+            );
+        }
+        assert_noop!(
+            Epoch::set_intake_paused(
+                RuntimeOrigin::signed(void_authority()),
+                true,
+                until
+                    .saturating_add(futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS)
+                    .saturating_add(1),
+            ),
+            Error::<Test>::IntakePauseOutOfBounds
+        );
+    });
+}
+
+#[test]
 fn signed_keeper_calls_reject_root_and_none() {
     new_test_ext().execute_with(|| {
         let proposal = proposal(1, keeper(), ProposalState::Submitted, 0, 1);
@@ -642,13 +690,6 @@ fn authority_calls_reject_the_closed_origin_misuse_set() {
                 Epoch::delay_once(origin, 1, [1; 32]),
                 DispatchError::BadOrigin
             );
-        }
-        for origin in [
-            RuntimeOrigin::root(),
-            RuntimeOrigin::none(),
-            RuntimeOrigin::signed(nobody()),
-        ] {
-            assert_noop!(Epoch::veto_upheld(origin, 1), DispatchError::BadOrigin);
         }
         for origin in [
             RuntimeOrigin::root(),
@@ -2155,7 +2196,7 @@ fn guardian_delay_rerun_and_t24_veto_paths_work_without_enqueue() {
 
     new_test_ext().execute_with(|| {
         assert_ok!(Epoch::seed(callback_state(1, ProposalState::Suspended)));
-        assert_ok!(Epoch::veto_upheld(RuntimeOrigin::signed(guardian()), 1));
+        assert_ok!(Epoch::veto_upheld_from_review(1));
         let proposal = Proposals::<Test>::get(1).expect("vetoed proposal enters measurement");
         assert_eq!(proposal.state, ProposalState::Measuring);
         assert_eq!(
@@ -2270,7 +2311,7 @@ fn veto_upheld_releases_the_queued_guard_entry() {
         );
         assert!(!GuardStateModel::get().queue.is_empty());
         // T24: upholding the veto drives it terminal and must dequeue A11.
-        assert_ok!(Epoch::veto_upheld(RuntimeOrigin::signed(guardian()), 1));
+        assert_ok!(Epoch::veto_upheld_from_review(1));
         assert_eq!(
             Proposals::<Test>::get(1).map(|proposal| proposal.state),
             Some(ProposalState::Measuring)

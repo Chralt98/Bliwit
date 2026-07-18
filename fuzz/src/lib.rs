@@ -555,6 +555,9 @@ impl GuardianView for OpenGuardian {
     fn rerun_held(&self, _: u64) -> bool {
         false
     }
+    fn gate_suspended(&self) -> bool {
+        false
+    }
     fn ledger_freeze_active(&self, _: u32) -> bool {
         false
     }

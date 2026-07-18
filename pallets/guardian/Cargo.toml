@@ -17,6 +17,7 @@ sp-runtime = { workspace = true }
 frame-benchmarking = { workspace = true, optional = true }
 
 [dev-dependencies]
+pallet-balances = { workspace = true, features = ["std"] }
 sp-core = { workspace = true, features = ["std"] }
 sp-io = { workspace = true, features = ["std"] }
 

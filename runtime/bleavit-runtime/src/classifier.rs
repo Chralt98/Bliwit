@@ -1,9 +1,12 @@
 use alloc::{boxed::Box, vec, vec::Vec};
-use frame_support::traits::{Contains, IsSubType, UnfilteredDispatchable};
-use futarchy_primitives::{kernel, ProposalClass, RuntimeVersionConstraint, H256};
+use frame_support::{
+    traits::{ConstU32, Contains, IsSubType, UnfilteredDispatchable},
+    BoundedVec,
+};
+use futarchy_primitives::{kernel, ProposalClass, ResourceId, RuntimeVersionConstraint, H256};
 use origins_core::{BoxedCall, CallDomain, Origin as ClassOrigin, RuntimeCall as FilterCall};
 use pallet_origins::{SafetyClassifier, SafetyFilter};
-use parity_scale_codec::Decode;
+use parity_scale_codec::{Decode, Encode};
 use sp_runtime::{traits::Dispatchable, DispatchError};
 
 use crate::{Runtime, RuntimeCall, RuntimeOrigin, System, VERSION};
@@ -57,6 +60,120 @@ impl ProjectionBudget {
     fn leave(&mut self) {
         self.depth = self.depth.saturating_sub(1);
     }
+}
+
+/// Why a proposal payload has no canonical 05 §1.4 resource footprint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FootprintError {
+    Unclassifiable,
+    TooManyResources,
+}
+
+fn keyed_resource(tag: u8, discriminator: &[u8]) -> ResourceId {
+    let digest = sp_io::hashing::blake2_256(discriminator);
+    let mut resource = [0_u8; 8];
+    resource[0] = tag;
+    resource[1..].copy_from_slice(&digest[..7]);
+    resource
+}
+
+fn singleton_resource(tag: u8) -> ResourceId {
+    let mut resource = [0_u8; 8];
+    resource[0] = tag;
+    resource
+}
+
+fn insert_resource(
+    footprint: &mut BoundedVec<ResourceId, ConstU32<8>>,
+    resource: ResourceId,
+) -> Result<(), FootprintError> {
+    if !footprint.contains(&resource) {
+        footprint
+            .try_push(resource)
+            .map_err(|_| FootprintError::TooManyResources)?;
+    }
+    Ok(())
+}
+
+fn derive_resource_inner(
+    call: &RuntimeCall,
+    budget: &mut ProjectionBudget,
+    footprint: &mut BoundedVec<ResourceId, ConstU32<8>>,
+) -> Result<(), FootprintError> {
+    if !budget.count() {
+        return Err(FootprintError::Unclassifiable);
+    }
+
+    let resource = match call {
+        RuntimeCall::Constitution(pallet_constitution::Call::set_param { key, .. }) => {
+            if !matches!(
+                pallet_constitution::Params::<Runtime>::get(key).map(|record| record.class),
+                Some(
+                    pallet_constitution::ParamClass::Param
+                        | pallet_constitution::ParamClass::Treasury
+                        | pallet_constitution::ParamClass::Meta
+                        | pallet_constitution::ParamClass::MetaAndValues
+                )
+            ) {
+                return Err(FootprintError::Unclassifiable);
+            }
+            keyed_resource(0x01, key)
+        }
+        RuntimeCall::Constitution(pallet_constitution::Call::amend_registry { key, .. }) => {
+            keyed_resource(0x01, key)
+        }
+        RuntimeCall::Constitution(pallet_constitution::Call::set_capability { record }) => {
+            let mut discriminator = record.class.encode();
+            discriminator.extend(record.capability.encode());
+            keyed_resource(0x02, &discriminator)
+        }
+        RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
+            singleton_resource(0x03)
+        }
+        RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::spend { dest, .. }) => {
+            keyed_resource(0x07, &dest.encode())
+        }
+        RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::open_stream {
+            recipient,
+            ..
+        }) => keyed_resource(0x07, &recipient.encode()),
+        RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::cancel_stream { id }) => {
+            keyed_resource(0x08, &id.encode())
+        }
+        RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::fund_budget_line {
+            line,
+            ..
+        }) => keyed_resource(0x09, &line.encode()),
+        RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) => {
+            if !budget.enter() {
+                return Err(FootprintError::Unclassifiable);
+            }
+            for nested in calls {
+                if let Err(error) = derive_resource_inner(nested, budget, footprint) {
+                    budget.leave();
+                    return Err(error);
+                }
+            }
+            budget.leave();
+            return Ok(());
+        }
+        _ => return Err(FootprintError::Unclassifiable),
+    };
+
+    insert_resource(footprint, resource)
+}
+
+/// Derive the canonical, deduplicated resource-domain footprint from a decoded
+/// execution payload (05 §1.4). Only `utility.batch_all` is a valid wrapper.
+pub(crate) fn derive_resource_footprint(
+    calls: &[RuntimeCall],
+) -> Result<BoundedVec<ResourceId, ConstU32<8>>, FootprintError> {
+    let mut budget = ProjectionBudget::root();
+    let mut footprint = BoundedVec::default();
+    for call in calls {
+        derive_resource_inner(call, &mut budget, &mut footprint)?;
+    }
+    Ok(footprint)
 }
 
 fn denied() -> FilterCall {
@@ -471,6 +588,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_conditional_ledger::Call::sweep_dust_baseline { .. } => {
                 leaf(CallDomain::Public)
             }
+            pallet_conditional_ledger::Call::set_split_paused { .. }
+            | pallet_conditional_ledger::Call::set_frozen { .. } => {
+                leaf(CallDomain::EmergencyPlaybook)
+            }
             pallet_conditional_ledger::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::Market(call) => match call {
@@ -478,6 +599,8 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_market::Call::sell { .. }
             | pallet_market::Call::crank_observe { .. }
             | pallet_market::Call::reap { .. } => leaf(CallDomain::Public),
+            pallet_market::Call::freeze_creation { .. }
+            | pallet_market::Call::set_frozen { .. } => leaf(CallDomain::EmergencyPlaybook),
             pallet_market::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::Welfare(call) => match call {
@@ -535,7 +658,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
         RuntimeCall::Guardian(call) => match call {
             pallet_guardian::Call::set_members { .. }
             | pallet_guardian::Call::ratify_action { .. }
-            | pallet_guardian::Call::renew_playbook { .. } => {
+            | pallet_guardian::Call::renew_playbook { .. }
+            | pallet_guardian::Call::uphold_veto { .. }
+            | pallet_guardian::Call::recall { .. }
+            | pallet_guardian::Call::set_playbook_registered { .. } => {
                 leaf(CallDomain::ConstitutionalValues)
             }
             pallet_guardian::Call::propose_action { .. }
@@ -561,7 +687,6 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
                 leaf(CallDomain::ConstitutionalValues)
             }
             pallet_epoch::Call::delay_once { .. }
-            | pallet_epoch::Call::veto_upheld { .. }
             | pallet_epoch::Call::force_reject_process_hold { .. } => {
                 leaf(CallDomain::GuardianHold)
             }
@@ -572,7 +697,8 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_epoch::Call::mark_failed_executed { .. }
             | pallet_epoch::Call::retry_exhausted_to_measurement { .. }
             | pallet_epoch::Call::expire_or_stale_queue { .. } => leaf(CallDomain::Public),
-            pallet_epoch::Call::void_cohort { .. } => leaf(CallDomain::EmergencyPlaybook),
+            pallet_epoch::Call::void_cohort { .. }
+            | pallet_epoch::Call::set_intake_paused { .. } => leaf(CallDomain::EmergencyPlaybook),
             pallet_epoch::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::ExecutionGuard(call) => match call {
@@ -696,7 +822,14 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
     fn rederive_call(
         call: &RuntimeCall,
     ) -> Result<pallet_execution_guard::ReDerivedCall, DispatchError> {
-        if live_execution_freeze() {
+        // Preserve the legacy fail-closed classifier rejection for an
+        // unacknowledged breach. Once guardians have explicitly suspended the
+        // current breach, allow domain re-derivation to reach guard check (9),
+        // which reports the more specific GateSuspended reason. Check (10)
+        // and dispatch-time safety filtering remain unchanged.
+        if live_execution_freeze()
+            && !<crate::configs::RuntimeGuardianState as pallet_execution_guard::GuardianState>::gate_suspended()
+        {
             return Err(DispatchError::Other("live execution freeze active"));
         }
         if Self::authorize_upgrade_hash(call).is_some() {
@@ -885,6 +1018,9 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             | RuntimeCall::Guardian(pallet_guardian::Call::set_members { .. })
             | RuntimeCall::Guardian(pallet_guardian::Call::ratify_action { .. })
             | RuntimeCall::Guardian(pallet_guardian::Call::renew_playbook { .. })
+            | RuntimeCall::Guardian(pallet_guardian::Call::uphold_veto { .. })
+            | RuntimeCall::Guardian(pallet_guardian::Call::recall { .. })
+            | RuntimeCall::Guardian(pallet_guardian::Call::set_playbook_registered { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::set_members { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::resolve_challenge { .. })
             | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. })
