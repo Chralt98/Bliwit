@@ -129,9 +129,19 @@ jobs:
         run: tools/verify/run-model-checks.sh
 
   # S1 property suites at the normative ≥10^6 case count — 15 §4.2–4.3; 03 §11.
+  # Sharded per-crate across fresh parallel runners: a single combined run is
+  # ~70-85 min and intermittently trips "runner lost communication"
+  # (CPU/memory starvation on one marathon job). fail-fast: false so every
+  # shard reports; the timeout turns a genuine hang into a clean failure long
+  # before the 6 h default.
   property-suites:
     name: Property suites (full count)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [ledger, market, constitution]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.89.0
@@ -139,7 +149,7 @@ jobs:
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
       - name: Run property suites at full case count
-        run: tools/ci/property-gates.sh
+        run: tools/ci/property-gates.sh ${{ matrix.suite }}
 
   weights:
     name: Weight regression
