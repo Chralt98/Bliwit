@@ -83,28 +83,35 @@ def marked_open_interest(
     q_pol_long=Decimal(0),
     q_pol_short=Decimal(0),
 ) -> Decimal:
-    """04 §7a noi_t = sum over sides of max(q_side - q_pol_side, 0)*price_side.
+    """04 §7a at-risk capital: mark only the unmatched outcome leg.
 
     `q_side` is the maker's net sold quantity per side (the LMSR cost-function
     state); `q_pol_side` is the recorded protocol-seeded position (04 §10 — the
-    storage the "POL undisturbed" check reads). The LONG side is marked at the
-    stored quote `price_long` and the SHORT side at its complement. Rounds DOWN
-    on the USDC base-unit grid: the measure feeds validity floors and the
-    step-9 certificate, so under-counting is the conservative direction.
+    storage the "POL undisturbed" check reads). After the POL exclusion, equal
+    LONG/SHORT quantities are a complete set that pays par for every settlement
+    and therefore carries no settlement risk. Strip that matched quantity first,
+    then mark only the excess LONG at `price_long` or excess SHORT at its
+    complement. Rounds DOWN on the USDC base-unit grid: the measure feeds
+    validity floors and the step-9 certificate, so under-counting is the
+    conservative direction.
     """
     with localcontext() as ctx:
         ctx.prec = WORK_PREC
         price = _d(price_long)
         if not Decimal(0) <= price <= Decimal(1):
             raise ValueError("price must be in [0, 1]")
-        noi = max(_d(q_long) - _d(q_pol_long), Decimal(0)) * price + max(
-            _d(q_short) - _d(q_pol_short), Decimal(0)
-        ) * (Decimal(1) - price)
+        long = max(_d(q_long) - _d(q_pol_long), Decimal(0))
+        short = max(_d(q_short) - _d(q_pol_short), Decimal(0))
+        noi = (
+            (long - short) * price
+            if long >= short
+            else (short - long) * (Decimal(1) - price)
+        )
         return noi.quantize(BASE_UNIT, rounding=ROUND_FLOOR)
 
 
 class ContestCapitalAccumulator:
-    """04 §7a contest-capital accumulator: N += noi_t*Δblocks alongside A.
+    """04 §7a at-risk contest-capital accumulator: N += noi_t*Δblocks.
 
     Mirrors `TwapAccumulator`'s discipline exactly: the caller supplies the
     PREVIOUS block's stored q and quote for each recorded observation (a trade
@@ -112,8 +119,9 @@ class ContestCapitalAccumulator:
     in block n); the newly recorded `noi_t` is weighted backward over the
     interval that ends at its record block; `ContestCapital(w) = (N(end) -
     N(start)) / blocks` via the same checkpoint grid. There is no slew clamp —
-    κ is a price-series property; wash flow already nets out of `noi_t` by LMSR
-    path independence. N is monotone non-decreasing (noi_t >= 0).
+    κ is a price-series property; wash flow nets out by LMSR path independence
+    and balanced complete-set inventory nets out because it has no settlement
+    risk. N is monotone non-decreasing (noi_t >= 0).
     """
 
     def __init__(self, q_pol_long=Decimal(0), q_pol_short=Decimal(0)):

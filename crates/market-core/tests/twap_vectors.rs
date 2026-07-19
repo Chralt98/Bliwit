@@ -213,8 +213,9 @@ fn exact_usdc(value: &Value, context: &str) -> u128 {
 
 /// 04 §7a / 15 §4.4 / G0 corpus-family attestation: replay every
 /// `contest_scenarios` row against the production `contest_capital` mark
-/// (SQ-231: marked net open interest, POL excluded, floored on the base-unit
-/// grid) plus the §7a backward-weighted accumulator identity
+/// (at-risk directional open interest, balanced complete sets and POL
+/// excluded, floored on the base-unit grid) plus the §7a backward-weighted
+/// accumulator identity
 /// `ContestCapital(w) = (N(end) − N(start)) / blocks`. Unknown scenarios or
 /// unknown expectation fields fail loudly; the executed count is pinned.
 #[test]
@@ -223,10 +224,11 @@ fn contest_vectors_match_python_reference_model() {
     let scenarios = fixture["contest_scenarios"]
         .as_array()
         .expect("contest_scenarios family present");
-    assert_eq!(scenarios.len(), 3, "contest family cardinality drifted");
+    assert_eq!(scenarios.len(), 4, "contest family cardinality drifted");
     let known = [
         "wash_round_trip_zero",
         "held_exposure_marks_capital_times_time",
+        "balanced_complete_sets_excluded",
         "pol_seeded_positions_excluded",
     ];
 

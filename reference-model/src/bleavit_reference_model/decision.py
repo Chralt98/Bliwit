@@ -90,8 +90,8 @@ def grade_welfare_book(
 ) -> Grade:
     """05 §5.2 welfare-book decision grade, per book.
 
-    The contest measure is the 04 §7a time-averaged contest capital — gross
-    traded notional is NOT the measure (SQ-231 amendment 2026-07-18). The
+    The contest measure is the 04 §7a time-averaged at-risk contest capital:
+    balanced complete sets and gross traded notional are NOT the measure. The
     remediable-by-time shortfalls (contest capital below `dec.v_min(class)`,
     coverage below `dec.coverage`, a first stale event — 04 §7 grants exactly
     one staleness extension) grade Insufficient, feeding step 5's single

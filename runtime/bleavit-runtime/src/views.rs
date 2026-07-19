@@ -97,7 +97,7 @@ pub fn decision_stats(pid: ProposalId) -> Option<DecisionStatsView> {
     let converged = pallet_epoch::decision_converged(input, snapshot.params.delta_max);
 
     // D-4 (05 §5.6; 08 §5.2, SQ-231): measured_depth already combines the
-    // pair's rounded-down POL depth with its 04 §7a contest capital under the
+    // pair's rounded-down POL depth with its 04 §7a at-risk contest capital under the
     // sec.flow_cap ceiling. `None` published flow is the normative L/2
     // fallback, not missing backing.
     let attack_cost_hat = pallet_epoch::attack_cost_hat(

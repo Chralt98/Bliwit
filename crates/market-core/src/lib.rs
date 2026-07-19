@@ -249,8 +249,9 @@ pub struct TwapWindow {
     pub observations: u32,
     pub stale_events: u8,
     /// Time integral (04 §7a `N`) of non-POL **contest capital** — the marked
-    /// USDC value of net outstanding trader positions ([`contest_capital`]) —
-    /// over this full window. Monotone non-decreasing (I-13).
+    /// USDC value of unmatched directional trader exposure
+    /// ([`contest_capital`]) — over this full window. Monotone non-decreasing
+    /// (I-13).
     pub contest_capital_blocks: u128,
     /// Last block through which contest capital has been integrated.
     pub contest_accrued_until: BlockNumber,
@@ -412,11 +413,13 @@ pub fn maker_loss_floor(b: Balance) -> Option<Balance> {
     fixed_to_base_units_down(fx(b).ok()?.checked_mul(LN_2).ok()?).ok()
 }
 
-/// 04 §7a contest capital `noi_t`: the marked USDC value of net outstanding
-/// **trader** positions against the maker,
-/// `Σ_branch max(q_branch − q_pol_branch, 0) · price_branch`, evaluated from a
-/// *stored* (previous-block) quantity pair and quote so a trade can never
-/// contribute its own state to the sample that prices it.
+/// 04 §7a at-risk contest capital `noi_t`: the marked USDC value of only the
+/// unmatched directional **trader** position against the maker. After the POL
+/// exclusion, `min(q_long, q_short)` is a complete set that pays par for every
+/// settlement and is excluded; the remaining `|q_long − q_short|` is marked at
+/// the stored quote of its excess side. The quantity pair and quote are from a
+/// *stored* (previous-block) state so a trade can never contribute its own
+/// state to the sample that prices it.
 ///
 /// `q_pol_branch = 0` by construction in this implementation: POL enters as
 /// complete-set inventory held by the book account (04 §10 seeding —
@@ -431,10 +434,14 @@ pub fn maker_loss_floor(b: Balance) -> Option<Balance> {
 pub fn contest_capital(q_long: Balance, q_short: Balance, quote_1e9: FixedU64) -> Option<Balance> {
     let p_long = u128::from(quote_1e9.0.min(PRICE_ONE_1E9));
     let p_short = u128::from(PRICE_ONE_1E9) - p_long;
-    q_long
-        .checked_mul(p_long)?
-        .checked_add(q_short.checked_mul(p_short)?)
-        .map(|marked| marked / u128::from(PRICE_ONE_1E9))
+    let (directional, price) = if q_long >= q_short {
+        (q_long.checked_sub(q_short)?, p_long)
+    } else {
+        (q_short.checked_sub(q_long)?, p_short)
+    };
+    directional
+        .checked_mul(price)?
+        .checked_div(u128::from(PRICE_ONE_1E9))
 }
 
 /// 05 §5.6 / 08 §5.2 measured decision-pair depth
@@ -2481,18 +2488,25 @@ mod tests {
     }
 
     #[test]
-    fn contest_capital_marks_both_branches_and_rounds_down() {
-        // 04 §7a: noi_t = Σ_branch max(q − q_pol, 0)·price, previous block's
-        // stored q and quote, rounded DOWN on the 1e9 grid.
+    fn contest_capital_excludes_balanced_inventory_and_rounds_down() {
+        // 04 §7a: strip matched complete sets, mark only the excess branch,
+        // use the previous block's stored q/quote, and round DOWN.
         let mid = FixedU64(500_000_000);
         // Empty book (or a wash round trip that restored q exactly): zero.
         assert_eq!(contest_capital(0, 0, mid), Some(0));
         // One-sided LONG at the mid marks exactly half its quantity.
         assert_eq!(contest_capital(1_000_000, 0, mid), Some(500_000));
-        // A complete LONG+SHORT pair marks its par value: p + (1−p) = 1.
+        // A complete LONG+SHORT pair pays par regardless of settlement and is
+        // not at risk, even away from the midpoint.
         assert_eq!(
             contest_capital(1_000_000, 1_000_000, FixedU64(730_000_001)),
-            Some(1_000_000)
+            Some(0)
+        );
+        // Large balanced inventory cannot hide inside the certificate: only
+        // the small excess LONG marks at its quote.
+        assert_eq!(
+            contest_capital(151_000_000, 150_000_000, FixedU64(730_000_000)),
+            Some(730_000)
         );
         // SHORT exposure is priced at 1 − p, not at gross quantity.
         assert_eq!(
@@ -2505,7 +2519,7 @@ mod tests {
         // inflating the marked value.
         assert_eq!(
             contest_capital(1_000_000, 1_000_000, FixedU64(2_000_000_000)),
-            Some(1_000_000)
+            Some(0)
         );
         // Overflow fails closed for the caller to invalidate the window.
         assert_eq!(contest_capital(Balance::MAX, 0, mid), None);

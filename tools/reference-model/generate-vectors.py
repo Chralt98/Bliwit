@@ -1560,7 +1560,7 @@ def _treasury_scenarios():
 
 
 def _contest_scenarios():
-    """04 §7a contest-capital accumulator vectors (SQ-231)."""
+    """04 §7a at-risk contest-capital accumulator vectors."""
     rows = []
     wash = ContestCapitalAccumulator()
     wash_observations = [
@@ -1610,6 +1610,39 @@ def _contest_scenarios():
             "contest_capital_0_30": format(held.mean(0, 30), "f"),
             "contest_capital_10_30": format(held.mean(10, 30), "f"),
             "cumulative_at_30": format(held.cumulative_at(30), "f"),
+        }
+    )
+    balanced = ContestCapitalAccumulator()
+    balanced_observations = [
+        {
+            "block": 10,
+            "q_long": "151000",
+            "q_short": "150000",
+            "price_long": "0.73",
+        },
+        {
+            "block": 20,
+            "q_long": "151000",
+            "q_short": "150000",
+            "price_long": "0.73",
+        },
+    ]
+    balanced_recorded = [
+        balanced.observe(
+            o["block"], o["q_long"], o["q_short"], o["price_long"]
+        )
+        for o in balanced_observations
+    ]
+    rows.append(
+        {
+            "name": "balanced_complete_sets_excluded",
+            "inputs": {
+                "q_pol_long": "0",
+                "q_pol_short": "0",
+                "observations": balanced_observations,
+            },
+            "recorded": [format(noi, "f") for noi in balanced_recorded],
+            "contest_capital_0_20": format(balanced.mean(0, 20), "f"),
         }
     )
     pol = ContestCapitalAccumulator(

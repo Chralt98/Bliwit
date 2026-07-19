@@ -1964,7 +1964,7 @@ fn contest_depth_held_for_the_whole_window_counts_fully() {
         seed(MARKET_ID);
         let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
         assert!(interval > 0);
-        let start = 1;
+        let start: u32 = 1;
         let trailing = start + interval;
         let end = trailing + interval;
         assert_ok!(Market::register_decision_window(
@@ -1994,11 +1994,92 @@ fn contest_depth_held_for_the_whole_window_counts_fully() {
         assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
         System::set_block_number(u64::from(end));
         assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            end,
+        ));
 
         assert_eq!(
             Market::average_contest_at(MARKET_ID, end, end - start),
             Some(noi),
             "exposure held for every block of the window must count at its full marked value",
+        );
+        assert!(Market::decision_grade_at(
+            MARKET_ID,
+            end,
+            end - start,
+            95,
+            FixedU64(1_000_000_000),
+            noi,
+            B,
+            true,
+        ));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn balanced_complete_set_inventory_accrues_zero_at_risk_contest_capital() {
+    // 04 §7a at-risk regression: equal trader-bought LONG and SHORT form a
+    // settlement-riskless complete set. The pallet must accrue zero even
+    // though gross open interest is large and held for the entire window.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        let interval = match u32::try_from(ObsInterval::get()) {
+            Ok(interval) => interval,
+            Err(_) => panic!("observation interval fits u32"),
+        };
+        assert!(interval > 0);
+        let start: u32 = 1;
+        let trailing = start.saturating_add(interval);
+        let end = trailing.saturating_add(interval);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            MARKET_ID,
+            PROPOSAL,
+            start,
+            trailing,
+            end,
+        ));
+
+        System::set_block_number(u64::from(start));
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        assert_ok!(Market::buy(
+            signed(BOB),
+            MARKET_ID,
+            ScalarSide::Short,
+            TRADE,
+            Balance::MAX,
+        ));
+        let book = match Markets::<Test>::get(MARKET_ID) {
+            Some(book) => book,
+            None => panic!("book exists"),
+        };
+        assert_eq!(book.q_long, book.q_short);
+        assert!(matches!(
+            Market::gross_open_interest(MARKET_ID),
+            Some(gross) if gross > 0
+        ));
+        assert_eq!(
+            market_core::contest_capital(book.q_long, book.q_short, book.last_quote_1e9),
+            Some(0),
+        );
+
+        System::set_block_number(u64::from(trailing));
+        assert_ok!(Market::crank_observe(signed(CHARLIE), MARKET_ID));
+        System::set_block_number(u64::from(end));
+        assert_ok!(Market::crank_observe(signed(CHARLIE), MARKET_ID));
+        assert_eq!(
+            Market::average_contest_at(MARKET_ID, end, end - start),
+            Some(0),
         );
         assert_try_state();
     });

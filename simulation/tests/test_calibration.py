@@ -65,23 +65,24 @@ class CalibrationBatchTests(unittest.TestCase):
         self.assertNotEqual(aggregate_a, aggregate_b)
         self.assertEqual(conditional["one_to_two_delta"], Decimal("0.02"))
 
-    def test_threshold_search_returns_a_monotone_five_percent_bracket(self):
+    def test_at_risk_measure_removes_the_seeded_thin_flip_through_search_cap(self):
         config = SimulationConfig(proposal_count=200, threshold_sample_per_class=8)
         proposal = generate_proposal_with_config(DEFAULT_SEED, 57, config)
         result = _threshold_brackets(
             [proposal], DEFAULT_SEED, config, Decimal(20)
         )
-        self.assertEqual(len(result["brackets"]), 1)
-        bracket = result["brackets"][0]
-        self.assertTrue(bracket["monotone"])
-        self.assertLessEqual(
-            Decimal(bracket["relative_width"]),
-            Decimal(config.threshold_relative_tolerance),
+        self.assertEqual(result["brackets"], [])
+        high = simulate_proposal(
+            proposal,
+            seed=DEFAULT_SEED,
+            config=config,
+            budget_multiple=Decimal(config.threshold_max_budget_multiple),
         )
-        lower, upper = map(Decimal, bracket["budget_bracket_3p_multiple"])
-        self.assertLess(lower, upper)
+        self.assertEqual(high.outcome, "Reject")
+        self.assertEqual(high.reason, "NotDecisionGrade")
+        self.assertLess(min(high.contest_accept, high.contest_reject), high.v_min)
 
-    def test_gated_wrong_pass_bracket_includes_suppression_budget(self):
+    def test_gate_suppression_budget_executes_even_when_at_risk_grade_rejects(self):
         config = replace(
             SimulationConfig(proposal_count=400),
             threshold_relative_tolerance="0.01",
@@ -100,18 +101,19 @@ class CalibrationBatchTests(unittest.TestCase):
             Decimal(config.diagnostic_probe_flow_cap),
             [high],
         )
-        self.assertEqual(len(result["brackets"]), 1)
-        bracket = result["brackets"][0]
-        lower, upper = map(Decimal, bracket["budget_bracket_3p_multiple"])
-        allocation = bracket["budget_allocation_at_flip"]
-        decision = Decimal(allocation["decision_pair"])
-        gates = Decimal(allocation["gate_books"])
-        total = Decimal(allocation["total"])
-        self.assertGreater(lower, Decimal(1))
-        self.assertLessEqual(upper - lower, Decimal("0.012"))
-        self.assertGreater(gates, 0)
-        self.assertEqual(decision + gates, total)
-        self.assertEqual(bracket["sub_3p_status"], "clean")
+        self.assertEqual(result["brackets"], [])
+        self.assertEqual(high.outcome, "Reject")
+        self.assertEqual(high.reason, "NotDecisionGrade")
+        self.assertGreater(high.gate_attack_budget, 0)
+        self.assertGreater(high.gate_manipulator_flow, 0)
+        self.assertLessEqual(
+            abs(
+                high.decision_attack_budget
+                + high.gate_attack_budget
+                - high.attacker_budget
+            ),
+            Decimal("0.000001"),
+        )
 
 
 if __name__ == "__main__":

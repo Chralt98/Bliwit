@@ -2588,7 +2588,7 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
             // 05 §5.2 tri-state welfare-book grade over the same facts the
             // boolean Decision-role grade folds. The reference partition
             // (reference model `grade_welfare_book`): the remediable-by-time
-            // shortfalls — contest capital below the Ask-scaled class floor,
+            // shortfalls — at-risk contest capital below the Ask-scaled class floor,
             // coverage below `dec.coverage`, a first stale event — grade
             // Insufficient; every other failure — sanity band, POL floor or
             // POL disturbed (incl. a voided contest accumulator), a second

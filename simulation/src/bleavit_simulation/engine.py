@@ -39,7 +39,7 @@ from .market import (
     BookSummary,
     ExecutedBook,
     contest_capital,
-    execute_hold,
+    execute_balanced_hold,
     execute_toward,
     execute_turnover,
     summarize_executed_book,
@@ -255,10 +255,10 @@ def _execute_organic_window(
     holder_name = f"holder:{book.name}"
     _fund(book, informed_name, informed_total)
     _fund(book, noise_name, noise_total)
-    # SQ-231: grading measures held contest capital (04 §7a), not gross flow.
-    # Honest formation therefore carries a holding leg — balanced maker-bought
-    # pairs topped up to the stratum's target level — on top of the directional
-    # informed exposure; churn stays as flow telemetry only.
+    # Organic formation retains the observed balanced maker-bought inventory,
+    # but 04 §7a excludes that settlement-riskless complete-set leg from the
+    # security certificate. Only the directional informed imbalance counts;
+    # churn remains flow telemetry only.
     _fund(book, holder_name, Decimal(desired_contest))
     rng = proposal_rng(seed, proposal_id, salt + (0x4558 if extension else 0))
     arrival = (Decimal("0.45"), Decimal("0.70"), Decimal("0.88"), Decimal("1"), Decimal("1"), Decimal("1"))
@@ -302,10 +302,10 @@ def _execute_organic_window(
             role="noise",
             first_side="long" if rng.randrange(2) else "short",
         )
-        execute_hold(
+        execute_balanced_hold(
             book,
             holder_name,
-            target_noi=Decimal(desired_contest),
+            target_inventory=Decimal(desired_contest),
             block=block,
             role="holder",
         )

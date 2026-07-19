@@ -15,7 +15,6 @@ from bleavit_reference_model.lmsr import (
 from bleavit_reference_model.twap import (
     STALE_GAP_BLOCKS,
     ContestCapitalAccumulator,
-    marked_open_interest,
 )
 
 
@@ -601,26 +600,23 @@ def execute_turnover(
     return executed
 
 
-def execute_hold(
+def execute_balanced_hold(
     book: ExecutedBook,
     participant_name: str,
     *,
-    target_noi: Decimal,
+    target_inventory: Decimal,
     block: int,
     role: str,
 ) -> Decimal:
-    """Raise the book's marked open interest to ``target_noi`` with held pairs.
+    """Acquire balanced settlement-riskless inventory up to the target.
 
-    A balanced LONG+SHORT pair bought from the maker adds exactly its size to
-    the 04 §7a marked open interest at any price (``A·p + A·(1−p) = A``),
-    costs exactly its size in LMSR cost (``C(q_L+A, q_S+A) = C(q_L, q_S) + A``)
-    and leaves the quote unchanged (the price depends only on ``q_L − q_S``).
-    Held pairs are capital genuinely locked for the window — exactly what the
-    SQ-231 contest-capital measure prices — while wash churn nets out of the
-    measure entirely by LMSR path independence.
+    A balanced LONG+SHORT pair costs and pays exactly par and leaves the quote
+    unchanged. It remains in the executed-ledger simulation as organic holder
+    inventory, but the amended 04 §7a measure excludes it from security depth;
+    only the unmatched directional maker state contributes contest capital.
     """
-    current = marked_open_interest(book.q_long, book.q_short, book.price)
-    remaining = floor_base(Decimal(target_noi) - current)
+    matched = min(book.q_long, book.q_short)
+    remaining = floor_base(Decimal(target_inventory) - matched)
     executed = Decimal(0)
     while remaining >= MIN_TRADE:
         chunk = min(book.max_trade, remaining)
@@ -651,8 +647,9 @@ def contest_capital(
     observed at block ``t`` is the stored maker state after every event of
     blocks ``< t`` (a trade never contributes its own block's state to the
     observation recorded at its block), each branch marked at the raw stored
-    quote (LONG at ``p``, SHORT at ``1 − p`` — the κ-clamped observation takes
-    no part).  Because the maker state is piecewise-constant between event
+    quote after stripping matched complete sets (the excess LONG is marked at
+    ``p``, excess SHORT at ``1 − p``; the κ-clamped observation takes no
+    part). Because the maker state is piecewise-constant between event
     blocks, observing at every event boundary reproduces the observation-grid
     accumulator exactly.  The sim's books carry no protocol-seeded positions
     (the POL subsidy is depth, not outcome exposure), so ``q_pol`` is zero and

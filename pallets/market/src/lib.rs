@@ -1264,14 +1264,14 @@ pub mod pallet {
         /// Instantaneous gross open interest (`q_long + q_short`), kept as
         /// telemetry only. Since the SQ-231 amendment gross notional is NOT
         /// the graded measure and never feeds validity floors or the step-9
-        /// certificate — those consume the 04 §7a contest capital via
+        /// certificate — those consume the 04 §7a at-risk contest capital via
         /// [`Self::average_contest_at`].
         pub fn gross_open_interest(id: MarketId) -> Option<Balance> {
             let book = Markets::<T>::get(id)?;
             book.q_long.checked_add(book.q_short)
         }
 
-        /// Full-window time-averaged non-POL contest capital (04 §7a:
+        /// Full-window time-averaged non-POL at-risk contest capital (04 §7a:
         /// `ContestCapital(w) = (N(end) − N(start)) / blocks`), rounded down.
         pub fn average_contest_at(
             id: MarketId,
@@ -1828,7 +1828,7 @@ pub mod pallet {
             frame_system::Pallet::<T>::block_number().unique_saturated_into()
         }
 
-        /// Advance every unsealed window's 04 §7a contest-capital integral
+        /// Advance every unsealed window's 04 §7a at-risk contest-capital integral
         /// `N += noi_t · Δblocks` through `through`. `book` is the *stored*
         /// (pre-dispatch) book, so every accrued segment is priced and sized
         /// from the previous block's stored `q` and quote — a trade can never
@@ -1837,7 +1837,9 @@ pub mod pallet {
         /// 04 §7a, and never larger: a position flashed across an observation
         /// boundary receives its held blocks only, not a backward interval —
         /// the A8-review flash-credit fix; under-counting is §7a's stated
-        /// conservative direction). `noi_t` rounds DOWN; any overflow marks
+        /// conservative direction). Matched complete-set inventory is
+        /// settlement-riskless and excluded by `market_core::contest_capital`.
+        /// `noi_t` rounds DOWN; any overflow marks
         /// the window invalid, and an invalid window never grades (G-1).
         fn accrue_contest(id: MarketId, book: &MarketBook<T::AccountId>, through: u64) {
             let Ok(through) = u32::try_from(through) else {

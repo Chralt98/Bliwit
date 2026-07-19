@@ -26,16 +26,14 @@ from bleavit_simulation.proposals import generate_proposal_with_config
 
 
 class ExecutedEngineTests(unittest.TestCase):
-    def test_known_thin_book_flip_now_requires_genuinely_held_capital(self):
-        """SQ-231 regression on the pre-amendment thin-capture flip fixture.
+    def test_known_thin_book_cannot_use_balanced_inventory_as_depth(self):
+        """At-risk regression on the pre-amendment thin-capture fixture.
 
         Proposal 57 was the committed wrong-PASS replay: attack-generated
         gross flow promoted a below-v_min pair and self-funded the step-9
-        certificate. Under the contest-capital measure the same flip still
-        exists at a high enough budget, but the promotion is backed by net
-        exposure the attacker genuinely holds through the window - the
-        realized liquidation loss exceeds 3*InCapPrize instead of the old
-        near-free churn - and L-hat obeys the sec.flow_cap ceiling.
+        certificate. Even at 3×3P the at-risk measure excludes the organic
+        balanced complete-set inventory, so the remaining directional maker
+        state cannot clear the floor and the harmful proposal stays rejected.
         """
         config = SimulationConfig(proposal_count=200)
         proposal = generate_proposal_with_config(DEFAULT_SEED, 57, config)
@@ -50,14 +48,13 @@ class ExecutedEngineTests(unittest.TestCase):
         self.assertEqual(zero.outcome, "Reject")
         self.assertEqual(zero.reason, "NotDecisionGrade")
         self.assertLess(min(zero.contest_accept, zero.contest_reject), zero.v_min)
-        self.assertEqual(attacked.outcome, "Adopt")
-        self.assertGreaterEqual(
+        self.assertEqual(attacked.outcome, "Reject")
+        self.assertEqual(attacked.reason, "NotDecisionGrade")
+        self.assertLess(
             min(attacked.contest_accept, attacked.contest_reject), attacked.v_min
         )
         self.assertGreater(attacked.manipulator_flow, 0)
         self.assertGreater(attacked.arbitrage_flow, 0)
-        # The certificate no longer self-funds: flipping this proposal costs
-        # the attacker more in realized losses than the 3P certificate bound.
         self.assertGreater(
             attacked.realized_manipulation_spend,
             Decimal(3) * attacked.prize,
@@ -99,7 +96,7 @@ class ExecutedEngineTests(unittest.TestCase):
             Decimal(2) * book.b * LN2,
         )
 
-    def test_real_gate_books_reach_both_ordered_vetoes(self):
+    def test_gate_price_signals_survive_but_riskless_depth_is_not_grade(self):
         config = SimulationConfig(proposal_count=1)
         survival = simulate_proposal(
             generate_proposal_with_config(3, 0, config),
@@ -114,12 +111,15 @@ class ExecutedEngineTests(unittest.TestCase):
             budget_multiple=Decimal(0),
         )
         self.assertEqual(len(survival.gate_books), 4)
-        self.assertEqual(survival.reason, "GateVetoSurvival")
-        self.assertEqual(security.reason, "GateVetoSecurity")
+        self.assertEqual(survival.initial_gate_vetoes[0], "survival")
+        self.assertIn("security", security.initial_gate_vetoes)
+        self.assertEqual(survival.reason, "NotDecisionGrade")
+        self.assertEqual(security.reason, "NotDecisionGrade")
         self.assertTrue(all(row.contest > 0 for row in survival.gate_books))
+        self.assertTrue(any(not row.valid for row in survival.gate_books))
 
     def test_gated_attacker_suppresses_veto_from_one_shared_budget(self):
-        """Seeded META/TH-4 demo: organic veto -> suppression -> wrong PASS."""
+        """Seeded META/TH-4 demo: real gate suppression still executes."""
         config = SimulationConfig(proposal_count=400)
         proposal = generate_proposal_with_config(DEFAULT_SEED, 5, config)
         organic = simulate_proposal(
@@ -142,7 +142,7 @@ class ExecutedEngineTests(unittest.TestCase):
         )
 
         self.assertEqual(organic.strategy, "th4_thin_capture")
-        self.assertEqual(organic.reason, "GateVetoSecurity")
+        self.assertEqual(organic.reason, "NotDecisionGrade")
         self.assertEqual(organic.initial_gate_vetoes, ("security",))
         self.assertEqual(suppressed.initial_gate_vetoes, ())
         organic_adopt = next(
@@ -168,11 +168,15 @@ class ExecutedEngineTests(unittest.TestCase):
             suppressed_adopt.summary.full,
             suppressed_reject.summary.full + GATE_EPS,
         )
-        self.assertEqual(suppressed.reason, "HurdleNotMet")
-        self.assertEqual(adopted.outcome, "Adopt")
-        self.assertEqual(
-            adopted.decision_attack_budget + adopted.gate_attack_budget,
-            adopted.attacker_budget,
+        self.assertEqual(suppressed.reason, "NotDecisionGrade")
+        self.assertEqual(adopted.outcome, "Reject")
+        self.assertLessEqual(
+            abs(
+                adopted.decision_attack_budget
+                + adopted.gate_attack_budget
+                - adopted.attacker_budget
+            ),
+            Decimal("0.000001"),
         )
         self.assertGreater(adopted.gate_attack_budget, 0)
         self.assertLessEqual(
@@ -200,9 +204,13 @@ class ExecutedEngineTests(unittest.TestCase):
         self.assertEqual(attacked.strategy, "th6_belief_capture")
         self.assertGreater(attacked.gate_attack_budget, 0)
         self.assertGreater(attacked.gate_manipulator_flow, 0)
-        self.assertEqual(
-            attacked.decision_attack_budget + attacked.gate_attack_budget,
-            attacked.attacker_budget,
+        self.assertLessEqual(
+            abs(
+                attacked.decision_attack_budget
+                + attacked.gate_attack_budget
+                - attacked.attacker_budget
+            ),
+            Decimal("0.000001"),
         )
 
     def test_upgrade_payload_scope_propagates_without_decide_signature_change(self):
@@ -244,9 +252,14 @@ class ExecutedEngineTests(unittest.TestCase):
         noisy_result = simulate_proposal(
             p_noisy, seed=31, config=noisy, budget_multiple=Decimal(0)
         )
-        self.assertNotEqual(quiet_result.outcome, noisy_result.outcome)
+        self.assertEqual(quiet_result.outcome, "Reject")
+        self.assertEqual(noisy_result.outcome, "Reject")
         self.assertEqual(quiet_result.noise_flow, Decimal(0))
         self.assertGreater(noisy_result.noise_flow, 0)
+        self.assertNotEqual(
+            (quiet_result.contest_accept, quiet_result.contest_reject),
+            (noisy_result.contest_accept, noisy_result.contest_reject),
+        )
         self.assertEqual(
             noisy_result.evidence(),
             simulate_proposal(

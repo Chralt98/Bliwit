@@ -658,7 +658,7 @@ def run_full_calibration(*, seed: int = DEFAULT_SEED, config: SimulationConfig |
         "assumptions": {
             "a2_arbitrage": "A-2 corrective capacity is L/2 per day at elasticity 1; it is empirical and phase-revalidated.",
             "baseline_contest_floor": "The 250,000-USDC Baseline contest floor is the TREASURY-tier dec.v_min.trs mandated by 05 §5.2 (SQ-232 resolution 2026-07-18).",
-            "contest_measure": "Per the SQ-231 amendment (04 §7a; 05 §5.2/§5.4/§5.6; 08 §5.2-§5.4), step-5 grading and the step-9 certificate consume time-averaged marked net open interest (contest capital) with the sec.flow_cap ceiling; gross traded notional is recorded as flow telemetry only. Organic formation is modeled as directional informed exposure plus balanced maker-bought pair holdings topped up to the stratum target - balanced pairs are settlement-riskless but lock capital for the window and count per the 04 §7a definition.",
+            "contest_measure": "Per the 04 §7a at-risk refinement, step-5 grading and the step-9 certificate consume time-averaged marked unmatched directional exposure with the sec.flow_cap ceiling. Gross traded notional and balanced maker-bought complete-set inventory remain in the executed ledger but do not certify security depth because they carry no net settlement risk; an attacker's unmatched directional leg remains counted.",
             "coverage_leg": "Scheduled observations provide an always-clean coverage leg in Phase-0 synthetic runs.",
             "pol_leg": "POL is assumed seeded at the class schedule and undisturbed for step-5 grading.",
             "pre_registered_strata": {

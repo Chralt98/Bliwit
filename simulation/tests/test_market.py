@@ -13,7 +13,7 @@ from bleavit_simulation.market import (
     ExecutedBook,
     FastTwapAccumulator,
     contest_capital,
-    execute_hold,
+    execute_balanced_hold,
     execute_toward,
     execute_turnover,
     fast_lmsr_price,
@@ -212,15 +212,15 @@ class FastMarketMathTests(unittest.TestCase):
             contest_capital(book, decision_window=43_200), Decimal(0)
         )
 
-    def test_held_pairs_price_capital_times_time(self):
-        """A balanced held pair contributes its size, time-weighted."""
+    def test_balanced_held_pairs_are_excluded_at_any_holding_time(self):
+        """A complete-set holding is settlement-riskless, early or late."""
         window = 43_200
         early = ExecutedBook("early", Decimal("25000"))
         early.account("holder", Decimal("120000"))
-        held = execute_hold(
+        held = execute_balanced_hold(
             early,
             "holder",
-            target_noi=Decimal("100000"),
+            target_inventory=Decimal("100000"),
             block=1,
             role="holder",
         )
@@ -228,22 +228,19 @@ class FastMarketMathTests(unittest.TestCase):
         self.assertEqual(early.price, Decimal("0.5"))
         self.assertEqual(early.cash_conservation_error(), Decimal(0))
         early_capital = contest_capital(early, decision_window=window)
-        expected_early = Decimal("100000") * Decimal(window - 1) / Decimal(window)
-        self.assertLessEqual(abs(early_capital - expected_early), Decimal(1))
+        self.assertEqual(early_capital, Decimal(0))
 
         late = ExecutedBook("late", Decimal("25000"))
         late.account("holder", Decimal("120000"))
-        execute_hold(
+        execute_balanced_hold(
             late,
             "holder",
-            target_noi=Decimal("100000"),
+            target_inventory=Decimal("100000"),
             block=window - 4_320,
             role="holder",
         )
         late_capital = contest_capital(late, decision_window=window)
-        expected_late = Decimal("100000") * Decimal(4_320) / Decimal(window)
-        self.assertLessEqual(abs(late_capital - expected_late), Decimal(1))
-        self.assertLess(late_capital, early_capital / Decimal(5))
+        self.assertEqual(late_capital, Decimal(0))
 
     def test_contest_capital_matches_reference_accumulator_replay(self):
         """The block-grouped replay equals the 04 §7a reference accumulator."""
@@ -259,10 +256,10 @@ class FastMarketMathTests(unittest.TestCase):
             block=1,
             role="informed",
         )
-        execute_hold(
+        execute_balanced_hold(
             book,
             "holder",
-            target_noi=Decimal("35000"),
+            target_inventory=Decimal("35000"),
             block=7_201,
             role="holder",
         )
@@ -304,9 +301,11 @@ class FastMarketMathTests(unittest.TestCase):
         """An event-free window still measures carried held exposure."""
         book = ExecutedBook("carried", Decimal("25000"))
         book.account("holder", Decimal("60000"))
-        execute_hold(
-            book, "holder", target_noi=Decimal("50000"), block=1, role="holder"
+        book.account("directional", Decimal("10000"))
+        execute_balanced_hold(
+            book, "holder", target_inventory=Decimal("50000"), block=1, role="holder"
         )
+        book.buy("directional", "long", Decimal("1000"), block=2, role="informed")
         carried_q = (book.q_long, book.q_short)
         book.events.clear()
         capital = contest_capital(

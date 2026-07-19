@@ -382,7 +382,7 @@ No welfare margin overrides a veto (G-4, I-14). PARAM and TREASURY ≤ 1% NAV us
 
 ### 5.2 Sanity band and per-book validity (B-med: sanity band)
 
-- **Welfare books** (the decision pair and the Baseline book): decision-grade requires `TWAP ∈ [0.02, 0.98]` (the sanity band), plus coverage ≥ 95% of scheduled observation intervals in the window, staleness clean, time-averaged effective POL ≥ class floor and POL undisturbed, non-POL **contest capital** ([doc 04](./04-markets-and-pricing.md) §7a — the time-weighted marked value of net outstanding trader positions; gross traded notional is *not* the measure, SQ-231 amendment 2026-07-18) ≥ **`dec.v_min(class)` per book** (the per-book resolution of the V_min ambiguity — each of the two decision books MUST individually clear it), and `|spot_close − TWAP| ≤ Δ_max = 0.05`. The **Baseline book carries no proposal class and grades at the TREASURY-tier floor `dec.v_min.trs`** — [doc 08](./08-treasury-and-economics.md) §4.3's mid-class manipulation-resistance rationale is the source of the tier, and the same tier already sizes its `pol.b_baseline` subsidy (SQ-232 resolution, 2026-07-18).
+- **Welfare books** (the decision pair and the Baseline book): decision-grade requires `TWAP ∈ [0.02, 0.98]` (the sanity band), plus coverage ≥ 95% of scheduled observation intervals in the window, staleness clean, time-averaged effective POL ≥ class floor and POL undisturbed, non-POL **at-risk contest capital** ([doc 04](./04-markets-and-pricing.md) §7a — the time-weighted marked value of the unmatched directional trader position; balanced complete sets and gross traded notional are *not* the measure) ≥ **`dec.v_min(class)` per book** (the per-book resolution of the V_min ambiguity — each of the two decision books MUST individually clear it), and `|spot_close − TWAP| ≤ Δ_max = 0.05`. The **Baseline book carries no proposal class and grades at the TREASURY-tier floor `dec.v_min.trs`** — [doc 08](./08-treasury-and-economics.md) §4.3's mid-class manipulation-resistance rationale is the source of the tier, and the same tier already sizes its `pol.b_baseline` subsidy (SQ-232 resolution, 2026-07-18).
 - **Gate books are exempt from the sanity band** — a healthy gated proposal's gate books legitimately trade near 0. They instead satisfy the **near-boundary validity rule (GB-NB)**: a gate book whose window TWAP lies outside [0.02, 0.98] is decision-grade iff coverage ≥ 98%, zero stale events, and `|spot_close − TWAP| ≤ 0.01` *(keys `gate.nb_coverage`, `gate.nb_conv`: §13)* — a book pinned near a boundary counts only if it is demonstrably alive and converged, not abandoned. Inside the band, gate books use the welfare-book validity checks. Gate books' contest floor is `gate.v_min = 0.1 · dec.v_min(class)` per book *(normative value: §13)*, graded over the same contest-capital measure.
 
 ### 5.3 Baseline consumption (backed by doc 04)
@@ -524,9 +524,10 @@ AttackCost̂ = F̂ · T_dec                          // normative gate input (do
   L̂     = time-averaged effective POL depth of the decision pair (2·b·ln 2 as seeded,
           from I-12 telemetry)
         + min( min(ContestCapital_acc(window), ContestCapital_rej(window))
-               (doc 04 §7a — the binding shallower book; the same per-book measure
-                graded against dec.v_min in step 5; SQ-231: gross flow no longer
-                feeds the certificate; doc 08 §5.4(b) adds one dec.v_min, not two),
+               (doc 04 §7a — the binding shallower book; the same per-book at-risk
+                directional measure graded against dec.v_min in step 5; balanced
+                complete sets and gross flow do not feed the certificate; doc 08
+                §5.4(b) adds one dec.v_min, not two),
                sec.flow_cap · (b_acc + b_rej) )   // the C_hold ceiling, now also in the gate
   F̂_pub = the published measured arbitrage-flow parameter (A-2 obligation);
           until published, F̂ = L̂/2

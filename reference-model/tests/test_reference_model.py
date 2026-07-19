@@ -836,11 +836,12 @@ class ContestCapitalTests(unittest.TestCase):
         late.observe(10, "0", "0", "0.5")
         late.observe(20, "1000", "0", "0.5")
         self.assertEqual(late.mean(0, 20), Decimal(250))
-        # Both sides mark at their own price; N is monotone non-decreasing.
+        # The matched 500-unit complete-set portion is settlement-riskless;
+        # only the excess 500 LONG marks at p=0.6.
         both = ContestCapitalAccumulator()
         self.assertEqual(
             both.observe(10, "1000", "500", "0.6"),
-            Decimal(600) + Decimal(200),
+            Decimal(300),
         )
         cumulatives = [point.cumulative for point in accumulator.points]
         self.assertEqual(cumulatives, sorted(cumulatives))
@@ -868,6 +869,36 @@ class ContestCapitalTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             marked_open_interest("1", "0", "1.5")
+
+    def test_balanced_inventory_is_excluded_but_exact_grade_directional_counts(self):
+        # $150k of matched complete sets pays par and contributes zero. The
+        # extra 1,000 LONG is the only settlement-risk-bearing position.
+        self.assertEqual(
+            marked_open_interest("151000", "150000", "0.73"),
+            Decimal("730.000000"),
+        )
+        self.assertEqual(
+            marked_open_interest("150000", "150000", "0.73"),
+            Decimal("0.000000"),
+        )
+        # A real directional book can still meet the PARAM floor exactly and
+        # therefore remains decision-grade; the stricter measure is not an
+        # unconditional rejection rule.
+        exact_grade = marked_open_interest("105263.157895", "0", "0.95")
+        self.assertEqual(exact_grade, Decimal("100000.000000"))
+        self.assertIs(
+            grade_welfare_book(
+                twap=Decimal("0.95"),
+                spot_close=Decimal("0.95"),
+                coverage=Decimal(1),
+                stale_events=0,
+                pol_floor_met=True,
+                pol_undisturbed=True,
+                contest_capital=exact_grade,
+                v_min=Decimal("100000"),
+            ),
+            Grade.OK,
+        )
 
     def test_l_hat_flow_cap_ceiling_binds(self):
         pol_depth = Decimal(2) * Decimal(25000) * lmsr.LN2

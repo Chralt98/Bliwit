@@ -6,16 +6,14 @@ chronological informed, noise, holder, arbitrage, and manipulator orders
 against real two-outcome LMSR book state. Every fill is MaxTrade-capped,
 balance-limited, charged the doc-13 `mkt.fee` of 30 bps, and retained in an
 event ledger. Per the SQ-231 amendment (04 §7a), step-5 contest grading and
-the step-9 certificate consume **time-averaged contest capital** — the marked
-value of net outstanding trader positions, replayed through the reference
+the step-9 certificate consume **time-averaged at-risk contest capital** — the
+marked unmatched directional trader position, replayed through the reference
 model's `ContestCapitalAccumulator` with previous-block semantics — bounded in
-step 9 by the `sec.flow_cap` ceiling. Wash churn nets out of the measure by
-LMSR path independence; gross `Traded.cost` sums remain recorded as flow
-telemetry only. Honest formation therefore carries a holding leg: balanced
-maker-bought pairs topped up to the stratum target (settlement-riskless but
-capital locked for the window, counted per the 04 §7a definition) on top of
-directional informed exposure. Attacker and arbitrage held exposure counts
-exactly like any other held exposure.
+step 9 by the `sec.flow_cap` ceiling. Wash churn and balanced complete-set
+inventory both net out; gross `Traded.cost` sums and the balanced organic-holder
+leg remain recorded in the executed ledger but do not certify security depth.
+An attacker or arbitrageur's unmatched directional exposure counts exactly
+like any other real at-risk exposure.
 
 Run the deterministic full calibration (10,000 proposals):
 

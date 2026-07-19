@@ -172,10 +172,10 @@ AttackCost̂(p) = F̂(p) · T_dec                         // USDC
   F̂(p)   = min( L̂(p)/2 ,  F̂_pub )  per day             // conservative minimum
   L̂(p)   = time-averaged effective POL depth of p's decision pair (2·b·ln 2 as seeded, from I-12 telemetry)
           + min( min(ContestCapital_acc(window), ContestCapital_rej(window))
-                 ([04](04-markets-and-pricing.md) §7a: time-weighted marked net open interest;
+                 ([04](04-markets-and-pricing.md) §7a: time-weighted marked at-risk directional exposure;
                   the shallower book is binding — the same per-book measure graded against
-                  dec.v_min in step 5; SQ-231 amendment: gross traded notional is manipulable
-                  by the attacker's own flow and no longer feeds the certificate),
+                  dec.v_min in step 5; balanced complete sets are settlement-riskless and
+                  excluded, while an attacker's unmatched directional leg remains counted),
                  sec.flow_cap · (b_acc + b_rej) )       // the C_hold wash ceiling, now gate-bearing
   F̂_pub  = the published measured arbitrage-flow parameter (A-2 obligation,
             measured Phases 3–4); until published, F̂ = L̂/2.
@@ -207,7 +207,7 @@ pol.b(class, P)     = b_floor(class) · max(1, P / P_ref(class))
 
 Floors are the current defaults (*normative values: [13](13-parameters.md)*); the `pol.b` and δ slopes are **simulation-gated [VERIFY in Phase-0 calibration]** — the kernel guarantee below rests on the `v_min` term alone, so slope tuning cannot weaken it.
 
-**Why `v_min = 2·P` closes the rule identically.** If the proposal is decision-grade, measured **contest capital** ([04](04-markets-and-pricing.md) §7a) ≥ `dec.v_min` ≥ 2P, and the `sec.flow_cap` ceiling does not bind at exactly-grade organic depth (next paragraph), so:
+**Why `v_min = 2·P` closes the rule identically.** If the proposal is decision-grade, measured **at-risk contest capital** ([04](04-markets-and-pricing.md) §7a) ≥ `dec.v_min` ≥ 2P, and the `sec.flow_cap` ceiling does not bind at exactly-grade organic depth (next paragraph), so:
 
 ```
 AttackCost̂ = 1.5 · L̂ ≥ 1.5 · (2·b·ln 2 + 2P) = 3P + 3·b·ln 2  >  3P   ∎

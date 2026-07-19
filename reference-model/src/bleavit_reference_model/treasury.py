@@ -153,9 +153,10 @@ def decision_pair_contest_capital(contest_accept, contest_reject) -> Decimal:
 def l_hat(pol_depth, contest_capital, flow_cap, b_accept, b_reject) -> Decimal:
     """08 §5.2 L-hat: POL pair depth + the capped non-POL contest term.
 
-    The non-POL term is min(contest capital of the decision pair over the
-    decision window (04 §7a — SQ-231: gross traded notional no longer feeds
-    the certificate), sec.flow_cap * (b_acc + b_rej)).
+    The non-POL term is min(at-risk contest capital of the decision pair over
+    the decision window (04 §7a: balanced complete-set inventory and gross
+    traded notional do not feed the certificate),
+    sec.flow_cap * (b_acc + b_rej)).
     """
     with localcontext() as ctx:
         ctx.prec = WORK_PREC
@@ -272,10 +273,10 @@ def manip_floor_hat(
 ) -> Decimal:
     """05 §5.6 C_disp+C_hold diagnostic; it never gates.
 
-    `contest_capital` is V_win, the 04 §7a time-averaged marked value of net
-    outstanding trader positions over the window (SQ-231 amendment: gross
-    traded notional is not the measure); the sec.flow_cap ceiling bounds
-    wash-trade inflation of it.
+    `contest_capital` is V_win, the 04 §7a time-averaged marked value of the
+    unmatched directional trader position over the window (balanced complete
+    sets and gross traded notional are excluded); the sec.flow_cap ceiling
+    bounds the remaining held-exposure term.
     """
     delta = _d(delta)
     with localcontext() as ctx:
