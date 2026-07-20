@@ -53,8 +53,11 @@ For Paseo, use relay `paseo`; for production, use relay `polkadot`. In both
 cases the para ID is the value assigned during onboarding, never fixture 4242.
 Build an audited runtime genesis patch from
 `deploy/genesis/allocations.template.json`, replacing every `TODO` with the
-approved real allocation account, and pass it through the builder's `patch`
-subcommand. Inject `bootNodes` from the matching
+approved real account — both the allocation accounts and the two 09 §4 Coretime
+ops seats (`futarchyTreasury.coretimeQuoteAuthority` and
+`.coretimeRenewalAccount`, outputs of the Phase-2/3 ops ceremony; the validator
+rejects a paseo/polkadot spec that leaves either unseated) — and pass it through
+the builder's `patch` subcommand. Inject `bootNodes` from the matching
 `bootnodes.paseo.json`/`bootnodes.polkadot.json` operator manifest, then validate
 the finished artifact with `--profile paseo` or `--profile polkadot`.
 

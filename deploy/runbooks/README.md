@@ -19,7 +19,7 @@ conflict is resolved in favor of the specification.
 | RB-TREASURY | Treasury NAV meter and stream anomaly response | Monitoring coordinator | false |
 | RB-XCM | Trapped XCM asset response | Monitoring coordinator | false |
 | RB-GUARDIAN | Guardian action accountability and review | Monitoring coordinator | false |
-| RB-UPGRADE | Stalled migration recovery | Release operations lead | false |
+| RB-UPGRADE | Stalled migration recovery | Release operations lead | true |
 | RB-STORAGE | Storage bound pressure | Monitoring coordinator | false |
 | RB-BOOTNODE | Bootnode and served-state availability | Bootnode program coordinator | false |
 | RB-RELEASE | Release integrity and channel response | Release operations lead | true |
@@ -63,10 +63,13 @@ decoded. Each body then contains, in order, `Purpose`, `Alerts`, `Diagnosis`,
 | RB-BOOTNODE | Bootnode program coordinator | ops.bootnodes |
 | RB-RELEASE | Release operations lead | ops.arweave / ops.monitoring |
 
-§6.1's Monitoring row owns the §6.3 stack, so protocol-domain alerts default
-to the monitoring coordinator as first responder, with domain escalation in each
-runbook's Escalation section; runbooks with a dedicated §6.1 program row bind to
-that row's owner.
+Alert ownership is normative in 12 §6.3 ("Ownership"): §6.1's Monitoring row
+owns the §6.3 stack, so protocol-domain alerts fall to the monitoring
+coordinator as first responder, with domain escalation in each runbook's
+Escalation section; a runbook with a dedicated §6.1 program row binds to that
+row's owner, and one spanning rows that map to different §6.1 rows takes its
+primary row's owner and names the other in its escalation path. This checker
+enforces §6.1 row-pair membership, not the default rule itself.
 
 ## Structural gate
 

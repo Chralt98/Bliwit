@@ -300,7 +300,9 @@ class AssembleReleaseTests(unittest.TestCase):
             "runtime_wasm_sha256": wasm_hash,
             "artifact_hashes": {"topology.toml": sha256(topology)},
             "suites_run": [{"name": "collator-loss", "result": "pass"}],
+            "suites_skipped": [{"name": "dead-man", "reason": "tier"}],
             "recorded_at_commit": "a" * 40,
+            "tier": "release",
         }
         (self.zombienet / "run-evidence.json").write_text(
             json.dumps(evidence), encoding="utf-8"
@@ -316,6 +318,122 @@ class AssembleReleaseTests(unittest.TestCase):
             self.zombienet, "zombienet", wasm_hash, "a" * 40
         )
         self.assertIn("artifact hash mismatch for topology.toml", errors)
+
+    def test_placeholder_environment_directory_is_rejected(self) -> None:
+        """15 §5: an empty inventory must not satisfy the gate vacuously.
+
+        Set-equality alone accepts `artifact_hashes: {}` against a directory
+        holding nothing but the evidence file, so the non-empty assertion is
+        what actually stops a placeholder env dir.
+        """
+        self.zombienet.mkdir()
+        wasm_hash = sha256(self.runtime / "runtime.wasm")
+        evidence = {
+            "schema": "bleavit.env-evidence.v1",
+            "suite": "zombienet",
+            "runtime_wasm_sha256": wasm_hash,
+            "artifact_hashes": {},
+            "suites_run": [{"name": "made-up-suite", "result": "pass"}],
+            "suites_skipped": [],
+            "recorded_at_commit": "a" * 40,
+            "tier": "release",
+        }
+        (self.zombienet / "run-evidence.json").write_text(
+            json.dumps(evidence), encoding="utf-8"
+        )
+
+        errors = ASSEMBLE.validate_run_evidence(
+            self.zombienet, "zombienet", wasm_hash, "a" * 40
+        )
+
+        self.assertTrue(
+            any("artifact_hashes is empty" in error for error in errors), errors
+        )
+
+    def test_excluded_suites_are_a_validated_frozen_field(self) -> None:
+        """15 §5 condition (3): exclusions are auditable from the artifact."""
+        self.zombienet.mkdir()
+        topology = self.zombienet / "topology.toml"
+        topology.write_text("relay = true\n", encoding="utf-8")
+        wasm_hash = sha256(self.runtime / "runtime.wasm")
+        evidence = {
+            "schema": "bleavit.env-evidence.v1",
+            "suite": "zombienet",
+            "runtime_wasm_sha256": wasm_hash,
+            "artifact_hashes": {"topology.toml": sha256(topology)},
+            "suites_run": [{"name": "collator-loss", "result": "pass"}],
+            "recorded_at_commit": "a" * 40,
+            "tier": "release",
+        }
+        path = self.zombienet / "run-evidence.json"
+
+        path.write_text(json.dumps(evidence), encoding="utf-8")
+        errors = ASSEMBLE.validate_run_evidence(
+            self.zombienet, "zombienet", wasm_hash, "a" * 40
+        )
+        self.assertIn("suites_skipped must be an array", errors)
+
+        evidence["suites_skipped"] = [{"name": "dead-man"}]
+        path.write_text(json.dumps(evidence), encoding="utf-8")
+        errors = ASSEMBLE.validate_run_evidence(
+            self.zombienet, "zombienet", wasm_hash, "a" * 40
+        )
+        self.assertTrue(
+            any("suites_skipped[0]" in error for error in errors), errors
+        )
+
+        evidence["suites_skipped"] = [{"name": "dead-man", "reason": "tier"}]
+        path.write_text(json.dumps(evidence), encoding="utf-8")
+        self.assertEqual(
+            ASSEMBLE.validate_run_evidence(
+                self.zombienet, "zombienet", wasm_hash, "a" * 40
+            ),
+            [],
+        )
+
+    def test_environment_evidence_is_admissible_only_at_the_release_tier(self) -> None:
+        self.zombienet.mkdir()
+        topology = self.zombienet / "topology.toml"
+        topology.write_text("relay = true\n", encoding="utf-8")
+        wasm_hash = sha256(self.runtime / "runtime.wasm")
+        evidence = {
+            "schema": "bleavit.env-evidence.v1",
+            "suite": "zombienet",
+            "runtime_wasm_sha256": wasm_hash,
+            "artifact_hashes": {"topology.toml": sha256(topology)},
+            "suites_run": [{"name": "collator-loss", "result": "pass"}],
+            "suites_skipped": [{"name": "dead-man", "reason": "tier"}],
+            "recorded_at_commit": "a" * 40,
+            "tier": "g1",
+        }
+        evidence_path = self.zombienet / "run-evidence.json"
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+        errors = ASSEMBLE.validate_run_evidence(
+            self.zombienet, "zombienet", wasm_hash, "a" * 40
+        )
+        self.assertTrue(
+            any("tier must be 'release'" in error for error in errors), errors
+        )
+
+        del evidence["tier"]
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+        self.assertTrue(
+            any(
+                "tier must be 'release'" in error
+                for error in ASSEMBLE.validate_run_evidence(
+                    self.zombienet, "zombienet", wasm_hash, "a" * 40
+                )
+            )
+        )
+
+        evidence["tier"] = "release"
+        evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+        self.assertEqual(
+            ASSEMBLE.validate_run_evidence(
+                self.zombienet, "zombienet", wasm_hash, "a" * 40
+            ),
+            [],
+        )
 
     def test_allow_missing_still_fails_on_runtime_wasm_corruption(self) -> None:
         runtime_info = json.loads(

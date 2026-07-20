@@ -15,7 +15,7 @@ groups:
         annotations:
           summary: "Proposal state: intake queue reached its live metadata bound"
           key_series: "per-state counts, queue depth"
-          threshold: "queue at bound"
+          threshold: "intake queue at bound"
 
       - alert: BleavitMarketBookLoss
         expr: bleavit_market_book_loss_usdc > (0.9 * bleavit_market_lmsr_loss_bound_usdc)
@@ -91,7 +91,7 @@ groups:
 
       - alert: BleavitMigrationCursorStalled
         expr: bleavit_runtime_migration_cursor_stalled > 0
-        labels: {severity: warning, runbook: RB-UPGRADE, playbook: PB-MIGRATION, domain: "Upgrades"}
+        labels: {severity: page, runbook: RB-UPGRADE, playbook: PB-MIGRATION, domain: "Upgrades"}
         annotations:
           summary: "Upgrades: the migration cursor is stalled"
           key_series: "authorized hash, applied version, migration cursor"
@@ -161,4 +161,4 @@ groups:
         annotations:
           summary: "Keeper budget: current-epoch use exceeds 80% of the live keeper.budget gauge"
           key_series: "metered-budget utilization"
-          threshold: "> 80% of 12,000 USDC/epoch"
+          threshold: "> 80% of keeper.budget"

@@ -45,6 +45,10 @@ PROTOCOL_POTS = {
         100_000_000 * VIT,
     ),
 }
+CORETIME_OPS_SEATS = (
+    ("coretimeQuoteAuthority", "operations quote authority"),
+    ("coretimeRenewalAccount", "Coretime-side renewal account"),
+)
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 BASE58_VALUES = {character: index for index, character in enumerate(BASE58_ALPHABET)}
 
@@ -172,6 +176,40 @@ def validate_genesis(
             f"({patch_para_id!r}) must equal the chain spec's para_id "
             f"({top_level_para_id!r})"
         )
+
+    # Both Coretime ops accounts are OUTPUTS of the Phase-2/3 ops ceremony, so
+    # neither can be a chain-spec constant fixed in advance. The runtime treats
+    # each as unset-fails-closed (no stored quote authority => no quote can be
+    # noted; no stored renewal account => no renewal dispatches), which makes
+    # omission safe but silent: a genesis that simply forgot them is
+    # indistinguishable from one still awaiting the ceremony. The production
+    # template (deploy/genesis/allocations.template.json) therefore carries both
+    # as explicit unfilled "TODO" seats, and this check is what confronts the
+    # operator with them instead of letting a release spec default past them —
+    # seating them is a Phase-3 entry gate (12 §6.5). Development and test
+    # presets seat stand-ins and are exempt (09 §4).
+    if profile in ("paseo", "polkadot"):
+        treasury_config = patch.get("futarchyTreasury")
+        if not isinstance(treasury_config, dict):
+            failures.append(
+                "09 §4: production genesis patch must carry a futarchyTreasury "
+                "section seating the Phase-2/3 ops-ceremony accounts "
+                "(coretimeQuoteAuthority, coretimeRenewalAccount)"
+            )
+            treasury_config = {}
+        for key, label in CORETIME_OPS_SEATS:
+            seat = treasury_config.get(key)
+            if seat is None:
+                failures.append(
+                    f"09 §4: genesis patch futarchyTreasury.{key} must seat the "
+                    f"{label}; unset fails closed, and seating it is a Phase-3 "
+                    "entry gate (12 §6.5)"
+                )
+            elif contains_todo(seat):
+                failures.append(
+                    f"09 §4: genesis patch futarchyTreasury.{key} must seat the "
+                    f"real {label}; found an unfilled \"TODO\" seat"
+                )
 
     balances_config = patch.get("balances")
     balance_rows = balances_config.get("balances") if isinstance(balances_config, dict) else None

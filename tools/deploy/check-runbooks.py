@@ -246,6 +246,15 @@ def parse_alert_tables(
                 )
                 row_index += 1
                 continue
+            # A runbook cell may carry several comma-separated annotations
+            # (12 §6.3's Upgrades row names its playbook *and* pages), so the
+            # paging marker is one token of the set, not the whole annotation.
+            annotation = match.group(2)
+            annotations = (
+                [token.strip() for token in annotation.split(",")]
+                if annotation
+                else []
+            )
             bindings.append(
                 AlertBinding(
                     domain=domain,
@@ -253,7 +262,7 @@ def parse_alert_tables(
                     line=row_line,
                     key_series=key_series,
                     runbook_id=match.group(1),
-                    page_immediately=match.group(2) == "page immediately",
+                    page_immediately="page immediately" in annotations,
                 )
             )
             row_count += 1

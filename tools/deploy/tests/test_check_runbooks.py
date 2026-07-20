@@ -152,6 +152,20 @@ class CheckRunbooksTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def write_readme_with_pages(self, pages: dict[str, bool]) -> None:
+        rows = "\n".join(
+            "| {runbook_id} | Synthetic {runbook_id} | Test operator | {page} |".format(
+                runbook_id=runbook_id, page="true" if page else "false"
+            )
+            for runbook_id, page in pages.items()
+        )
+        (self.runbooks_dir / "README.md").write_text(
+            "# Runbooks\n\n"
+            "| ID | Title | owner_role | page_immediately |\n"
+            f"|---|---|---|---|\n{rows}\n",
+            encoding="utf-8",
+        )
+
     def check(self) -> tuple[list[str], int, int]:
         return checker.check_repository(
             self.root,
@@ -237,6 +251,56 @@ class CheckRunbooksTests(unittest.TestCase):
 
         self.assertTrue(
             any("page_immediately must be true" in e for e in errors), errors
+        )
+
+    def _multi_annotation_doc(self) -> None:
+        """Give RB-ONE a playbook annotation alongside the paging marker.
+
+        12 §6.3's Upgrades row names PB-MIGRATION *and* pages, so the paging
+        marker has to be recognised as one token of a comma-separated set.
+        """
+        (self.root / "docs" / "doc-12.md").write_text(
+            DOC.replace(
+                "| Alpha | alpha_series | alpha bad | RB-ONE |",
+                "| Alpha | alpha_series | alpha bad | RB-ONE (PB-SYNTHETIC, page immediately) |",
+            ),
+            encoding="utf-8",
+        )
+
+    def test_paging_marker_recognised_beside_another_annotation(self) -> None:
+        self._multi_annotation_doc()
+        self.write_runbook("RB-ONE", "Alpha", "alpha bad", page=True)
+        self.write_readme_with_pages({"RB-ONE": True, "RB-TWO": True})
+
+        errors, _runbooks, _alerts = self.check()
+
+        self.assertEqual(errors, [])
+
+    def test_paging_marker_beside_another_annotation_still_binds(self) -> None:
+        self._multi_annotation_doc()
+        self.write_runbook("RB-ONE", "Alpha", "alpha bad", page=False)
+
+        errors, _runbooks, _alerts = self.check()
+
+        self.assertTrue(
+            any("page_immediately must be true" in e for e in errors), errors
+        )
+
+    def test_non_paging_annotation_alone_does_not_page(self) -> None:
+        (self.root / "docs" / "doc-12.md").write_text(
+            DOC.replace(
+                "| Alpha | alpha_series | alpha bad | RB-ONE |",
+                "| Alpha | alpha_series | alpha bad | RB-ONE (PB-SYNTHETIC) |",
+            ),
+            encoding="utf-8",
+        )
+        self.write_runbook("RB-ONE", "Alpha", "alpha bad", page=True)
+        self.write_readme_with_pages({"RB-ONE": True, "RB-TWO": True})
+
+        errors, _runbooks, _alerts = self.check()
+
+        self.assertTrue(
+            any("page_immediately must be false" in e for e in errors), errors
         )
 
     def test_bad_owner_role_and_funding_line(self) -> None:
