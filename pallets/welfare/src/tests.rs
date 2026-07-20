@@ -1,7 +1,7 @@
 use crate::mock::*;
 use crate::*;
 use frame_support::{assert_noop, assert_ok, BoundedVec};
-use futarchy_primitives::{keeper::CrankClass, FixedU64};
+use futarchy_primitives::{keeper::CrankClass, kernel, FixedU64};
 
 fn bounded(specs: Vec<MetricSpec>) -> BoundedSpecSet {
     BoundedVec::try_from(specs).expect("test spec set is bounded")
@@ -1203,6 +1203,102 @@ fn ledger_failure_is_atomic_and_emits_no_settlement_event() {
             record.event,
             RuntimeEvent::Welfare(Event::SettlementComputed { .. })
         )));
+    });
+}
+
+// -------------------------------- 03 §2.3/§5.2 epoch-VOID Baseline settlement
+//
+// 03 §5.2 (owning transition, normative): "Under an epoch VOID, the
+// SettleAuthority settles the Baseline vault at `s = 0.5` … The settlement is
+// mandatory and unconditional on that path … Implementations MUST treat 'no
+// Baseline vault for the epoch' and 'already `Settled`' as no-ops rather than
+// failures — a VOID must never fail on this leg (G-1)." 05 §7(5) names welfare
+// as the sole SettleAuthority holder that performs it. SQ-92 regression.
+
+#[test]
+fn sq92_settle_baseline_void_settles_only_the_named_epoch_at_the_kernel_void_score() {
+    // 03 §2.3 transition row `Baseline Open → Settled(s)` ("epoch VOID settles
+    // at `s = 0.5`"): the score is the kernel constant, never a literal, and it
+    // is the neutral midpoint of the 1e9 score scale (03 §5.2).
+    assert_eq!(
+        kernel::VOID_BASELINE_SCORE.0.saturating_mul(2),
+        kernel::SCORE_SCALE
+    );
+    new_test_ext().execute_with(|| {
+        LedgerCalls::set(Vec::new());
+
+        assert_ok!(Welfare::settle_baseline_void(10));
+
+        // Exactly one settlement, for exactly the voided epoch: the Baseline
+        // vault is keyed per epoch, so a VOID of `e` may not touch `e ± 1`.
+        assert_eq!(
+            LedgerCalls::get(),
+            vec![LedgerCall::Baseline(10, kernel::VOID_BASELINE_SCORE)]
+        );
+    });
+}
+
+#[test]
+fn sq92_settle_baseline_void_reads_no_welfare_state_and_needs_no_snapshots() {
+    // A VOID means no measurement is trusted (05 §7(4)), so the Baseline
+    // settlement carries a spec-fixed constant rather than a computed score
+    // (05 §7(5): "a terminal transition carrying a spec-fixed constant, not a
+    // computation — which is exactly why it survives a VOID"). Pinned by
+    // contrast: the scored path for the same epoch cannot run at all here.
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            Welfare::compute_settlement(10, 1, SettleTarget::Baseline),
+            Error::<Test>::MissingComponent
+        );
+        LedgerCalls::set(Vec::new());
+
+        assert_ok!(Welfare::settle_baseline_void(10));
+
+        assert_eq!(
+            LedgerCalls::get(),
+            vec![LedgerCall::Baseline(10, kernel::VOID_BASELINE_SCORE)]
+        );
+    });
+}
+
+#[test]
+fn sq92_settle_baseline_void_is_a_silent_noop_when_no_baseline_vault_is_open() {
+    // G-1 leg of 03 §5.2: both benign cases — the epoch never had a Baseline
+    // vault, and the vault is already `Settled` — reach this seam as
+    // `baseline_open == false` and MUST be no-ops rather than failures. The two
+    // cases are distinguished where the distinction is real (ledger/runtime).
+    new_test_ext().execute_with(|| {
+        BaselineClosed::set(vec![10]);
+        LedgerCalls::set(Vec::new());
+
+        assert_ok!(Welfare::settle_baseline_void(10));
+
+        assert!(LedgerCalls::get().is_empty());
+        // The precondition is per epoch: a sibling epoch still settles.
+        assert_ok!(Welfare::settle_baseline_void(11));
+        assert_eq!(
+            LedgerCalls::get(),
+            vec![LedgerCall::Baseline(11, kernel::VOID_BASELINE_SCORE)]
+        );
+    });
+}
+
+#[test]
+fn sq92_settle_baseline_void_propagates_a_real_ledger_failure() {
+    // 03 §5.2 enumerates the no-op cases exhaustively; anything else is a
+    // genuine failure and must not be swallowed. G-1 then makes the caller's
+    // VOID fail closed rather than record a Void cohort over an `Open`
+    // Baseline vault — the exact stranding state the spec forbids.
+    new_test_ext().execute_with(|| {
+        LedgerFailure::set(Some(LedgerCall::Baseline(10, kernel::VOID_BASELINE_SCORE)));
+        LedgerCalls::set(Vec::new());
+
+        assert_noop!(
+            Welfare::settle_baseline_void(10),
+            sp_runtime::DispatchError::Other("injected ledger failure")
+        );
+
+        assert!(LedgerCalls::get().is_empty());
     });
 }
 

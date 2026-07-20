@@ -204,6 +204,11 @@ impl CoreWelfareOps for DifferentialWelfare {
             .push(SeamCall::Welfare(cohort_epoch, spec, target));
         Ok(WelfareScore::get())
     }
+
+    fn settle_baseline_void(&mut self, cohort_epoch: EpochId) -> Result<(), CoreError> {
+        self.calls.push(SeamCall::WelfareVoidBaseline(cohort_epoch));
+        Ok(())
+    }
 }
 
 fn map_core_events(events: &[CoreEvent]) -> Vec<Event<Test>> {
@@ -1358,6 +1363,131 @@ fn void_cohort_rejects_non_authority_origin() {
         ] {
             assert_noop!(Epoch::void_cohort(origin, 0), DispatchError::BadOrigin);
         }
+    });
+}
+
+// --------------------------- 03 §2.3/§5.2 · 05 §7(5) epoch-VOID Baseline leg
+//
+// 05 §7(5): "The one settlement a VOID still performs … Owning transition: the
+// epoch-VOID path (T20 cohort void), **not** T21 and not per-proposal
+// `void(pid)` — per-proposal vault voiding is a different VOID and settles no
+// Baseline." 03 §5.2 makes the same scoping normative and mandatory. SQ-92.
+
+#[test]
+fn sq92_void_cohort_settles_the_voided_epochs_baseline_exactly_once() {
+    new_test_ext().execute_with(|| {
+        let mut state = EpochState::new();
+        for pid in 1..=2 {
+            state
+                .proposals
+                .push(live_proposal(pid, ProposalState::Measuring, 0));
+        }
+        // A second, untouched cohort: the Baseline vault is keyed per *epoch*
+        // (03 §2.2), so voiding epoch 0 must not settle epoch 1's.
+        state
+            .proposals
+            .push(live_proposal(3, ProposalState::Measuring, 1));
+        state.cohorts.push(CoreCohort {
+            epoch: 0,
+            proposals: vec![1, 2],
+            status: CohortStatus::Measuring { until_epoch: 2 },
+        });
+        state.cohorts.push(CoreCohort {
+            epoch: 1,
+            proposals: vec![3],
+            status: CohortStatus::Measuring { until_epoch: 3 },
+        });
+        state.proposal_id_high_water = 3;
+        assert_ok!(Epoch::seed(state));
+
+        assert_ok!(Epoch::void_cohort(
+            RuntimeOrigin::signed(void_authority()),
+            0,
+        ));
+
+        // Mandatory, exactly once, for exactly the voided epoch — and after the
+        // per-proposal vault voids, in the same transaction that sets the
+        // cohort status to Void (03 §5.2). Guard-cleanup seam calls are
+        // deliberately not constrained here.
+        assert_eq!(
+            SeamCalls::get()
+                .into_iter()
+                .filter(|call| matches!(call, SeamCall::Void(_) | SeamCall::WelfareVoidBaseline(_)))
+                .collect::<Vec<_>>(),
+            vec![
+                SeamCall::Void(1),
+                SeamCall::Void(2),
+                SeamCall::WelfareVoidBaseline(0),
+            ]
+        );
+        assert_eq!(
+            Cohorts::<Test>::get(1).map(|cohort| cohort.status),
+            Some(CohortStatus::Measuring { until_epoch: 3 })
+        );
+        assert_ok!(Epoch::do_try_state());
+    });
+}
+
+#[test]
+fn sq92_t20_per_proposal_void_does_not_settle_the_epoch_baseline() {
+    // The key scoping guard against over-firing: T20 on a single vault
+    // (`void(pid)`) is a *different* VOID and settles no Baseline (03 §5.2,
+    // 05 §7(5)). Over-firing here would settle an epoch whose cohort is still
+    // measuring and freeze `split_baseline`/`merge_baseline` for everyone else.
+    for state in [ProposalState::Trading, ProposalState::Queued] {
+        new_test_ext().execute_with(|| {
+            assert_ok!(Epoch::seed(callback_state(1, state)));
+
+            assert_ok!(Epoch::force_reject_process_hold(
+                RuntimeOrigin::signed(guardian()),
+                1,
+            ));
+
+            let calls = SeamCalls::get();
+            assert!(calls.contains(&SeamCall::Void(1)));
+            assert!(!calls
+                .iter()
+                .any(|call| matches!(call, SeamCall::WelfareVoidBaseline(_))));
+            assert_ok!(Epoch::do_try_state());
+        });
+    }
+}
+
+#[test]
+fn sq92_void_cohort_fails_closed_when_the_baseline_settlement_fails() {
+    // 03 §5.2 enumerates the tolerated no-ops exhaustively (no vault / already
+    // `Settled`); a genuine settlement failure is not one of them, so G-1 makes
+    // the whole VOID revert rather than record `CohortInfo.status = Void` over
+    // an `Open` Baseline vault — the state that strands single-sided holders.
+    new_test_ext().execute_with(|| {
+        let mut state = EpochState::new();
+        state
+            .proposals
+            .push(live_proposal(1, ProposalState::Measuring, 0));
+        state.cohorts.push(CoreCohort {
+            epoch: 0,
+            proposals: vec![1],
+            status: CohortStatus::Measuring { until_epoch: 2 },
+        });
+        state.proposal_id_high_water = 1;
+        assert_ok!(Epoch::seed(state));
+        SeamFailure::set(Some(SeamCall::WelfareVoidBaseline(0)));
+        let before_state = Epoch::epoch_state().encode();
+        let before_events = System::events();
+        let before_calls = SeamCalls::get();
+
+        assert_noop!(
+            Epoch::void_cohort(RuntimeOrigin::signed(void_authority()), 0),
+            Error::<Test>::Welfare
+        );
+
+        assert_eq!(Epoch::epoch_state().encode(), before_state);
+        assert_eq!(System::events(), before_events);
+        assert_eq!(SeamCalls::get(), before_calls);
+        assert_eq!(
+            Cohorts::<Test>::get(0).map(|cohort| cohort.status),
+            Some(CohortStatus::Measuring { until_epoch: 2 })
+        );
     });
 }
 

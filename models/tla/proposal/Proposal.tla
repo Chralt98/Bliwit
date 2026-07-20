@@ -845,6 +845,17 @@ RowEdgeOK(row, tr) ==
 RowActionOK(row, tr) ==
     CASE row = "T1"  -> tr.action = "Submit"
       [] row = "T2"  -> tr.action = "Withdraw"
+      \* Modelling scope (SQ-98/SQ-286): 05 SS2.1's T20 row also names `decide()`
+      \* as a producer - under a VOID condition, a stale epoch or an active
+      \* PB-LEDGER-FREEZE, `decide` and `tick` share one predicate and one
+      \* disposition. This model binds T20 to "Tick" alone ON PURPOSE. It carries
+      \* no freeze variable, so the freeze-driven edge is unreachable here; and
+      \* admitting "Decide" for T20 would make a Decide/Trading->Rejected/
+      \* ProcessHold step match BOTH T10 (ProcessHold is in T10Reasons) and T20,
+      \* breaking the `Cardinality(matches) = 1` clause of
+      \* TransitionTableExhaustive. Disambiguating needs the vault outcome in the
+      \* transition record - T20 voids, T10 resolves into measurement - which is
+      \* a modelling change owed its own pass.
       [] row \in {"T3", "T4", "T5", "T6", "T7", "T12", "T13",
                    "T15", "T20", "T22"} -> tr.action = "Tick"
       [] row \in {"T8", "T9", "T10"} -> tr.action = "Decide"

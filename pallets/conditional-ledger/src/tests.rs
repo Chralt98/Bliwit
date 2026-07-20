@@ -7,8 +7,12 @@
 //! spec's mandatory named regression vectors (03 §6.3, §6.4) and a pallet≡core
 //! differential check.
 
-use crate::{mock::*, DepositsHeld, Error, Event, Positions, VaultTerminalAt, Vaults};
-use conditional_ledger_core::{position as pos, LedgerOrigin, LedgerState};
+use crate::{
+    mock::*, BaselineVaults, DepositsHeld, Error, Event, Positions, VaultTerminalAt, Vaults,
+};
+use conditional_ledger_core::{
+    baseline as baseline_pos, position as pos, BaselineState, LedgerOrigin, LedgerState,
+};
 use frame_support::{
     assert_noop, assert_ok,
     traits::fungibles::{Inspect, Mutate},
@@ -39,6 +43,11 @@ fn usdc(who: AccountId) -> u128 {
 }
 fn escrow(pid: ProposalId) -> u128 {
     Vaults::<Test>::get(pid).map(|v| v.escrowed).unwrap_or(0)
+}
+fn baseline_escrow(epoch: u32) -> u128 {
+    BaselineVaults::<Test>::get(epoch)
+        .map(|v| v.escrowed)
+        .unwrap_or(0)
 }
 fn ledger_events() -> Vec<Event<Test>> {
     System::events()
@@ -1060,6 +1069,152 @@ fn ops_on_unknown_vault_error() {
             Ledger::split_baseline(signed(ALICE), 42, UNIT),
             E::UnknownBaselineVault
         );
+    });
+}
+
+// -------------------- 03 §2.3/§5.2 epoch-VOID Baseline settlement (SQ-92)
+//
+// 03 §5.2 (normative): "Under an epoch VOID, the SettleAuthority settles the
+// Baseline vault at `s = 0.5` … because both redemption calls of §5.3 require
+// `Settled`, an unsettled Baseline vault permanently strands every single-sided
+// holder while pair holders still exit at par through `merge_baseline`, so the
+// omission is invisible to §7.5's conservation invariants." These pin the
+// ledger half of that transition: the strand, the cure, and the scoping.
+
+#[test]
+fn sq92_single_sided_baseline_holder_is_stranded_until_the_void_settlement() {
+    // The regression the defect hid behind: ALICE holds only B-LONG, BOB only
+    // B-SHORT. While the vault is `Open` neither can redeem (03 §5.3 requires
+    // `Settled`) — yet CHARLIE, holding a complete pair, still exits at par via
+    // `merge_baseline`, which is exactly why every solvency invariant stayed
+    // green. The epoch-VOID settlement at `s = 0.5` is the cure.
+    new_test_ext().execute_with(|| {
+        create_base(9);
+        let a = 10 * UNIT;
+        assert_ok!(Ledger::split_baseline(signed(ALICE), 9, a));
+        let short = baseline_pos(9, ScalarSide::Short);
+        assert_ok!(Ledger::transfer(signed(ALICE), short, BOB, a));
+
+        // Single-sided holders are locked out while the vault is `Open` …
+        assert_noop!(
+            Ledger::redeem_baseline(signed(ALICE), 9, ScalarSide::Long, a),
+            E::WrongVaultState
+        );
+        assert_noop!(
+            Ledger::redeem_baseline(signed(BOB), 9, ScalarSide::Short, a),
+            E::WrongVaultState
+        );
+        // … while a complete-pair holder exits at par and masks the defect.
+        assert_ok!(Ledger::split_baseline(signed(CHARLIE), 9, a));
+        assert_ok!(Ledger::merge_baseline(signed(CHARLIE), 9, a));
+        try_state();
+
+        // The epoch-VOID settlement, as the SettleAuthority applies it.
+        assert_ok!(Ledger::settle_baseline(
+            signed(SETTLER),
+            9,
+            kernel::VOID_BASELINE_SCORE
+        ));
+        assert_eq!(
+            BaselineVaults::<Test>::get(9).map(|vault| vault.state),
+            Some(BaselineState::Settled(kernel::VOID_BASELINE_SCORE))
+        );
+
+        // Payout expectations are derived from the kernel constant, never
+        // hand-computed: LONG floor(a·s), SHORT floor(a·(1−s)) (03 §5.3/§6.3).
+        let scale = u128::from(kernel::SCORE_SCALE);
+        let s = u128::from(kernel::VOID_BASELINE_SCORE.0);
+        let long_pay = a.saturating_mul(s) / scale;
+        let short_pay = a.saturating_mul(scale - s) / scale;
+        let deposit = kernel::POSITION_DEPOSIT_USDC;
+        let escrow_before = baseline_escrow(9);
+
+        let alice_before = usdc(ALICE);
+        assert_ok!(Ledger::redeem_baseline(
+            signed(ALICE),
+            9,
+            ScalarSide::Long,
+            a
+        ));
+        assert_eq!(usdc(ALICE) - alice_before, long_pay + deposit);
+        let bob_before = usdc(BOB);
+        assert_ok!(Ledger::redeem_baseline(
+            signed(BOB),
+            9,
+            ScalarSide::Short,
+            a
+        ));
+        assert_eq!(usdc(BOB) - bob_before, short_pay + deposit);
+
+        // R-1: Σ payouts never over-draw escrow (here `s = 0.5` splits it exactly).
+        assert!(long_pay.saturating_add(short_pay) <= escrow_before);
+        assert_eq!(
+            baseline_escrow(9),
+            escrow_before - long_pay - short_pay,
+            "escrow decrements by exactly the payouts"
+        );
+        try_state();
+    });
+}
+
+#[test]
+fn sq92_per_proposal_void_leaves_the_epoch_baseline_vault_open() {
+    // 03 §5.2: "per-proposal `void(pid)` (T20 on a single vault) settles **no**
+    // Baseline, because the Baseline vault is keyed per *epoch*, not per
+    // proposal." Over-firing would freeze a live Baseline book's mint/merge
+    // surface for an epoch whose cohort is still measuring.
+    new_test_ext().execute_with(|| {
+        create(1);
+        create_base(9);
+        assert_ok!(Ledger::split(signed(ALICE), 1, 10 * UNIT));
+        assert_ok!(Ledger::split_baseline(signed(ALICE), 9, 10 * UNIT));
+
+        assert_ok!(Ledger::void(signed(RESOLVER), 1));
+
+        assert_eq!(
+            BaselineVaults::<Test>::get(9).map(|vault| vault.state),
+            Some(BaselineState::Open)
+        );
+        // Still `Open` in the strict 03 §5.1 sense: minting remains admitted.
+        assert_ok!(Ledger::split_baseline(signed(BOB), 9, UNIT));
+        assert_ok!(Ledger::merge_baseline(signed(BOB), 9, UNIT));
+        assert_noop!(
+            Ledger::redeem_baseline(signed(ALICE), 9, ScalarSide::Long, UNIT),
+            E::WrongVaultState
+        );
+        try_state();
+    });
+}
+
+#[test]
+fn sq92_baseline_settlement_is_once_only_and_keeps_the_first_score() {
+    // The two cases 03 §5.2 requires the epoch-VOID path to treat as no-ops are
+    // hard errors at this layer — which is why the VOID leg pre-filters on an
+    // `Open` vault instead of swallowing ledger errors (G-1).
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            Ledger::settle_baseline(signed(SETTLER), 9, kernel::VOID_BASELINE_SCORE),
+            E::UnknownBaselineVault
+        );
+
+        create_base(9);
+        assert_ok!(Ledger::split_baseline(signed(ALICE), 9, UNIT));
+        assert_ok!(Ledger::settle_baseline(
+            signed(SETTLER),
+            9,
+            kernel::VOID_BASELINE_SCORE
+        ));
+
+        // A second settlement — VOID re-entry included — cannot re-score it.
+        assert_noop!(
+            Ledger::settle_baseline(signed(SETTLER), 9, FixedU64(kernel::SCORE_SCALE)),
+            E::WrongVaultState
+        );
+        assert_eq!(
+            BaselineVaults::<Test>::get(9).map(|vault| vault.state),
+            Some(BaselineState::Settled(kernel::VOID_BASELINE_SCORE))
+        );
+        try_state();
     });
 }
 

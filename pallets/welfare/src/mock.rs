@@ -134,6 +134,9 @@ parameter_types! {
     pub static DailyInputsByVersion: Vec<(MetricSpecVersion, Vec<ComponentValue>)> = Vec::new();
     pub static IncidentInput: FixedU64 = FixedU64(ONE);
     pub static LedgerFailure: Option<LedgerCall> = None;
+    /// Epochs whose Baseline vault is absent or already settled, i.e. the
+    /// `baseline_open` precondition is false and the VOID settlement no-ops.
+    pub static BaselineClosed: Vec<EpochId> = Vec::new();
     pub static RecordKeeperRebates: bool = false;
 }
 
@@ -283,6 +286,10 @@ impl LedgerSettlement for TestLedger {
         LedgerCalls::mutate(|calls| calls.push(call));
         Ok(())
     }
+
+    fn baseline_open(epoch: EpochId) -> bool {
+        !BaselineClosed::get().contains(&epoch)
+    }
 }
 
 pub struct TestMetricGovernanceOrigin;
@@ -355,6 +362,9 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     DailyInputsByVersion::set(Vec::new());
     IncidentInput::set(FixedU64(ONE));
     LedgerFailure::set(None);
+    // Default: every epoch has an `Open` Baseline vault, so the 03 §5.2
+    // epoch-VOID settlement has work to do unless a test says otherwise.
+    BaselineClosed::set(Vec::new());
     RecordKeeperRebates::set(false);
 
     let storage = RuntimeGenesisConfig {

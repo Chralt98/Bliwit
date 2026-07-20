@@ -8314,6 +8314,287 @@ fn void_cohort_releases_a_retained_rerun_pin_and_guard_records() {
     });
 }
 
+/// 03 §2.3/§5.2 · 05 §7(5): an epoch VOID settles the epoch's **Baseline**
+/// vault at the neutral `s = 0.5` in the same transaction that voids the
+/// cohort. Both Baseline redemption calls require `Settled` (03 §5.3), so
+/// omitting the settlement leaves the vault `Open` forever and permanently
+/// strands every single-sided Baseline holder of the voided epoch — while
+/// full-pair holders still exit at par via `merge_baseline`, which is why the
+/// omission was invisible to every solvency invariant (SQ-92).
+///
+/// This is the end-to-end regression over the real
+/// epoch → welfare (SettleAuthority) → ledger wiring; the pallet suites cover
+/// the seams individually.
+#[test]
+fn sq92_epoch_void_settles_the_baseline_and_unstrands_a_single_sided_holder() {
+    use futarchy_primitives::{PositionId, ScalarSide};
+    use pallet_conditional_ledger::core_ledger::BaselineState;
+    use pallet_market::core_market::BookKind;
+
+    development_ext().execute_with(|| {
+        const BASELINE_MARKET: futarchy_primitives::MarketId = 92_000;
+        // frame_system drops events deposited at block 0.
+        System::set_block_number(1);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let holder = account(190);
+        let counterparty = account(191);
+        let short = PositionId::Baseline {
+            epoch,
+            side: ScalarSide::Short,
+        };
+
+        // Seeding the epoch's Baseline book is what creates its Baseline vault
+        // (03 §2.2; pallet-market holds ledger MarketAuthority).
+        assert_ok!(Market::create_market(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            BASELINE_MARKET,
+            BookKind::Baseline { epoch },
+            account(192),
+            account(193),
+            crate::configs::balance_param(b"pol.b_baseline"),
+        ));
+        assert_eq!(
+            pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)
+                .map(|vault| vault.state),
+            Some(BaselineState::Open)
+        );
+
+        let stake = 10 * currency::USDC;
+        let deposit = crate::configs::LedgerPositionDeposit::get();
+        let funding = stake.saturating_mul(4);
+        assert_ok!(ForeignAssets::mint_into(usdc_location(), &holder, funding));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &counterparty,
+            funding
+        ));
+        // 03 §7 R-4: the ledger sovereign is genesis-endowed and can never be
+        // reaped. The fixture models that endowment (the asset's own
+        // `min_balance`, never a literal) so the *last* redeemer of the vault
+        // is not blocked by the collateral pallet's `Preservation::Preserve`.
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &ConditionalLedger::account_id(),
+            <ForeignAssets as FungiblesInspect<AccountId>>::minimum_balance(usdc_location()),
+        ));
+
+        // Split, then dispose of the SHORT leg: `holder` is now single-sided
+        // and cannot reach par through `merge_baseline` any more.
+        assert_ok!(ConditionalLedger::split_baseline(
+            RuntimeOrigin::signed(holder.clone()),
+            epoch,
+            stake,
+        ));
+        assert_ok!(ConditionalLedger::transfer(
+            RuntimeOrigin::signed(holder.clone()),
+            short,
+            counterparty.clone(),
+            stake,
+        ));
+        assert_noop!(
+            ConditionalLedger::redeem_baseline(
+                RuntimeOrigin::signed(holder.clone()),
+                epoch,
+                ScalarSide::Long,
+                stake,
+            ),
+            pallet_conditional_ledger::Error::<Runtime>::WrongVaultState
+        );
+
+        // Normal lifecycle: the epoch's Baseline book is closed at the decision
+        // boundary (`RuntimeMarketAccess::close_markets`) long before its cohort
+        // can be voided out of `Measuring`.
+        assert_ok!(Market::close(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            BASELINE_MARKET,
+        ));
+
+        // The epoch VOID (05 §7(5) cohort void, T20).
+        let proposals = match BoundedVec::try_from(Vec::new()) {
+            Ok(proposals) => proposals,
+            Err(_) => {
+                assert!(false, "empty cohort must fit");
+                return;
+            }
+        };
+        pallet_epoch::Cohorts::<Runtime>::insert(
+            epoch,
+            pallet_epoch::CohortInfo {
+                epoch,
+                proposals,
+                status: pallet_epoch::CohortStatus::Measuring {
+                    until_epoch: epoch.saturating_add(2),
+                },
+            },
+        );
+        assert_ok!(Epoch::void_cohort(
+            pallet_origins::Origin::EmergencyPlaybook.into(),
+            epoch,
+        ));
+
+        // 03 §2.3 `Baseline Open → Settled(s)`, at the kernel constant.
+        assert_eq!(
+            pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)
+                .map(|vault| vault.state),
+            Some(BaselineState::Settled(kernel::VOID_BASELINE_SCORE))
+        );
+        assert!(System::events().iter().any(|record| matches!(
+            record.event,
+            crate::RuntimeEvent::ConditionalLedger(
+                pallet_conditional_ledger::Event::BaselineSettled { epoch: settled, s },
+            ) if settled == epoch && s == kernel::VOID_BASELINE_SCORE
+        )));
+
+        // The stranded holder can now redeem. Payouts are derived from the
+        // kernel constant, never hand-computed: LONG floor(a·s), SHORT
+        // floor(a·(1−s)) (03 §5.3/§6.3).
+        let scale = u128::from(kernel::SCORE_SCALE);
+        let s = u128::from(kernel::VOID_BASELINE_SCORE.0);
+        let long_payout = stake.saturating_mul(s) / scale;
+        let short_payout = stake.saturating_mul(scale.saturating_sub(s)) / scale;
+        let escrow_before = pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)
+            .map(|vault| vault.escrowed)
+            .unwrap_or_default();
+
+        let holder_before = ForeignAssets::balance(usdc_location(), &holder);
+        assert_ok!(ConditionalLedger::redeem_baseline(
+            RuntimeOrigin::signed(holder.clone()),
+            epoch,
+            ScalarSide::Long,
+            stake,
+        ));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &holder).saturating_sub(holder_before),
+            long_payout.saturating_add(deposit),
+        );
+
+        let counterparty_before = ForeignAssets::balance(usdc_location(), &counterparty);
+        assert_ok!(ConditionalLedger::redeem_baseline(
+            RuntimeOrigin::signed(counterparty.clone()),
+            epoch,
+            ScalarSide::Short,
+            stake,
+        ));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &counterparty)
+                .saturating_sub(counterparty_before),
+            short_payout.saturating_add(deposit),
+        );
+
+        // R-1/L-2: the two floors never over-draw the vault's escrow.
+        assert!(long_payout.saturating_add(short_payout) <= escrow_before);
+        assert!(Epoch::do_try_state().is_ok());
+        assert!(ConditionalLedger::do_try_state().is_ok());
+        assert!(Market::do_try_state().is_ok());
+    });
+}
+
+/// Companion to the regression above, over the window in which the epoch's
+/// Baseline **book** is still live when its cohort is voided.
+///
+/// Reachability (all legal transitions): `start_measurement` (05 §2.1 T13/T21)
+/// opens the cohort for epoch `e` as soon as the *first* epoch-`e` proposal
+/// enters `Measuring`, while `RuntimeMarketAccess::close_markets` deliberately
+/// keeps the epoch's Baseline book open while any sibling epoch-`e` proposal is
+/// still `Trading`/`Extended` (its `baseline_still_live` guard — the T18
+/// extended-decision window). A `void_cohort(e)` inside that window is exactly
+/// the PB-ORACLE-VOID/T20 path of 05 §7(5), and 03 §5.2 makes its Baseline
+/// settlement mandatory and unconditional there.
+///
+/// Obligation asserted: a legal dispatch may never leave the chain in a
+/// try-state-violating state (15 §1; 03 §9: drift ⇒ I-4 flag ⇒
+/// PB-LEDGER-FREEZE eligibility per D-9; G-1).
+#[test]
+fn sq92_epoch_void_with_a_live_baseline_book_keeps_market_try_state_green() {
+    use futarchy_primitives::ScalarSide;
+    use pallet_conditional_ledger::core_ledger::BaselineState;
+    use pallet_market::core_market::BookKind;
+
+    development_ext().execute_with(|| {
+        const BASELINE_MARKET: futarchy_primitives::MarketId = 92_001;
+        System::set_block_number(1);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let holder = account(194);
+
+        assert_ok!(Market::create_market(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            BASELINE_MARKET,
+            BookKind::Baseline { epoch },
+            account(195),
+            account(196),
+            crate::configs::balance_param(b"pol.b_baseline"),
+        ));
+        let stake = 10 * currency::USDC;
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &holder,
+            stake.saturating_mul(4)
+        ));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &ConditionalLedger::account_id(),
+            <ForeignAssets as FungiblesInspect<AccountId>>::minimum_balance(usdc_location()),
+        ));
+        assert_ok!(ConditionalLedger::split_baseline(
+            RuntimeOrigin::signed(holder.clone()),
+            epoch,
+            stake,
+        ));
+
+        let proposals = match BoundedVec::try_from(Vec::new()) {
+            Ok(proposals) => proposals,
+            Err(_) => {
+                assert!(false, "empty cohort must fit");
+                return;
+            }
+        };
+        pallet_epoch::Cohorts::<Runtime>::insert(
+            epoch,
+            pallet_epoch::CohortInfo {
+                epoch,
+                proposals,
+                status: pallet_epoch::CohortStatus::Measuring {
+                    until_epoch: epoch.saturating_add(2),
+                },
+            },
+        );
+
+        // G-1 / 03 §5.2: the VOID must not fail on the settlement leg …
+        assert_ok!(Epoch::void_cohort(
+            pallet_origins::Origin::EmergencyPlaybook.into(),
+            epoch,
+        ));
+        assert_eq!(
+            pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)
+                .map(|vault| vault.state),
+            Some(BaselineState::Settled(kernel::VOID_BASELINE_SCORE))
+        );
+        assert_ok!(ConditionalLedger::redeem_baseline(
+            RuntimeOrigin::signed(holder),
+            epoch,
+            ScalarSide::Long,
+            stake,
+        ));
+
+        // … and it must not leave a flagged state behind. This is the
+        // regression for the `pallet-market` defect the SQ-92 fix exposed:
+        // `observe_baseline_terminal` latched `SettlementObservedAt` without
+        // closing the book, unlike its proposal counterpart
+        // `observe_proposal_terminal`, while `do_try_state` requires every
+        // observed entry to carry `MarketPhase::Closed` + `ClosedAt`. It was
+        // unreachable before, because on the ordinary path `close_markets`
+        // closes the Baseline book once the epoch's last proposal leaves
+        // Trading/Extended — an epoch VOID never passes through `decide`.
+        assert!(matches!(
+            pallet_market::Markets::<Runtime>::get(BASELINE_MARKET).map(|book| book.phase),
+            Some(pallet_market::core_market::MarketPhase::Closed)
+        ));
+        assert!(Epoch::do_try_state().is_ok());
+        assert!(ConditionalLedger::do_try_state().is_ok());
+        assert!(Market::do_try_state().is_ok());
+    });
+}
+
 #[test]
 fn never_queued_ratification_is_reaped_on_withdraw_and_after_intake_reap() {
     upgrade_ext().execute_with(|| {

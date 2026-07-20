@@ -867,6 +867,14 @@ pub mod chain_identity {
 }
 
 pub mod kernel {
+    /// Fixed-point scale of a settlement score `s` (`FixedU64`, 1e9).
+    pub const SCORE_SCALE: u64 = 1_000_000_000;
+    /// The neutral Baseline score an **epoch VOID** settles at (03 §2.3
+    /// transition table; 03 §5). For a branch-free scalar vault `s = 0.5` is
+    /// identical in payout to D-1's neutral ½ valuation, which is precisely
+    /// why `BaselineState` carries no `Voided` variant (03 §6.4) — the VOID is
+    /// expressed as a settlement, not as a distinct terminal state.
+    pub const VOID_BASELINE_SCORE: super::FixedU64 = super::FixedU64(SCORE_SCALE / 2);
     pub const MILLISECS_PER_BLOCK: u64 = 6_000;
     /// Frozen six-second-block day used by security-sizing duration math (13 §3.1).
     pub const BLOCKS_PER_DAY: u32 = 14_400;
