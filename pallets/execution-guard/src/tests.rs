@@ -78,6 +78,27 @@ fn last_guard_event() -> Option<Event<Test>> {
 }
 
 #[test]
+fn genesis_migration_halt_seed_engages_the_guard_trigger() {
+    // SQ-274: the PB-MIGRATION drill seeds MigrationHalt at genesis via the
+    // guard's `migration_halt` field so the guardian recovery playbook is
+    // dispatchable against the exact release runtime — no production
+    // fault-injection surface. Production presets leave the field false.
+    new_test_ext_migration_halt().execute_with(|| {
+        assert!(
+            MigrationHalt::<Test>::get(),
+            "migration_halt: true genesis must engage the guard freeze"
+        );
+    });
+    // The default preset never boots halted.
+    new_test_ext().execute_with(|| {
+        assert!(
+            !MigrationHalt::<Test>::get(),
+            "default genesis must not boot with MigrationHalt set"
+        );
+    });
+}
+
+#[test]
 fn execute_happy_path_dispatches_with_class_origin_and_records_terminal_state() {
     new_test_ext().execute_with(|| {
         setup_param(1, 41);

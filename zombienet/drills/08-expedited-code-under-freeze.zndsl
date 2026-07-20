@@ -1,9 +1,6 @@
-# 15 §4.7; 09 §2.1/§3.2/§7.1 — phase-2 expedited CODE lane.
-Description: An attested expedited CODE proposal authorizes and applies while its staged ledger freeze remains active.
-Network: ./zombienet/networks/bleavit-local.toml
+Description: An attested expedited CODE proposal authorizes and applies while its staged ledger freeze remains active (15 §4.7; 09 §2.1/§3.2/§7.1).
+Network: ./zombienet/networks/bleavit-fast.toml
+Creds: config
 
 bleavit-collator-1: reports block height is at least 10 within 300 seconds
-# B6 stages a valid PB-LEDGER-FREEZE and prequeues proposal 1 with expedited=true.
-# One race-free helper captures the authorization event, proves early apply is
-# rejected, waits 43,200 actual parachain blocks, then captures UpgradeApplied.
-bleavit-collator-1: js-script ./js/expedited-code-lane.js with "1,target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm" within 300000 seconds
+bleavit-collator-1: js-script ./js/expedited-code-lane.js with "1,target/fast-timing/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm" within 1800 seconds

@@ -1,3 +1,4 @@
+# This topology boots with pallet_execution_guard::MigrationHalt=true staged at genesis so the PB-MIGRATION guardian recovery path is live (SQ-274; 09 §3.2).
 # Bleavit local drill topology — 15 §4.7; 02 §8/§11; 09 §7.1.
 [settings]
 provider = "native"
@@ -44,7 +45,7 @@ args = ["--keeper-node-url=ws://127.0.0.1:19944", "--keeper-signer-uri=//Alice"]
 
 [[parachains]]
 id = 4242
-chain_spec_path = "zombienet/specs/out/bleavit-drill.json"
+chain_spec_path = "zombienet/specs/out/bleavit-drill-migration.json"
 cumulus_based = true
 
 [[parachains.collators]]

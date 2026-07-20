@@ -1,15 +1,11 @@
-# 15 §4.7; 02 §8/§11; 09 §6.1/§7.1 — reserve transfer lifecycle.
-Description: Asset Hub to Bleavit v5 USDC success, destination failure/trap, and remote-origin recovery.
+Description: Asset Hub to Bleavit v5 USDC success, destination failure/trap, and remote-origin recovery (15 §4.7; 02 §8/§11; 09 §6.1/§7.1).
 Network: ./zombienet/networks/bleavit-xcm.toml
+Creds: config
 
 asset-hub-collator-1: reports block height is at least 10 within 300 seconds
 bleavit-collator-1: reports block height is at least 10 within 300 seconds
-# Helpers capture source receipts and correlate destination message id, AH
-# sibling origin, canonical USDC location, amount, and beneficiary in decoded events.
 asset-hub-collator-1: js-script ./js/xcm-reserve-transfer.js with "setup" within 300 seconds
 asset-hub-collator-1: js-script ./js/xcm-reserve-transfer.js with "success" within 300 seconds
 asset-hub-collator-1: js-script ./js/xcm-reserve-transfer.js with "failure" within 300 seconds
 bleavit-collator-1: js-script ./js/xcm-reserve-transfer.js with "trap" within 300 seconds
-# Recovery is an inbound v5 ClaimAsset from AH's chain origin, never a local
-# Alice claim on Bleavit; the helper fails loudly if that AH dispatch is unavailable.
 asset-hub-collator-1: js-script ./js/xcm-reserve-transfer.js with "recovery" within 300 seconds

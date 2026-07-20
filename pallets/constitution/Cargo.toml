@@ -40,6 +40,13 @@ runtime-benchmarks = [
   "frame-system/runtime-benchmarks",
   "sp-runtime/runtime-benchmarks",
 ]
+# SQ-128 (G1 drill 09): forward the default-off compressed epoch-timing gate to
+# `constitution-core`/`futarchy-primitives` so a `fast-timing` runtime build seeds
+# a compressed `epoch.length`/`dec.window`/`dec.trailing`. Test-only; never in release.
+fast-timing = [
+  "constitution-core/fast-timing",
+  "futarchy-primitives/fast-timing",
+]
 try-runtime = [
   "frame-support/try-runtime",
   "frame-system/try-runtime",

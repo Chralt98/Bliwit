@@ -741,12 +741,21 @@ pub mod pallet {
     pub struct GenesisConfig<T: Config> {
         #[serde(skip)]
         pub _config: PhantomData<T>,
+        /// PB-MIGRATION drill staging seed (09 §3.2; SQ-274). When `true`,
+        /// genesis engages [`MigrationHalt`] so the guardian recovery playbook
+        /// (`ActivatePlaybook { Migration, MigrationHalt }`) is dispatchable
+        /// against the exact release runtime — with no production
+        /// fault-injection surface (R-7). Engaging a freeze at genesis is the
+        /// conservative direction (G-1). Every production preset leaves this
+        /// `false` (its default), so the shipped chain never boots halted.
+        pub migration_halt: bool,
     }
 
     impl<T: Config> Default for GenesisConfig<T> {
         fn default() -> Self {
             Self {
                 _config: PhantomData,
+                migration_halt: false,
             }
         }
     }
@@ -762,6 +771,9 @@ pub mod pallet {
                     spec_name,
                     spec_version: version.spec_version,
                 });
+            }
+            if self.migration_halt {
+                MigrationHalt::<T>::put(true);
             }
         }
     }

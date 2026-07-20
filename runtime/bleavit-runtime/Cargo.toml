@@ -288,3 +288,14 @@ try-runtime = [
   "sp-runtime/try-runtime",
   "staging-parachain-info/try-runtime",
 ]
+# SQ-128 (G1 drill 09): default-off compressed epoch timing for a documented
+# test-only runtime wasm. Forwards the gate to `futarchy-primitives` (kernel
+# floors) and `pallet-constitution` → `constitution-core` (registry seeds) so a
+# `--features fast-timing` build boots a genuine epoch clock that advances three
+# real epochs in minutes (09 §7.1). NEVER enabled for a release artifact: the
+# release pipeline (`tools/deploy/generate-chain-specs.sh`,
+# `tools/release/`) builds default features only. See PLAN.md · Decision log.
+fast-timing = [
+  "futarchy-primitives/fast-timing",
+  "pallet-constitution/fast-timing",
+]

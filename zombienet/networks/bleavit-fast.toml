@@ -1,3 +1,4 @@
+# This topology boots the default-off `fast-timing` runtime wasm (SQ-128): a compressed epoch.length (21 × FAST_DAY = 84 blocks) so drill 09's "three unattended epochs" machinery proof runs three REAL epochs in minutes, not the release-cadence ~63 days. Test-only build; never a release artifact (09 §7.1; 13 §1).
 # Bleavit local drill topology — 15 §4.7; 02 §8/§11; 09 §7.1.
 [settings]
 provider = "native"
@@ -32,8 +33,10 @@ name = "relay-dave"
 validator = true
 
 # Zombienet has no auxiliary-process stanza. This non-validator node entry
-# gives the real B9 keeper a managed PID and Prometheus endpoint so drill 03's
-# native SIGSTOP/SIGCONT controls target the daemon itself.
+# gives the real B9 keeper a managed PID and Prometheus endpoint so it cranks
+# the permissionless epoch extrinsics across the compressed epochs. The keeper
+# is subxt-dynamic and reads the live epoch.length from chain, so it adapts to
+# fast-timing with no rebuild.
 [[relaychain.nodes]]
 name = "keeper"
 validator = false
@@ -44,7 +47,7 @@ args = ["--keeper-node-url=ws://127.0.0.1:19944", "--keeper-signer-uri=//Alice"]
 
 [[parachains]]
 id = 4242
-chain_spec_path = "zombienet/specs/out/bleavit-drill.json"
+chain_spec_path = "zombienet/specs/out/bleavit-drill-fast.json"
 cumulus_based = true
 
 [[parachains.collators]]

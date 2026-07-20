@@ -3037,7 +3037,10 @@ fn relay_gap_4_799_does_not_engage_the_dead_man_switch() {
             Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED,
             0,
         );
-        assert_eq!(pallet_epoch::LastRelayParent::<Runtime>::get(), Some(4_800));
+        assert_eq!(
+            pallet_epoch::LastRelayParent::<Runtime>::get(),
+            Some(kernel::DEAD_MAN_RELAY_BLOCKS)
+        );
     });
 }
 

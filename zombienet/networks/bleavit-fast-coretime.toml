@@ -1,11 +1,13 @@
+# This topology boots the default-off `fast-timing` runtime wasm (SQ-128) with the
+# drill-05 Coretime staging: the FutarchyTreasury quote authority + Coretime-side
+# renewal account are seeded via the existing genesis fields so the permissionless
+# `execute_coretime_renewal` call reaches its business logic under an engaged
+# dead-man freeze — the 09 §4 D-9 exemption. The dead-man is engaged by the same
+# real relay-parent-gap collator outage drill 04 uses (SQ-282). Test-only build;
+# never a release artifact (09 §4/§7.1; 13 §1/§2).
 # Bleavit local drill topology — 15 §4.7; 02 §8/§11; 09 §7.1.
 [settings]
 provider = "native"
-# Zombienet timeouts are converted to 32-bit signed milliseconds, so any value
-# above 2,147,483 s silently overflows (observed: 6,000,000 s collapsed to a
-# 1 ms watchdog on the first G1 execution). The long-soak drill bounds live in
-# per-step `within` clauses (each ≤ 2,000,000 s); this global value only guards
-# network operations.
 timeout = 1000
 node_spawn_timeout = 240
 
@@ -31,9 +33,8 @@ validator = true
 name = "relay-dave"
 validator = true
 
-# Zombienet has no auxiliary-process stanza. This non-validator node entry
-# gives the real B9 keeper a managed PID and Prometheus endpoint so drill 03's
-# native SIGSTOP/SIGCONT controls target the daemon itself.
+# Non-validator managed PID for the real B9 keeper (subxt-dynamic; reads the live
+# epoch.length so it adapts to fast-timing with no rebuild).
 [[relaychain.nodes]]
 name = "keeper"
 validator = false
@@ -44,7 +45,7 @@ args = ["--keeper-node-url=ws://127.0.0.1:19944", "--keeper-signer-uri=//Alice"]
 
 [[parachains]]
 id = 4242
-chain_spec_path = "zombienet/specs/out/bleavit-drill.json"
+chain_spec_path = "zombienet/specs/out/bleavit-drill-fast-coretime.json"
 cumulus_based = true
 
 [[parachains.collators]]

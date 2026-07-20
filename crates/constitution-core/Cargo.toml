@@ -14,6 +14,11 @@ scale-info = { version = "2.11.6", default-features = false, features = ["derive
 default = ["std"]
 std = ["futarchy-primitives/std", "parity-scale-codec/std", "scale-info/std"]
 runtime-benchmarks = []
+# SQ-128 (G1 drill 09): default-off compressed epoch-timing Param defaults for a
+# test-only runtime wasm. Forwards the kernel `fast-timing` gate so the registry
+# `epoch.length`/`dec.window`/`dec.trailing` genesis seeds derive from
+# `kernel::FAST_DAY_BLOCKS`. Never enabled in a release build. See PLAN.md · Decision log.
+fast-timing = ["futarchy-primitives/fast-timing"]
 
 [dev-dependencies]
 proptest = "1.11.0"

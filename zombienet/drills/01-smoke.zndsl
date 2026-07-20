@@ -1,6 +1,6 @@
-# 15 §4.7; 02 §11; 09 §7.1 — boot and parachain inclusion smoke.
-Description: Bleavit boots on Paseo local and parachain 4242 produces included blocks.
+Description: Bleavit boots on Paseo local and parachain 4242 produces included blocks (15 §4.7; 02 §11; 09 §7.1).
 Network: ./zombienet/networks/bleavit-local.toml
+Creds: config
 
 relay-alice: is up within 120 seconds
 relay-bob: is up within 120 seconds

@@ -154,6 +154,9 @@ fn contract_version_and_bounds_reexports_hold() {
     assert_eq!(MAX_PARAMS, 128); // 13 §4 registry bound
     assert_eq!(MAX_CAPABILITIES, 64);
     assert_eq!(crate::MAX_METERS, 16);
+    // Release-invariance pin; `fast-timing` (SQ-128) compresses this kernel value and
+    // the canonical frozen-value guard lives in `futarchy-primitives`.
+    #[cfg(not(feature = "fast-timing"))]
     assert_eq!(crate::kernel::DESCRIPTOR_LEAD_TIME_BLOCKS, 43_200);
 }
 

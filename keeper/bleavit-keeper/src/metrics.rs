@@ -59,6 +59,11 @@ impl KeeperMetrics {
             "bleavit_keeper_current_block",
             "Latest finalized block observed by the keeper",
         )?;
+        let process_start_time = IntGauge::new(
+            "bleavit_process_start_time_seconds",
+            "Unix timestamp when the keeper process started",
+        )?;
+        process_start_time.set(unix_time_seconds());
 
         for metric in [
             planned.clone(),
@@ -72,6 +77,7 @@ impl KeeperMetrics {
         registry.register(Box::new(stale_decision_window_books.clone()))?;
         registry.register(Box::new(connected.clone()))?;
         registry.register(Box::new(current_block.clone()))?;
+        registry.register(Box::new(process_start_time))?;
         for role in Role::ALL {
             let label = role.as_str();
             planned.with_label_values(&[label]);
@@ -107,14 +113,9 @@ impl KeeperMetrics {
 
     pub fn succeeded(&self, role: Role) {
         self.succeeded.with_label_values(&[role.as_str()]).inc();
-        let unix = SystemTime::UNIX_EPOCH
-            .elapsed()
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_secs()).ok())
-            .unwrap_or(0);
         self.last_success
             .with_label_values(&[role.as_str()])
-            .set(unix);
+            .set(unix_time_seconds());
     }
 
     pub fn failed(&self, role: Role) {
@@ -197,6 +198,14 @@ impl KeeperMetrics {
     }
 }
 
+fn unix_time_seconds() -> i64 {
+    SystemTime::UNIX_EPOCH
+        .elapsed()
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .unwrap_or(0)
+}
+
 fn counter(name: &str, help: &str) -> anyhow::Result<IntCounterVec> {
     IntCounterVec::new(Opts::new(name, help), &["role"])
         .with_context(|| format!("failed to create metric {name}"))
@@ -224,6 +233,7 @@ mod tests {
         assert!(text.contains("bleavit_keeper_failed_total{role=\"observe\"} 1"));
         assert!(text.contains("bleavit_keeper_current_block 42"));
         assert!(text.contains("bleavit_keeper_connected 1"));
+        assert!(text.contains("bleavit_process_start_time_seconds "));
         assert!(text.contains("bleavit_keeper_stale_decision_window_books{role=\"observe\"} 3"));
         assert!(
             text.contains("bleavit_keeper_last_successful_crank_timestamp_seconds{role=\"tick\"}")

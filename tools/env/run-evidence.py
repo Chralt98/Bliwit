@@ -36,6 +36,14 @@ TERMINATE_GRACE_SECONDS = 5.0
 SCRIPT_ROOT = Path(__file__).resolve().parents[2]
 # 15 §1 requires this closing check in every environment job; SQ-204 lands it.
 TRY_STATE_CHECK = "try-state"
+ZOMBIENET_NETWORK_HEADER = re.compile(r"^Network:\s*(\S+)\s*$", re.MULTILINE)
+# Accept every TOML integer spelling (plain, underscored, hex/octal/binary) so
+# a formatting-only change cannot hide a pinned port from the collision checks.
+ZOMBIENET_FIXED_PORT = re.compile(
+    r"^[ \t]*(p2p_port|prometheus_port|rpc_port|ws_port)\s*=\s*"
+    r"(0x[0-9A-Fa-f_]+|0o[0-7_]+|0b[01_]+|\d[\d_]*)\s*(?:#.*)?$",
+    re.MULTILINE,
+)
 
 
 class EvidenceError(RuntimeError):
@@ -363,11 +371,60 @@ def validate_prerequisites(
         ):
             require_executable(root / "zombienet" / "bin" / name, f"relay binary {name}")
         require_executable(node_binary, "Bleavit node binary")
+        # The bleavit-local topology launches the real B9 keeper as node
+        # `keeper` (separate cargo workspace — release/CI jobs must build it
+        # explicitly; the root workspace excludes it).
+        require_executable(
+            root / "keeper" / "target" / "release" / "bleavit-keeper",
+            "Bleavit keeper binary (keeper workspace: cargo build --release --locked -p bleavit-keeper)",
+        )
+        require_free_zombienet_ports(root, zombienet_suites)
         if any(uses_xcm_topology(root, suite) for suite in zombienet_suites):
             for name in ("asset-hub-paseo-local.json", "coretime-paseo-local.json"):
                 require_file(specs / name, f"generated XCM chain spec {name}")
     if chopsticks_suites:
         validate_node_version(root)
+
+
+def require_free_zombienet_ports(root: Path, suites: list[Suite]) -> None:
+    configured: dict[int, str] = {}
+    network_paths: set[Path] = set()
+    for suite in suites:
+        try:
+            drill = (root / suite.path).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise EvidenceError(f"15 §4.7: cannot inspect {suite.path}: {error}") from error
+        match = ZOMBIENET_NETWORK_HEADER.search(drill)
+        if match is None:
+            raise EvidenceError(f"15 §4.7: {suite.path} has no Network header")
+        network_paths.add(root / Path(match.group(1).removeprefix("./")))
+
+    for path in sorted(network_paths):
+        try:
+            topology = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            raise EvidenceError(f"15 §4.7: cannot inspect {path}: {error}") from error
+        for key, raw_port in ZOMBIENET_FIXED_PORT.findall(topology):
+            port = int(raw_port.replace("_", ""), 0)
+            label = f"{path.relative_to(root)} {key}"
+            if not 1 <= port <= 65535:
+                raise EvidenceError(f"15 §4.7: {label} is outside the valid port range")
+            previous = configured.get(port)
+            if previous is not None:
+                raise EvidenceError(
+                    f"15 §4.7: fixed Zombienet port {port} is assigned to both "
+                    f"{previous} and {label}"
+                )
+            configured[port] = label
+
+    for port, label in configured.items():
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind(("127.0.0.1", port))
+        except OSError as error:
+            raise EvidenceError(
+                f"15 §4.7: {label} 127.0.0.1:{port} is already occupied: {error}"
+            ) from error
 
 
 def validate_artifact_binding(root: Path, wasm: Path) -> str:

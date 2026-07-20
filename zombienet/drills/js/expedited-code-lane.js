@@ -72,7 +72,7 @@ async function run(nodeName, networkInfo, args) {
   const { wsUri, userDefinedTypes } = networkInfo.nodesByName[nodeName];
   const api = await zombie.connect(wsUri, userDefinedTypes);
   await zombie.util.cryptoWaitReady();
-  const keyring = new zombie.Keyring({ type: "sr25519" });
+  const keyring = new zombie.Keyring({ type: "sr25519", ss58Format: api.registry.chainSS58 });
   const alice = keyring.addFromUri("//Alice");
   const values = args.length === 1 ? String(args[0]).split(",") : args;
   const pid = Number(values[0]);
@@ -103,9 +103,12 @@ async function run(nodeName, networkInfo, args) {
   const record = pending.unwrap();
   const authorizedAt = asNumber(record.authorizedAt);
   const applicableAt = asNumber(record.applicableAt);
-  if (applicableAt - authorizedAt !== 43_200) {
+  // Read the live D-14 lead from chain metadata so this asserts identically against
+  // the release runtime (43,200) and the compressed fast-timing runtime (SQ-128).
+  const expectedLead = asNumber(api.consts.executionGuard.descriptorLeadTime);
+  if (applicableAt - authorizedAt !== expectedLead) {
     throw new Error(
-      `D-14 lead time is ${applicableAt - authorizedAt} blocks, expected 43200`,
+      `D-14 lead time is ${applicableAt - authorizedAt} blocks, expected ${expectedLead}`,
     );
   }
 

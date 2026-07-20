@@ -1,9 +1,10 @@
-# 15 §4.7; 09 §7.1; 13 §1 — Phase-1 (G1) long-soak drill.
-Description: Bleavit advances across three uncompressed release-default 302400-block epochs without operator intervention.
-Network: ./zombienet/networks/bleavit-local.toml
+Description: Bleavit advances across three compressed fast-timing epochs (epoch.length = 21 x FAST_DAY = 84 blocks; SQ-128) without operator intervention — the 09 §7.1 machinery proof under genuine Aura+relay consensus and a real cranking keeper, compressed from the release-cadence 907,200-block / ~63-day soak (subsumed by G2's >=6-epoch Paseo run) (15 §4.7; 09 §7.1; 13 §1).
+Network: ./zombienet/networks/bleavit-fast.toml
+Creds: config
 
 bleavit-collator-1: is up within 180 seconds
 relay-alice: parachain 4242 is registered within 240 seconds
-# 3 * 302,400 = 907,200 blocks. This is a Phase-1 G1 long soak, not a CI test.
-relay-alice: parachain 4242 block height is at least 907200 within 6000000 seconds
+relay-alice: parachain 4242 block height is at least 84 within 1200 seconds
+relay-alice: parachain 4242 block height is at least 168 within 2400 seconds
+relay-alice: parachain 4242 block height is at least 252 within 3000 seconds
 bleavit-collator-1: js-script ./js/assert-epoch-progression.js with "3" within 120 seconds

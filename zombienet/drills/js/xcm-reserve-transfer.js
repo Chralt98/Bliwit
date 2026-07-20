@@ -103,10 +103,16 @@ async function connect(networkInfo, nodeName) {
 
 async function assertB4DestinationReady(networkInfo) {
   const api = await connect(networkInfo, "bleavit-collator-1");
-  const version = api.runtimeVersion;
-  if (version.specName.toString() === "bleavit" && version.specVersion.toNumber() === 1) {
+  // Readiness is a genuine capability probe, not a version sentinel. The B10
+  // production XCM composition (AssetTransactor over Location-keyed ForeignAssets,
+  // BleavitBarrier, IsReserve/IsTeleporter, OriginConverter, sender) is present
+  // exactly when the canonical XCM v5 Location-keyed USDC is registered — it is
+  // seeded in the Bleavit genesis (SQ-101). The former `spec_version === 1` gate
+  // predated that wiring and refused the still-unbumped release runtime even
+  // after B10 landed; it is retired in favour of this capability check.
+  if (!api.query.foreignAssets?.asset) {
     throw new Error(
-      "NOTE(B7): bleavit/1 has no B4 XCM executor/router/caps wiring; drill 07 is gated on the B4 runtime-integration follow-up",
+      "NOTE(B10): Bleavit runtime exposes no foreignAssets pallet — the XCM composition is absent",
     );
   }
   const canonical = {
@@ -115,9 +121,11 @@ async function assertB4DestinationReady(networkInfo) {
   };
   try {
     const asset = await api.query.foreignAssets.asset(canonical);
-    if (asset.isNone) throw new Error("canonical asset is unregistered");
+    if (asset.isNone) {
+      throw new Error("canonical Location-keyed USDC is unregistered (SQ-101 genesis wiring absent)");
+    }
   } catch (error) {
-    throw new Error(`NOTE(B7): Bleavit canonical Location-keyed USDC is unavailable: ${error}`);
+    throw new Error(`NOTE(B10): Bleavit canonical Location-keyed USDC is unavailable: ${error}`);
   }
   return api;
 }
@@ -346,7 +354,7 @@ async function recovery(api, alice, networkInfo) {
 async function run(nodeName, networkInfo, args) {
   const api = await connect(networkInfo, nodeName);
   await zombie.util.cryptoWaitReady();
-  const keyring = new zombie.Keyring({ type: "sr25519" });
+  const keyring = new zombie.Keyring({ type: "sr25519", ss58Format: api.registry.chainSS58 });
   const alice = keyring.addFromUri("//Alice");
   const leg = args[0];
   if (leg === "setup") return setup(api, alice, networkInfo);

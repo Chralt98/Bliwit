@@ -916,6 +916,44 @@ pub fn genesis_capabilities() -> Vec<CapabilityRecord> {
 /// `gate.v_min` and
 /// `dis.merit_min` carry derived defaults and bind at their consuming
 /// engines. Kernel-bounded flags follow the enumeration in 13 rule 7.
+///
+/// Epoch-timing genesis seeds (`epoch.length`, `dec.window`, `dec.trailing`) are
+/// read through [`timing_defaults`] so the default-off `fast-timing` build
+/// (SQ-128, G1 drill 09) can seed a compressed epoch clock derived from
+/// `kernel::FAST_DAY_BLOCKS`. The `cfg(not(fast-timing))` arm below carries the
+/// exact frozen 13 §1 values, so the release registry — and the fixture that
+/// byte-asserts it (`tools/limit-coverage/genesis-keys.json`, the constitution
+/// genesis test) — is unchanged. The compressed arm keeps the relationships
+/// `EpochParams::validate` enforces (D3 `dec.window <= epoch·13/21`, D4
+/// `trailing <= window`); every other duration Param stays at its frozen value so
+/// the emergency/execution/oracle windows can never fire inside a minute-scale
+/// drill.
+#[cfg(not(feature = "fast-timing"))]
+mod timing_defaults {
+    pub const EPOCH_LENGTH: u32 = 302_400;
+    pub const EPOCH_LENGTH_MAX: u32 = 604_800;
+    pub const DEC_WINDOW: u32 = 43_200;
+    pub const DEC_WINDOW_MAX: u32 = 86_400;
+    pub const DEC_TRAILING: u32 = 14_400;
+    pub const DEC_TRAILING_MIN: u32 = 3_600;
+    pub const DEC_TRAILING_MAX: u32 = 28_800;
+}
+#[cfg(feature = "fast-timing")]
+mod timing_defaults {
+    use super::kernel::FAST_DAY_BLOCKS as DAY;
+    /// 21 · FAST_DAY (matches the 21-phase-unit epoch); clears the compressed
+    /// `MIN_EPOCH_LENGTH_BLOCKS` (14 · FAST_DAY) and stays a multiple of 21.
+    pub const EPOCH_LENGTH: u32 = 21 * DAY;
+    pub const EPOCH_LENGTH_MAX: u32 = 42 * DAY;
+    /// 3 · FAST_DAY (72 h); `<= EPOCH_LENGTH · 13/21` holds (3 <= 13).
+    pub const DEC_WINDOW: u32 = 3 * DAY;
+    pub const DEC_WINDOW_MAX: u32 = 6 * DAY;
+    /// 1 · FAST_DAY (24 h) trailing window; `<= DEC_WINDOW` holds.
+    pub const DEC_TRAILING: u32 = DAY;
+    pub const DEC_TRAILING_MIN: u32 = DAY / 4;
+    pub const DEC_TRAILING_MAX: u32 = 2 * DAY;
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn genesis_params() -> Vec<ParamRecord> {
     #[allow(clippy::too_many_arguments)]
@@ -945,9 +983,9 @@ pub fn genesis_params() -> Vec<ParamRecord> {
     alloc::vec![
         row(
             b"epoch.length",
-            ParamValue::U32(302_400),
+            ParamValue::U32(timing_defaults::EPOCH_LENGTH),
             ParamValue::U32(kernel::MIN_EPOCH_LENGTH_BLOCKS),
-            ParamValue::U32(604_800),
+            ParamValue::U32(timing_defaults::EPOCH_LENGTH_MAX),
             Some(MaxDelta::Percent(10)),
             2,
             ParamClass::Meta,
@@ -1005,9 +1043,9 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         ),
         row(
             b"dec.window",
-            ParamValue::U32(43_200),
+            ParamValue::U32(timing_defaults::DEC_WINDOW),
             ParamValue::U32(kernel::DECISION_WINDOW_FLOOR_BLOCKS),
-            ParamValue::U32(86_400),
+            ParamValue::U32(timing_defaults::DEC_WINDOW_MAX),
             Some(MaxDelta::Percent(20)),
             2,
             ParamClass::Meta,
@@ -1015,9 +1053,9 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         ),
         row(
             b"dec.trailing",
-            ParamValue::U32(14_400),
-            ParamValue::U32(3_600),
-            ParamValue::U32(28_800),
+            ParamValue::U32(timing_defaults::DEC_TRAILING),
+            ParamValue::U32(timing_defaults::DEC_TRAILING_MIN),
+            ParamValue::U32(timing_defaults::DEC_TRAILING_MAX),
             None,
             2,
             ParamClass::Meta,
@@ -2001,9 +2039,16 @@ mod tests {
             CONTRACT_VERSION,
             futarchy_primitives::INTEGRATION_CONTRACT_VERSION
         );
+        // Release-invariance pin; under `fast-timing` this kernel value is compressed
+        // (SQ-128) and the canonical frozen-value guard lives in `futarchy-primitives`.
+        #[cfg(not(feature = "fast-timing"))]
         assert_eq!(kernel::DESCRIPTOR_LEAD_TIME_BLOCKS, 43_200);
     }
 
+    // epoch.length-specific 13 §1 admission boundaries (BelowMin/DeltaTooLarge/cooldown)
+    // verified at production magnitudes; the fast-timing build compresses those bounds
+    // (SQ-128), so this production-boundary case runs in the default build only.
+    #[cfg(not(feature = "fast-timing"))]
     #[test]
     fn param_update_enforces_bounds_delta_and_cooldown() {
         let mut rec = genesis_params()[0];
@@ -2024,6 +2069,10 @@ mod tests {
         assert_eq!(rec.last_change_block, 20);
     }
 
+    // epoch.length percent-delta recomputation at production magnitudes (13 §1); the
+    // machinery is also covered timing-agnostically by `factor_delta_bounds_both_directions`,
+    // so under the compressed fast-timing build this production case runs default-only.
+    #[cfg(not(feature = "fast-timing"))]
     #[test]
     fn percent_delta_is_recomputed_from_the_current_value() {
         // 13 §1: epoch.length Max Δ/decision = 10%. A fixed absolute step
@@ -2077,7 +2126,12 @@ mod tests {
     #[test]
     fn max_delta_allowance_matches_every_admission_rule() {
         let mut record = genesis_params()[0];
-        assert_eq!(record.max_delta_allowance(), Ok(30_240));
+        // epoch.length carries a Percent(10) Δ cap, so the scalar allowance is 10% of
+        // its current (default) value — timing-agnostic across the fast-timing build.
+        assert_eq!(
+            record.max_delta_allowance(),
+            Ok((timing_defaults::EPOCH_LENGTH / 10) as u128)
+        );
 
         record.max_delta = Some(MaxDelta::Absolute(ParamValue::U32(17)));
         assert_eq!(record.max_delta_allowance(), Ok(17));

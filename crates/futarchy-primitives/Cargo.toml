@@ -12,3 +12,9 @@ scale-info = { version = "2.11.6", default-features = false, features = ["derive
 [features]
 default = ["std"]
 std = ["parity-scale-codec/std", "scale-info/std"]
+# SQ-128 (G1 drill 09): default-off compressed epoch-timing floors for a
+# documented test-only runtime wasm. Never enabled in a release build — see the
+# `FAST_DAY_BLOCKS` doc comment and PLAN.md · Decision log. Consumed no_std, so it
+# carries no extra deps; forwarded by `constitution-core`, `pallet-constitution`,
+# and `bleavit-runtime`.
+fast-timing = []
