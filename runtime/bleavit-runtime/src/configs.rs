@@ -3412,6 +3412,9 @@ impl pallet_epoch::WelfareSettlement for RuntimeEpochWelfare {
         };
         pallet_welfare::Pallet::<Runtime>::compute_settlement(cohort_epoch, spec, target)
     }
+    fn settle_baseline_void(cohort_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
+        pallet_welfare::Pallet::<Runtime>::settle_baseline_void(cohort_epoch)
+    }
     fn prune(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
         // 05 §3.3: cutoff e−19 removes exactly ≤ e−20 and retains one
         // capacity slot for the next snapshot.
@@ -3727,6 +3730,13 @@ impl pallet_welfare::LedgerSettlement for WelfareLedger {
             pallet_market::Pallet::<Runtime>::observe_baseline_terminal(epoch)
         })
     }
+    fn baseline_open(epoch: EpochId) -> bool {
+        matches!(
+            pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)
+                .map(|vault| vault.state),
+            Some(pallet_conditional_ledger::core_ledger::BaselineState::Open)
+        )
+    }
 }
 
 pub struct RuntimeSnapshotSchedule;
@@ -3924,8 +3934,25 @@ impl pallet_registry::EpochContext for RuntimeRegistryEpoch {
         // `MilestoneTargetUnset` (07 §7 *Milestone normalization*: "until the
         // MetricSpec surface carries the field no milestone component may be
         // admitted"), so no milestone filing is admitted and no fabricated 0.0
-        // aggregate ever reaches welfare (SQ-288).
-        0
+        // aggregate ever reaches welfare (SQ-291).
+        //
+        // Benchmark-only exception, on the B5 precedent of benchmark seams with
+        // zero pallets dropped: `define_benchmarks!` measures the
+        // `MilestoneRegistry` instance, and every setup routes through `file()`
+        // (`file_many` in `pallets/registry/src/benchmarking.rs`). A zero target
+        // aborts each setup with `MilestoneTargetUnset` before anything is
+        // measured, so weight generation for the whole instance would die
+        // silently rather than loudly. This value is measurement scaffolding
+        // only: `runtime-benchmarks` is never enabled in a release runtime, so
+        // the fail-closed production posture above is unchanged.
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            registry_core::MILESTONE_TARGET_POINTS
+        }
+        #[cfg(not(feature = "runtime-benchmarks"))]
+        {
+            0
+        }
     }
 }
 parameter_types! {

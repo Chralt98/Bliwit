@@ -121,7 +121,7 @@ parameter_types! {
     /// exist so a test can amend them upward and observe that registry behavior
     /// does not move — and so any future refactor that plumbs a live value into
     /// `RegistryParams` / `WatchtowerRegistry` (the natural place to wire these)
-    /// fails that test instead of silently changing the divergence (SQ-287).
+    /// fails that test instead of silently changing the divergence (SQ-290).
     pub static LiveOrcWindow: u32 = registry_core::REG_WINDOW_BLOCKS;
     pub static LiveWtQuorum: u8 = registry_core::WT_QUORUM;
     /// `reg.archive_delay` in blocks — short for tests (the ledger uses 1 yr).

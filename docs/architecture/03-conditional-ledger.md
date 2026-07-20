@@ -97,11 +97,11 @@ Transitions (exhaustive; anything absent is impossible and MUST error):
 | `Open` | `Voided` | `void` (ResolveAuthority) | pre-decision VOID (constitutional emergency, PB-ORACLE-VOID before decide) |
 | `Resolved(w)` | `ScalarSettled{w,s}` | `settle_scalar` (SettleAuthority) | at cohort settlement e+3 |
 | `Resolved(w)` | `Voided` | `void` (ResolveAuthority) | measurement-window VOID (disputed gate input, BE §15.2(7)) |
-| `Baseline Open` | `Settled(s)` | `settle_baseline` (SettleAuthority) | at epoch settlement e+3; epoch VOID settles at `s = 0.5` (§7.4) |
+| `Baseline Open` | `Settled(s)` | `settle_baseline` (SettleAuthority) | at epoch settlement e+3; epoch VOID settles at `s = 0.5` (§6.4) |
 
 `ScalarSettled` and `Voided` are terminal (redemption-only) and mutually exclusive. There is **no transition out of any terminal state and no transition back to `Open`**: per **D-8**, forecast trading is cut from v1, books close at branch resolution, and no vault state readmits minting — `split`, `split_scalar` and `split_gate` require `Open` strictly, which removes the reopened-book / `split_scalar`-requires-`Open` deadlock of BE §11.5 by removing the reopened book (owning text: [`04-markets-and-pricing.md`](./04-markets-and-pricing.md)).
 
-**Outflow monotonicity (new, load-bearing for §7.5):** escrow outflows are admitted only in `Open` (via `merge`), `Resolved` (via `merge` only), and the terminal states. `Resolved` admits **no unpaired redemption** — winning branch-USDC redeems only from `ScalarSettled` (this is a deliberate tightening of BE §5.2.1, which allowed `redeem` at `Resolved`; rationale in §7.5: VOID is reachable *from* `Resolved`, and unpaired par redemptions before the `Resolved → Voided` fork would break VOID conservation exactly as in B-1).
+**Outflow monotonicity (new, load-bearing for §6.4):** escrow outflows are admitted only in `Open` (via `merge`), `Resolved` (via `merge` only), and the terminal states. `Resolved` admits **no unpaired redemption** — winning branch-USDC redeems only from `ScalarSettled` (this is a deliberate tightening of BE §5.2.1, which allowed `redeem` at `Resolved`; rationale in §6.4: VOID is reachable *from* `Resolved`, and unpaired par redemptions before the `Resolved → Voided` fork would break VOID conservation exactly as in B-1).
 
 ---
 
@@ -162,7 +162,7 @@ All calls transactional/atomic; permissionless Signed unless noted. Weight drive
 | `split_baseline(epoch, a)` | Signed | Baseline vault `Open`; `a ≥ MinSplit` | `E_base += a`; mint `a` B-LONG + `a` B-SHORT | `BaselineSplit` | as split |
 | `merge_baseline(epoch, a)` | Signed | Baseline vault `Open`; caller holds both legs | inverse | `BaselineMerged` | — |
 
-Merge availability in `Resolved` and `Voided` is deliberate: **a complete Accept+Reject pair recovers par (1 USDC per pair) in every non-`ScalarSettled` state** — this is the D-1 primary recovery path. `merge_scalar`/`merge_gate` are value-neutral in every state (a complete set is worth exactly one branch-USDC under every valuation of §7.5) and stay available in `Voided` so set holders can climb back to branch-USDC and then to par. `transfer` stays available in `Voided` so counterparties can assemble pairs. In `ScalarSettled` the redemption calls (§5.3) subsume all of these.
+Merge availability in `Resolved` and `Voided` is deliberate: **a complete Accept+Reject pair recovers par (1 USDC per pair) in every non-`ScalarSettled` state** — this is the D-1 primary recovery path. `merge_scalar`/`merge_gate` are value-neutral in every state (a complete set is worth exactly one branch-USDC under every valuation of §6.4) and stay available in `Voided` so set holders can climb back to branch-USDC and then to par. `transfer` stays available in `Voided` so counterparties can assemble pairs. In `ScalarSettled` the redemption calls (§5.3) subsume all of these.
 
 Gate splitting is economically meaningful only for gate-book classes; the ledger does not restrict it by class (a gate set is fully collateralized regardless) — class policy lives in [`04-markets-and-pricing.md`](./04-markets-and-pricing.md).
 
@@ -178,7 +178,7 @@ Gate splitting is economically meaningful only for gate-book classes; the ledger
 
 - `void` is entered on the fail-static paths of BE §15.2(7)/PB-ORACLE-VOID and D-9 outcomes: pre-decision (from `Open`) or during measurement (from `Resolved`, when a disputed gate-input component voids the cohort). `void` from `ScalarSettled` MUST error (`WrongVaultState`): redemptions at `s` may already have paid out, and a retroactive VOID would break conservation. The `VaultVoided` event is the `Voided`/T20 event frozen in [`02-integration-contract.md`](./02-integration-contract.md) (X-11f).
 - `settle_gate` records the outcome of the deterministic `C_onchain`/S daily breach-flag question for the **winning branch only** (losing-branch gate instruments died at `resolve`). Both `settle_scalar` and the two `settle_gate` calls ride the single settlement path `pallet-epoch::settle_cohort → pallet-welfare::compute_settlement → ledger` at cohort settlement **e+3** (sequencing owned by [`05-welfare-and-decision-engine.md`](./05-welfare-and-decision-engine.md)).
-- `settle_baseline(epoch, s_e)` settles the epoch's Baseline vault at epoch settlement **e+3**. Under an epoch VOID, the SettleAuthority settles the Baseline vault at `s = 0.5` — for a branch-free scalar vault this is *identical in payout* to D-1's neutral valuation, so the Baseline vault needs no `Voided` state (§7.4).
+- `settle_baseline(epoch, s_e)` settles the epoch's Baseline vault at epoch settlement **e+3**. Under an epoch VOID, the SettleAuthority settles the Baseline vault at `s = 0.5` — for a branch-free scalar vault this is *identical in payout* to D-1's neutral valuation, so the Baseline vault needs no `Voided` state (§6.4). **Owning transition (normative).** The VOID settlement rides the **epoch-VOID path** — the cohort void of [`05-welfare-and-decision-engine.md`](./05-welfare-and-decision-engine.md) §7(5), in the same transaction that sets `CohortInfo.status = Void` — and nothing else: per-proposal `void(pid)` (T20 on a single vault) settles **no** Baseline, because the Baseline vault is keyed per *epoch*, not per proposal. The settlement is mandatory and unconditional on that path; because both redemption calls of §5.3 require `Settled`, an unsettled Baseline vault permanently strands every single-sided holder while pair holders still exit at par through `merge_baseline`, so the omission is invisible to §6.4/§6.5's conservation invariants. Implementations MUST treat "no Baseline vault for the epoch" and "already `Settled`" as no-ops rather than failures — a VOID must never fail on this leg (G-1).
 
 ### 5.3 Redemption calls (terminal states only)
 
@@ -188,13 +188,13 @@ Gate splitting is economically meaningful only for gate-book classes; the ledger
 | `redeem_scalar(pid, kind, a)` | Signed | `ScalarSettled{winner: w, s}`; `kind ∈ {Long, Short}` of branch `w` | LONG: `floor(a·s)`; SHORT: `floor(a·(1−s))` (B-5) | `ScalarRedeemed` |
 | `redeem_scalar_pair(pid, a)` | Signed | `ScalarSettled{winner: w, ..}`; caller holds `a` LONG_w **and** `a` SHORT_w | exactly `a` (atomic; no double flooring) | `ScalarPairRedeemed` |
 | `redeem_gate(pid, g, a)` | Signed | `ScalarSettled`; `gate_outcomes[g]` recorded; caller holds `a` of the *winning side* (`GateYes` if breach, `GateNo` if not) of the winning branch | `a` (1:1); losing side pays 0 and is reap-only | `GateRedeemed` |
-| `redeem_void(pid, kind_coords, a)` | Signed | vault `Voided`; caller holds `a` of the instrument | branch-USDC: `floor(a/2)`; LONG/SHORT/GateYes/GateNo: `floor(a/4)` (D-1; §7.5) | `VoidRedeemed` |
+| `redeem_void(pid, kind_coords, a)` | Signed | vault `Voided`; caller holds `a` of the instrument | branch-USDC: `floor(a/2)`; LONG/SHORT/GateYes/GateNo: `floor(a/4)` (D-1; §6.4) | `VoidRedeemed` |
 | `redeem_baseline(epoch, kind, a)` | Signed | Baseline `Settled(s)` | LONG: `floor(a·s)`; SHORT: `floor(a·(1−s))` | `BaselineRedeemed` |
 | `redeem_baseline_pair(epoch, a)` | Signed | Baseline `Settled`; caller holds `a` of both legs | exactly `a` | `BaselineRedeemed` |
 
 All payouts decrement `escrowed` and burn the redeemed instruments atomically; all divisions round **against the redeemer and in favor of escrow** (R-1); `s` multiplication uses u256 intermediates at 1e9 scale.
 
-The D-1 quarter-value rule is stated for LONG/SHORT; its application to `GateYes`/`GateNo` is a consistent extension recorded here (each gate leg is one side of a binary claim on a branch worth ½ under VOID, hence ¼ — identical in structure to the scalar legs at neutral `s = 0.5`). It does not alter any frozen constant; the conservation argument covering it is §7.5.
+The D-1 quarter-value rule is stated for LONG/SHORT; its application to `GateYes`/`GateNo` is a consistent extension recorded here (each gate leg is one side of a binary claim on a branch worth ½ under VOID, hence ¼ — identical in structure to the scalar legs at neutral `s = 0.5`). It does not alter any frozen constant; the conservation argument covering it is §6.4.
 
 ### 5.4 Housekeeping
 

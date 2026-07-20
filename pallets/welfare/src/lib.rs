@@ -121,6 +121,12 @@ pub trait LedgerSettlement {
     fn settle_scalar(pid: ProposalId, score: FixedU64) -> DispatchResult;
     fn settle_gate(pid: ProposalId, gate: GateKind, breached: bool) -> DispatchResult;
     fn settle_baseline(epoch: EpochId, score: FixedU64) -> DispatchResult;
+    /// True when `epoch` has a Baseline vault still in `BaselineState::Open`,
+    /// i.e. a settlement would have something to do. It lets the epoch-VOID
+    /// path stay infallible (G-1) by pre-filtering the two benign
+    /// not-applicable cases — no vault, or already settled — instead of
+    /// swallowing a `settle_baseline` error and hiding a genuine failure.
+    fn baseline_open(epoch: EpochId) -> bool;
 }
 
 /// The cohort whose computed score is being dispatched to the ledger.
@@ -712,6 +718,29 @@ pub mod pallet {
                 Ok::<(), DispatchError>(())
             })?;
             Ok(score)
+        }
+
+        /// The 03 §2.3/§5 epoch-VOID Baseline settlement.
+        ///
+        /// A VOID means no measurement is trusted, so unlike `compute_settlement`
+        /// this reads **no** welfare state and computes nothing — it applies the
+        /// spec-fixed neutral score under the same SettleAuthority. It exists
+        /// because the Baseline vault has no `Voided` state (03 §6.4): without
+        /// this call the vault stays `Open` forever and single-sided holders,
+        /// whose redemptions require `Settled`, are stranded (SQ-92).
+        ///
+        /// Infallible by construction on the two benign paths (G-1): an epoch
+        /// with no Baseline vault, or one already settled, is a silent no-op.
+        /// Anything else still propagates — a VOID must not mask a real ledger
+        /// failure.
+        pub fn settle_baseline_void(cohort_epoch: EpochId) -> DispatchResult {
+            if !T::Ledger::baseline_open(cohort_epoch) {
+                return Ok(());
+            }
+            T::Ledger::settle_baseline(
+                cohort_epoch,
+                futarchy_primitives::kernel::VOID_BASELINE_SCORE,
+            )
         }
 
         /// Runtime-internal rolling-window maintenance. B1a wires this from

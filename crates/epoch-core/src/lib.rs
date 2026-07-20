@@ -228,7 +228,8 @@ pub trait LedgerOps<AccountId> {
 }
 
 /// Welfare is the sole settlement authority (05 §6). This seam deliberately
-/// exposes no ledger settlement method, preventing epoch from double-settling.
+/// exposes no *scored* ledger settlement method, preventing epoch from
+/// double-settling: epoch can request a settlement, never choose its score.
 pub trait WelfareOps {
     fn compute_settlement(
         &mut self,
@@ -236,6 +237,23 @@ pub trait WelfareOps {
         spec: MetricSpecVersion,
         target: SettlementTarget,
     ) -> Result<FixedU64, Error>;
+
+    /// Settle the epoch's Baseline vault at the fixed neutral VOID score
+    /// (`futarchy_primitives::kernel::VOID_BASELINE_SCORE`).
+    ///
+    /// 03 §2.3/§5 make this mandatory and give it no other owner: the epoch
+    /// VOID path is the *only* producer of a Baseline settlement that is not a
+    /// welfare computation, and 03 §6.4 justifies `BaselineState` having no
+    /// `Voided` variant *precisely because* this settlement always happens.
+    /// Without it the vault stays `Open` forever and single-sided Baseline
+    /// holders — whose redemption calls require `Settled` — can never redeem.
+    ///
+    /// No welfare data is read: a VOID means the measurement is unusable, so
+    /// this is a settlement-authority passthrough carrying a spec-fixed score,
+    /// not a computation. Implementations MUST be a no-op (`Ok`) when the
+    /// epoch has no Baseline vault or it is already settled — an epoch VOID
+    /// must never fail on the settlement leg (G-1).
+    fn settle_baseline_void(&mut self, cohort_epoch: EpochId) -> Result<(), Error>;
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
@@ -1003,7 +1021,23 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         self.epoch.next_length = params.epoch_length;
         self.sync_phase(now);
         ensure!(self.recovery_epoch.is_none(), Error::BadPhase);
-        if self.stale_process_hold(pid) {
+        // T20 force-reject (05 §2.1, 06 §6.3). This predicate is deliberately
+        // *identical* to `tick`'s sweep condition below, and for the same
+        // reason: a ledger freeze and a stale epoch both resolve a live
+        // proposal to the status quo with a par void (D-1). Before SQ-98 the
+        // freeze arm sat in the decision chain instead and produced
+        // `Reject(ProcessHold)` -> `reject_to_measurement` ->
+        // `ledger.resolve(pid, Branch::Reject)`, so the *same* freeze gave a
+        // proposal a Reject-branch resolution or a par void depending purely
+        // on whether `decide` or `tick` observed it first — a race deciding
+        // whether Accept-branch holders recover ½ (VOID) or nothing
+        // (Reject-branch). Aligning on the par void also avoids handing a
+        // frozen system new measurement obligations it cannot discharge:
+        // `market.set_frozen(true)` halts `crank_observe`, so a proposal sent
+        // into `Measuring` by a freeze would await a score the freeze itself
+        // prevents producing. Dead-man stays out of this predicate — 05 §4.8
+        // pauses the clock and holds transitions, it never rejects (SQ-90).
+        if self.ledger_frozen || self.stale_process_hold(pid) {
             self.force_reject_process_hold(Origin::Keeper, ledger, pid)?;
             return Ok(DecisionOutcome::Reject(RejectReason::ProcessHold));
         }
@@ -1015,7 +1049,7 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             DecisionOutcome::Reject(RejectReason::ConstitutionViolation)
         } else if !guards.resource_locks_held {
             DecisionOutcome::Reject(RejectReason::ResourceConflict)
-        } else if guards.process_hold || self.dead_man_armed || self.ledger_frozen {
+        } else if guards.process_hold || self.dead_man_armed {
             DecisionOutcome::Reject(RejectReason::ProcessHold)
         } else {
             self.decide_engine(pid, &input, params)?
@@ -1209,10 +1243,11 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         Ok(affected)
     }
 
-    pub fn void_cohort<L: LedgerOps<AccountId>>(
+    pub fn void_cohort<L: LedgerOps<AccountId>, W: WelfareOps>(
         &mut self,
         origin: Origin,
         ledger: &mut L,
+        welfare: &mut W,
         epoch: EpochId,
         now: BlockNumber,
     ) -> Result<(), Error> {
@@ -1245,7 +1280,17 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             });
         }
         self.cohorts[idx].status = CohortStatus::Void;
-        // VOID completes the cohort without welfare settlement. Archive the
+        // 03 §2.3/§5: an epoch VOID settles the epoch's **Baseline** vault at
+        // the neutral `s = 0.5` under the SettleAuthority. This is not welfare
+        // scoring — no measurement is trusted here — but it is mandatory: the
+        // Baseline vault has no `Voided` state (03 §6.4) exactly because this
+        // settlement always happens, and `redeem_baseline`/`redeem_baseline_pair`
+        // both require `Settled`. Skipping it strands every single-sided
+        // Baseline holder of the voided epoch (SQ-92). It is deliberately
+        // *outside* the per-proposal `ledger.void` loop above: T20 per-proposal
+        // vault voiding is a different VOID and must not settle the Baseline.
+        welfare.settle_baseline_void(epoch)?;
+        // VOID completes the cohort without welfare *scoring*. Archive the
         // terminal outcome and reap its bounded working set in the same
         // transaction, just as successful settlement does below. The zero
         // score fields are non-semantic when `voided` is set.
@@ -1427,6 +1472,12 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
         // is a no-op — pending transitions are held (status quo, G-1), never
         // decided or force-rejected. A dead-man decision still resolves to status
         // quo independently at `decide()` time (05 §5 step 2).
+        //
+        // Scope caveat (SQ-286): this hold is reached only when no *other* T20
+        // trigger fired above. A ledger freeze or a stale epoch coinciding with
+        // a dead-man pause therefore still force-rejects, because those branches
+        // precede this one. Which emergency regime dominates is unstated in
+        // 05 §4.8 / 06 §6.3 and is deliberately left as shipped here.
         if self.dead_man_armed || self.recovery_epoch.is_some() {
             self.events.push(Event::NoOp);
             return Ok(());
@@ -2496,6 +2547,79 @@ mod tests {
         .unwrap();
         assert_eq!(s.proposal_id_high_water, 6);
     }
+    /// Build a Trading proposal at its decision block over a live vault.
+    fn frozen_freeze_fixture() -> (EpochState<[u8; 32]>, LedgerState<[u8; 32]>) {
+        let mut s = EpochState::<[u8; 32]>::new();
+        let mut ledger = LedgerState::<[u8; 32]>::new();
+        ledger.create_vault(1, 1).unwrap();
+        let mut p = prop(1, ProposalState::Trading);
+        p.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: None,
+            baseline: 7,
+        });
+        p.decide_at = 0;
+        s.proposals.push(p);
+        s.ledger_frozen = true;
+        (s, ledger)
+    }
+
+    #[test]
+    fn ledger_freeze_disposition_is_the_same_whether_tick_or_decide_observes_first() {
+        // SQ-98 / 06 §6.3: a ledger freeze force-rejects a live proposal to the
+        // status quo with a par void (D-1). Before the fix `tick` par-voided the
+        // vault while `decide` resolved it onto the Reject branch, so which
+        // crank ran first decided whether Accept-branch holders recovered ½ or
+        // nothing. Both paths must now land on the identical ledger state.
+        let (mut tick_state, mut tick_ledger) = frozen_freeze_fixture();
+        tick_state
+            .tick(
+                Origin::Keeper,
+                &mut tick_ledger,
+                1,
+                0,
+                TickInputs::default(),
+                &EpochParams::DEFAULT,
+            )
+            .unwrap();
+
+        let (mut decide_state, mut decide_ledger) = frozen_freeze_fixture();
+        assert_eq!(
+            decide_state
+                .decide(Origin::Keeper, &mut decide_ledger, 1, 0, pass_input())
+                .unwrap(),
+            DecisionOutcome::Reject(RejectReason::ProcessHold)
+        );
+
+        // Same proposal disposition...
+        assert_eq!(
+            tick_state.proposal(1).unwrap().state,
+            ProposalState::Rejected(RejectReason::ProcessHold)
+        );
+        assert_eq!(
+            decide_state.proposal(1).unwrap().state,
+            tick_state.proposal(1).unwrap().state
+        );
+        // ...and, the part that actually moved money, the same vault state:
+        // `Voided` (par recovery), never `Resolved(Reject)`.
+        assert_eq!(tick_ledger.vaults, decide_ledger.vaults);
+        assert_eq!(
+            decide_ledger
+                .vaults
+                .iter()
+                .map(|v| v.info.state)
+                .collect::<Vec<_>>(),
+            vec![futarchy_primitives::VaultState::Voided]
+        );
+        // A freeze must not push the proposal into measurement: markets are
+        // frozen too, so the score it would wait for cannot be produced.
+        assert_ne!(
+            decide_state.proposal(1).unwrap().state,
+            ProposalState::Measuring
+        );
+    }
+
     #[test]
     fn t20_emits_only_the_force_rejected_event() {
         let mut s = EpochState::<[u8; 32]>::new();
@@ -2793,6 +2917,8 @@ mod tests {
     #[derive(Default)]
     struct RecordingWelfare {
         calls: Vec<(EpochId, MetricSpecVersion, SettlementTarget)>,
+        /// Epochs whose Baseline vault was settled through the VOID path.
+        void_settlements: Vec<EpochId>,
     }
 
     impl WelfareOps for RecordingWelfare {
@@ -2804,6 +2930,11 @@ mod tests {
         ) -> Result<FixedU64, Error> {
             self.calls.push((cohort_epoch, spec, target));
             Ok(FixedU64(500_000_000))
+        }
+
+        fn settle_baseline_void(&mut self, cohort_epoch: EpochId) -> Result<(), Error> {
+            self.void_settlements.push(cohort_epoch);
+            Ok(())
         }
     }
 
@@ -2886,6 +3017,43 @@ mod tests {
         assert!(s.cohorts.is_empty());
         assert!(s.proposals.is_empty());
         assert_eq!(s.recent.len(), 1);
+        // A successfully settled cohort never takes the VOID Baseline path.
+        assert!(welfare.void_settlements.is_empty());
+    }
+
+    #[test]
+    fn void_cohort_settles_the_epoch_baseline_vault_once() {
+        // SQ-92 / 03 §2.3/§5: an epoch VOID skips welfare *scoring* but must
+        // still settle the epoch's Baseline vault at the neutral score. Without
+        // it the vault stays `Open` forever and single-sided holders — whose
+        // redemptions require `Settled` — can never redeem.
+        let mut s = EpochState::<[u8; 32]>::new();
+        let mut ledger = LedgerState::<[u8; 32]>::new();
+        let mut p = prop(1, ProposalState::Measuring);
+        p.class = ProposalClass::Code;
+        p.markets = Some(MarketSet {
+            accept: 1,
+            reject: 2,
+            gates: None,
+            baseline: 5,
+        });
+        ledger.create_vault(1, 1).unwrap();
+        s.proposals.push(p);
+        s.cohorts.push(CohortInfo {
+            epoch: 7,
+            proposals: alloc::vec![1],
+            status: CohortStatus::Measuring { until_epoch: 2 },
+        });
+
+        let mut welfare = RecordingWelfare::default();
+        s.void_cohort(Origin::VoidAuthority, &mut ledger, &mut welfare, 7, 100)
+            .unwrap();
+
+        // Exactly one Baseline settlement, keyed to the voided epoch.
+        assert_eq!(welfare.void_settlements, vec![7]);
+        // And no welfare *scoring* — a VOID trusts no measurement.
+        assert!(welfare.calls.is_empty());
+        assert!(s.cohorts.is_empty());
     }
 
     #[test]

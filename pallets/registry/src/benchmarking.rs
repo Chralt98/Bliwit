@@ -253,7 +253,7 @@ mod benches {
         _(RawOrigin::Signed(filer), EPOCH);
 
         // Archival cleanup is rebated from the metered general tranche, not the
-        // oracle budget line (07 §7 *Crank funding lines*; 08 §6.3 — SQ-294).
+        // oracle budget line (07 §7 *Crank funding lines*; 08 §6.3 — SQ-297).
         T::BenchmarkHelper::assert_keeper_rebate_paid(
             futarchy_primitives::keeper::CrankClass::General,
         );

@@ -661,7 +661,7 @@ fn reap_epoch_rebates_once_only_after_bounded_cleanup_succeeds() {
 
         System::set_block_number(CLOSE_BLOCK + ARCHIVE_DELAY + 1);
         assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5));
-        // 07 §7 *Crank funding lines* / 08 §6.3 (SQ-294): reaping is archival
+        // 07 §7 *Crank funding lines* / 08 §6.3 (SQ-297): reaping is archival
         // cleanup, so it is rebated from the metered GENERAL tranche — not the
         // oracle budget line that funds `ack_observed` / `crank_close`.
         assert_eq!(KeeperRebates::get(), vec![(acct(BOB), CrankClass::General)]);
@@ -946,7 +946,7 @@ fn milestone_over_ship_clamps_to_one() {
 
 #[test]
 fn a_zero_milestone_target_refuses_the_close_instead_of_recording_zero() {
-    // 07 §7 *Milestone normalization* (SQ-288): a zero or absent frozen-MetricSpec
+    // 07 §7 *Milestone normalization* (SQ-291): a zero or absent frozen-MetricSpec
     // `target` MUST NOT be normalized to an aggregate of 0 — that records a
     // fail-*adverse* A-pillar component as if it were a real measurement. The
     // close refuses; welfare then sees no record at all, not a fabricated 0.0.
@@ -1041,7 +1041,7 @@ fn a_zero_milestone_target_refuses_the_filing_at_the_door() {
 #[test]
 fn registry_windows_do_not_track_a_raised_orc_window() {
     // limit-coverage: orc.window
-    // 07 §7 *Fixed windows and quorum* (SQ-287): the registry pins the kernel
+    // 07 §7 *Fixed windows and quorum* (SQ-290): the registry pins the kernel
     // floor `REG_WINDOW_BLOCKS` (72 h) as a fixed constant. Unlike the §5 oracle
     // game — which reads live `orc.window` and therefore tracks a META raise to
     // ≤ 120 h (see `pallet-oracle`'s `challenge_window_is_half_open_at_the_deadline`)
@@ -1108,7 +1108,7 @@ fn registry_windows_do_not_track_a_raised_orc_window() {
 
 #[test]
 fn registry_quorum_does_not_track_a_raised_wt_quorum() {
-    // 07 §7 *Fixed windows and quorum* (SQ-287): the registry pins `WT_QUORUM = 2`
+    // 07 §7 *Fixed windows and quorum* (SQ-290): the registry pins `WT_QUORUM = 2`
     // as the kernel floor. A META raise moves the oracle's §4 quorum, never the
     // registry's — unchallenged closure still upholds at two acknowledgments, and
     // the third is refused (`AlreadyQuorum`) so the per-filing ack set stays

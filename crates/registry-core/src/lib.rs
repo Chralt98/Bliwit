@@ -1062,7 +1062,7 @@ mod tests {
 
     #[test]
     fn a_zero_milestone_target_refuses_the_close_instead_of_recording_zero() {
-        // 07 §7 *Milestone normalization* (SQ-288): a zero/absent frozen-MetricSpec
+        // 07 §7 *Milestone normalization* (SQ-291): a zero/absent frozen-MetricSpec
         // `target` MUST NOT be normalized to an aggregate of 0 — that is a
         // fail-*adverse* A-pillar component masquerading as a real measurement.
         // The close refuses and the epoch keeps NO aggregate (G-1 status quo).

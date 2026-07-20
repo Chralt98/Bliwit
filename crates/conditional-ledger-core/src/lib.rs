@@ -12,7 +12,7 @@ use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 pub const MAX_POSITIONS_PER_ACCOUNT: u32 = 64;
-pub const SCALE_1E9: u128 = 1_000_000_000;
+pub const SCALE_1E9: u128 = kernel::SCORE_SCALE as u128;
 
 #[derive(
     Clone,

@@ -232,6 +232,10 @@ pub trait WelfareSettlement {
         spec: MetricSpecVersion,
         target: SettlementTarget,
     ) -> Result<FixedU64, DispatchError>;
+    /// Settle a voided epoch's Baseline vault at the neutral score (03 §2.3/§5).
+    /// Implementations are no-ops when the epoch has no Baseline vault or it is
+    /// already settled — an epoch VOID must never fail here (G-1).
+    fn settle_baseline_void(cohort_epoch: EpochId) -> DispatchResult;
     /// Retire welfare history after the completed cohort has been reaped.
     /// The implementation derives its bounded rolling-window cutoff from the
     /// supplied live epoch, keeping the retention constant single-homed.
@@ -1322,7 +1326,14 @@ pub mod pallet {
             T::VoidAuthority::ensure_origin(origin)?;
             Self::mutate(|state, ledger| {
                 let proposals = state.void_affected_proposals(epoch)?;
-                state.void_cohort(CoreOrigin::VoidAuthority, ledger, epoch, Self::now())?;
+                let mut welfare = WelfareAdapter::<T>(PhantomData);
+                state.void_cohort(
+                    CoreOrigin::VoidAuthority,
+                    ledger,
+                    &mut welfare,
+                    epoch,
+                    Self::now(),
+                )?;
                 for pid in proposals {
                     Self::release_qualification_preimage(pid);
                     GuardianReviewDeadlines::<T>::remove(pid);
@@ -1502,6 +1513,10 @@ pub mod pallet {
         ) -> Result<FixedU64, CoreError> {
             T::Welfare::compute_settlement(cohort_epoch, spec, target)
                 .map_err(|_| CoreError::Welfare)
+        }
+
+        fn settle_baseline_void(&mut self, cohort_epoch: EpochId) -> Result<(), CoreError> {
+            T::Welfare::settle_baseline_void(cohort_epoch).map_err(|_| CoreError::Welfare)
         }
     }
 

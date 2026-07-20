@@ -678,7 +678,7 @@ pub mod pallet {
             // the oracle line would couple dispute liveness to archival work;
             // the general tranche is capped at 20 % of the keeper budget, so its
             // exhaustion can never starve a decision-critical crank and only
-            // stops the rebate — reaping stays permissionless (SQ-294).
+            // stops the rebate — reaping stays permissionless (SQ-297).
             // B5 recalibrates this weight for the post-commit rebate write/payout.
             T::KeeperRebate::rebate(&who, CrankClass::General);
             Ok(())

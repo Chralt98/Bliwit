@@ -1394,7 +1394,7 @@ mod tests {
 
     /// 07 §6.1 (*Units and rounding*): the base-unit product rounds **up**, so a
     /// bond is never a base unit short of the specified value. Pins the direction
-    /// against a silent regression to truncating division (SQ-260 / SQ-286).
+    /// against a silent regression to truncating division (SQ-260 / SQ-289).
     #[test]
     fn round_bond_base_unit_product_rounds_up() {
         let params = OracleParams {

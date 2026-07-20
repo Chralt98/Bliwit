@@ -135,6 +135,8 @@ pub enum SeamCall {
     DequeueTerminal(ProposalId),
     DequeueForRerun(ProposalId),
     Welfare(EpochId, MetricSpecVersion, SettlementTarget),
+    /// 03 §2.3/§5 epoch-VOID Baseline settlement at the neutral score.
+    WelfareVoidBaseline(EpochId),
     WelfarePrune(EpochId),
     CreateVault(ProposalId, MetricSpecVersion),
     Resolve(ProposalId, Branch),
@@ -673,6 +675,10 @@ impl WelfareSettlement for TestWelfare {
     ) -> Result<FixedU64, DispatchError> {
         SeamCalls::push(SeamCall::Welfare(cohort_epoch, spec, target))?;
         Ok(WelfareScore::get())
+    }
+
+    fn settle_baseline_void(cohort_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
+        SeamCalls::push(SeamCall::WelfareVoidBaseline(cohort_epoch))
     }
 
     fn prune(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {

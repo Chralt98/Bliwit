@@ -1688,6 +1688,18 @@ pub mod pallet {
                     matches!(book.kind, BookKind::Baseline { epoch: owner } if owner == epoch),
                     Error::<T>::TryStateViolation
                 );
+                // Close first, exactly as `observe_proposal_terminal` does
+                // (SQ-92). On the ordinary path the Baseline book is already
+                // closed — `close_markets` closes it once the epoch's last
+                // proposal leaves Trading/Extended — but an **epoch VOID**
+                // force-rejects through `void_cohort` without ever passing
+                // through `decide`, so nothing closed it. Latching
+                // `SettlementObservedAt` on a still-open book violates
+                // try-state, which requires every observed entry to carry
+                // `MarketPhase::Closed` + `ClosedAt`.
+                if !matches!(book.phase, MarketPhase::Closed) {
+                    Self::close_book(id)?;
+                }
                 if let Some(observed) = SettlementObservedAt::<T>::get(id) {
                     ensure!(observed == terminal, Error::<T>::TryStateViolation);
                 } else {
