@@ -8,7 +8,8 @@ relay-dave: pause
 bleavit-collator-1: js-script ./js/wait-relay-finality-stall.js with "4800" within 90000 seconds
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "assert,coretime-pre-fault,2" within 120 seconds
 bleavit-collator-1: js-script ./js/assert-dead-man.js with "engaged" within 120 seconds
-bleavit-collator-1: js-script ./js/coretime-renewal.js with "1" within 180 seconds
+bleavit-collator-1: js-script ./js/coretime-renewal.js with "stage,1" within 180 seconds
+bleavit-collator-1: js-script ./js/coretime-renewal.js with "execute,1" within 180 seconds
 bleavit-collator-1: js-script ./js/assert-chain-liveness.js with "capture,coretime-pre-recovery" within 30 seconds
 relay-charlie: resume
 relay-dave: resume

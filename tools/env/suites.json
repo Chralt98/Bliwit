@@ -43,7 +43,7 @@
       "path": "zombienet/drills/05-coretime-renewal-under-dead-man.zndsl",
       "tier": "g1",
       "gated_on": [
-        "G1 drill-side staging of the 09 §7.1 renewal exit form against the landed B12 surface (B12 merged 2026-07-18: authority quote-noting, class-origin ops.coretime funding, RenewalDispatch wiring — the drill must stage an authority quote + funded line to prove success + CoretimeRenewalCalled; until staged, the helper's exemption-reachability form proves freeze traversal only, not a renewal; the B10 dead-man detector landed, so engagement itself is live)"
+        "G1 drill-05 genesis seeding + long-horizon run: the drill-side staging code landed 2026-07-20 (stage/execute/probe branches note a live authenticated quote as the genesis authority Alice and assert success + CoretimeRenewalCalled), but the funded ops.coretime budget line and treasury DOT/USDC custody are not chain-spec-fundable (fund_budget_line/set_coretime_authority need the unreachable FutarchyTreasury origin; sudo->Root is rejected, sudo_as denied) so they must be genesis-seeded (raw futarchyTreasury.State line + foreignAssets.accounts), and the exit form runs under a real 4,800-relay-block dead-man stall (~8 h, g1-tier)"
       ],
       "timeout_seconds": 100000,
       "spec": "09 §4/§7.1"
@@ -53,9 +53,7 @@
       "kind": "zombienet",
       "path": "zombienet/drills/06-pb-migration.zndsl",
       "tier": "release",
-      "gated_on": [
-        "09 §3.2 migration-control surface (SQ-274): no migrations.force_failure/retry exists, so the MigrationHalt trigger can never go live in a drill and guardian playbook activation correctly refuses (TriggerInactive); the playbook effect substrate itself landed with B1b (#104)"
-      ],
+      "gated_on": [],
       "timeout_seconds": 1800,
       "spec": "09 §3.2/§7.1"
     },
@@ -64,7 +62,9 @@
       "kind": "zombienet",
       "path": "zombienet/drills/07-xcm-reserve-transfer.zndsl",
       "tier": "release",
-      "gated_on": [],
+      "gated_on": [
+        "G1 XCM-topology Asset Hub block production: the drill-07 spec_version readiness sentinel was retired 2026-07-20 (WP-1) and the Bleavit side boots, but the first real end-to-end run surfaced the pinned Paseo asset-hub-paseo-runtime trapping on its parachain-system inherent (AbortedDueToTrap in cumulus_pallet_parachain_system) so Asset Hub (para 1000) never produces blocks and the drill cannot reach its XCM legs; this is a Paseo chain-spec-generator/system-runtime integration issue (not Bleavit), owned by the env pins — investigate the AH+Coretime fast-runtime build before the first full XCM run"
+      ],
       "timeout_seconds": 1800,
       "spec": "15 §4.7; 09 §6.1"
     },

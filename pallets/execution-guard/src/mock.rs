@@ -1053,6 +1053,31 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         system: Default::default(),
         execution_guard: pallet_execution_guard::GenesisConfig {
             _config: core::marker::PhantomData,
+            migration_halt: false,
+        },
+    }
+    .build_storage()
+    .expect("mock genesis must build");
+    let mut ext = sp_io::TestExternalities::new(storage);
+    ext.register_extension(sp_core::traits::ReadRuntimeVersionExt::new(
+        ReadRuntimeVersion,
+    ));
+    ext.execute_with(|| {
+        System::set_block_number(1);
+        reset_statics();
+    });
+    ext
+}
+
+/// Genesis with the PB-MIGRATION drill's `migration_halt` seed engaged (SQ-274):
+/// the guard boots with `MigrationHalt = true` so the guardian recovery playbook
+/// is dispatchable, exactly as the drill environment stages it.
+pub fn new_test_ext_migration_halt() -> sp_io::TestExternalities {
+    let storage = RuntimeGenesisConfig {
+        system: Default::default(),
+        execution_guard: pallet_execution_guard::GenesisConfig {
+            _config: core::marker::PhantomData,
+            migration_halt: true,
         },
     }
     .build_storage()

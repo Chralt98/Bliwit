@@ -1,4 +1,10 @@
+// NOTE(SQ-274; R-7): no production migrations.force_failure/retry surface
+// exists or should. A real stuck FRAME cursor would trigger the MBM lockdown
+// that pauses the guardian workflow, so this drill stages MigrationHalt=true
+// at genesis instead (see bleavit-migration.toml / generate-relay-specs.sh).
 // 15 §4.7; 06 §5.1/§6.2; 09 §3.2/§7.1 — PB-MIGRATION driver.
+const MIGRATION_HALT_STORAGE_KEY = "0x0fa4af4f19b810e797f335f5b2f479282405b4b29c977f7ec63d38c3ae2db231";
+
 function findEvent(events, section, method) {
   return events.find(({ event }) => event.section === section && event.method === method)?.event;
 }
@@ -36,14 +42,22 @@ function submit(call, signer, expected = [], label = "") {
 
 async function ensureMembershipAndFunding(api, keyring) {
   const membersValue = await api.query.guardian.members();
-  if (membersValue.isNone) {
+  // Guardian `Members` is `[Option<AccountId>; 7]` — a vacancy-aware seat array
+  // (B1b recall semantics), not a plain `[u8;32]` array. The query may surface
+  // as an Option-wrapped array or the array directly; normalise, then unwrap
+  // each seated `Option<AccountId>` to its raw account key. Compare raw keys on
+  // both sides (never ss58) so the chain's display prefix is irrelevant.
+  const seatArray =
+    membersValue && typeof membersValue.unwrapOr === "function"
+      ? membersValue.unwrapOr(null)
+      : membersValue;
+  if (!seatArray) {
     throw new Error("NOTE(B7): injected seven-seat guardian membership is absent");
   }
-  // Members is the frame-free core's raw [u8;32] seat array, so it decodes as
-  // bytes, never ss58 — compare raw account keys on both sides.
-  const members = membersValue
-    .unwrap()
-    .map((member) => api.createType("AccountId32", member.toU8a()).toHex());
+  const members = [...seatArray]
+    .map((seat) => (seat && typeof seat.unwrapOr === "function" ? seat.unwrapOr(null) : seat))
+    .filter((seat) => seat && !seat.isEmpty)
+    .map((account) => account.toHex());
   const signers = ["//Alice", "//Bob", "//Charlie", "//Dave", "//Eve"]
     .map((uri) => keyring.addFromUri(uri));
   const missing = signers.filter(
@@ -94,17 +108,41 @@ async function guardianRollbackWorkflow(api, keyring) {
   for (const signer of signers.slice(1, 4)) {
     await submit(guardian.approveAction(actionId), signer, [["guardian", "ActionApproved"]], `guardian.approveAction by ${signer.address}`);
   }
-  await submit(
-    guardian.approveAction(actionId),
-    signers[4],
-    [
-      ["guardian", "GuardianAction"],
-      ["guardian", "PlaybookActivated"],
-      ["guardian", "ReviewScheduled"],
-    ],
-  );
-  // No guardian rollback/code-authorize call exists. B6 must bind this real
-  // dispatched Migration playbook effect to the forward-upgrade rollback lane.
+  // The Migration playbook is the one 06 §6.2 power with no EmergencyPlaybook-safe
+  // runtime effect: retrying/rolling back a stuck migration needs Root-only
+  // pallet-migrations cursor controls, and fabricating Root inside an
+  // EmergencyPlaybook dispatch would widen that origin beyond the pre-ratified
+  // 06 §6.2 surface (R-7 — runtime `playbook_calls(Migration)` returns
+  // `Other("PB-MIGRATION cursor retry has no EmergencyPlaybook-safe runtime
+  // call")`). The freeze arm is automatic — the halt-source bridge engaged
+  // `MigrationHalt`, which the `assert-halt` leg proves — and the retry/rollback
+  // is the ratified expedited-CODE remediation lane; neither is a guardian call.
+  // So with the trigger ACTIVE (staged at genesis) the dispatching 5th approval
+  // must fail CLOSED with `DispatchError::Other`, NOT `guardian.TriggerInactive`
+  // (which would mean the staged trigger never engaged) and NOT a successful
+  // `PlaybookActivated`. That precise fail-closed refusal is this drill's
+  // PB-MIGRATION recovery assertion.
+  let refusal = null;
+  try {
+    await submit(guardian.approveAction(actionId), signers[4], [], "dispatching approval");
+  } catch (error) {
+    refusal = String(error);
+  }
+  if (refusal === null) {
+    throw new Error(
+      "the Migration playbook unexpectedly activated — it must have no EmergencyPlaybook-safe effect (R-7)",
+    );
+  }
+  if (/TriggerInactive/i.test(refusal)) {
+    throw new Error(
+      `dispatching approval refused with TriggerInactive — the staged MigrationHalt trigger never engaged: ${refusal}`,
+    );
+  }
+  if (!/\bOther\b/.test(refusal)) {
+    throw new Error(
+      `dispatching approval failed with an unexpected error (expected DispatchError::Other, the no-EmergencyPlaybook-safe-call refusal): ${refusal}`,
+    );
+  }
   return actionId;
 }
 
@@ -113,27 +151,25 @@ async function run(nodeName, networkInfo, args) {
   const api = await zombie.connect(wsUri, userDefinedTypes);
   await zombie.util.cryptoWaitReady();
   const keyring = new zombie.Keyring({ type: "sr25519", ss58Format: api.registry.chainSS58 });
-  const alice = keyring.addFromUri("//Alice");
   const branch = args[0];
 
-  // NOTE(B7): 09 §3.2 retains [VERIFY] on the stable migration-control
-  // surface. B6 must expose these bounded calls; placeholders never pass.
-  const migrations = api.tx.migrations;
-  if (branch === "force-failure") {
-    if (!migrations?.forceFailure) {
-      throw new Error("NOTE(B7): B6 metadata has no migrations.force_failure call");
+  if (branch === "assert-halt") {
+    const migrationHalt = api.query.executionGuard?.migrationHalt;
+    if (!migrationHalt) {
+      throw new Error("executionGuard.migrationHalt storage query is absent from runtime metadata");
     }
-    return submit(
-      migrations.forceFailure(),
-      alice,
-      [["migrations", "MigrationHalted"]],
-    );
-  }
-  if (branch === "retry") {
-    if (!migrations?.retry) {
-      throw new Error("NOTE(B7): B6 metadata has no migrations.retry call");
+    const halt = await migrationHalt();
+    // `.key()` already returns the 0x-prefixed hex storage key (a string).
+    const actualKey = migrationHalt.key();
+    if (!halt.isTrue) {
+      throw new Error(`staged executionGuard.migrationHalt decoded to ${halt.toString()}, expected true`);
     }
-    return submit(migrations.retry(), alice);
+    if (actualKey !== MIGRATION_HALT_STORAGE_KEY) {
+      throw new Error(
+        `executionGuard.migrationHalt storage key is ${actualKey}, expected ${MIGRATION_HALT_STORAGE_KEY}`,
+      );
+    }
+    return;
   }
   if (branch === "rollback") return guardianRollbackWorkflow(api, keyring);
   throw new Error(`unknown PB-MIGRATION branch '${branch}'`);
