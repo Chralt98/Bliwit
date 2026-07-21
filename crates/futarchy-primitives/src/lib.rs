@@ -400,7 +400,7 @@ pub enum RejectReason {
     NotRatified,
     SecuritySizing,
     AttestationMissing,
-    /// 05 §2.1 T6: the second deferral exhausts the single permitted
+    /// 05 §2.1 T26: the second deferral exhausts the single permitted
     /// rollover and cancels the proposal with a full bond refund. Distinct
     /// from a deferral, which is not terminal (SQ-166, contract v6).
     RolloverExhausted,

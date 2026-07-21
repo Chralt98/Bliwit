@@ -66,6 +66,8 @@ pub enum RejectReason {
     NotRatified,         // grace ended without a Passed RatificationRecord (SQ-163)
     SecuritySizing,      // InCapPrize > AttackCost̂ / 3 (§5.6)
     AttestationMissing,  // CODE/META attestation record absent or below attestor quorum
+    // new (contract v6, SQ-166):
+    RolloverExhausted,   // §2.1 T26: second deferral, rollover allowance spent
 }
 ```
 
@@ -88,6 +90,7 @@ pub enum RejectReason {
 | `StaleQueue` | execution guard: version-constraint mismatch; meter contention past grace | T16 |
 | `VetoUpheldByReview` | guardian review flow: the mandatory retrospective review of a `delay_once` concludes with an upheld-veto verdict before the rerun opens — the `ratify`-track referendum enacts `guardian.uphold_veto(action_id)`, the single producing site ([doc 06](./06-governance-and-guardians.md) §5.4) | T24 |
 | `PayloadReverted` | execution-failure recording: carried in `ExecutionFailed { reason }` and in `ExecutionRecord.result` at T18; copied into the cohort's `DecisionRecord` when T22 fires | T18 (annotation), T22 |
+| `RolloverExhausted` | epoch `tick`: the **second** T6 deferral of the same proposal, the single rollover allowance already spent (*T5/T6 ordering and rollover exhaustion*, §2.1) — a terminal cancellation with a full refund, never a deferral | T26 |
 
 ### 1.4 Canonical resource-domain keys (B1b; resolves the SQ-172/SQ-183 screening gap)
 
@@ -132,7 +135,7 @@ Changes vs. the superseded table (B-12): **T21/T22/T23 added**, **T13 restructur
 | T3 | Submitted → Screening | `tick` | keeper | Qualify phase start | — | `ScreeningStarted` |
 | T4 | Screening → Cancelled | `tick` (static checks fail: preimage missing/unpinned/oversized, domain mismatch, kernel violation, unclassifiable batch, bond insufficient after class bump) | keeper | — | **100% slash** on constitution violation or false resource declaration; **10% slash to INSURANCE** on preimage-missing (B-13, [doc 06](./06-governance-and-guardians.md)) | `ProposalCancelled(reason)` |
 | T5 | Screening → Qualified | `tick` (checks pass; slot won by bond priority among ≤ N_active; resource locks acquired; `decide_at` computed and stored per §3.3) | keeper | Qualify phase | — | `ProposalQualified` |
-| T6 | Screening → Submitted (rollover) | `tick` (no slot / lock conflict) | keeper | rolls at most once, then refund | — | `ProposalDeferred` |
+| T6 | Screening → Submitted (rollover) | `tick` (no slot / lock conflict) | keeper | **first** deferral only; a second one takes T26 instead | — | `ProposalDeferred` |
 | T7 | Qualified → Trading | `tick` (markets deployed, POL seeded, vault opened — [doc 03](./03-conditional-ledger.md)/[04](./04-markets-and-pricing.md)) | keeper | Seed phase | — | `MarketsOpened` |
 | T8 | Trading → Extended | `decide` (first insufficiency or full/trailing disagreement, §5.4) or first TWAP stale event ([doc 04](./04-markets-and-pricing.md)) | keeper | Decide phase; at most once per proposal (one shared extension budget); `decide_at += dec.extension` (3 d, K) | — | `DecisionExtended` |
 | T9 | Trading/Extended → Queued | `decide` (all §5 checks pass) | keeper | `now ≥ decide_at` | — | `ProposalQueued { payload_hash, maturity }` |
@@ -152,6 +155,7 @@ Changes vs. the superseded table (B-12): **T21/T22/T23 added**, **T13 restructur
 | **T23** | **FailedExecuted → Executed** | `execution_guard.execute` (retry) | Signed (keeper) | within the 72 h retry window; full dispatch re-validation repeats | slash from T18 not reversed | `Executed { record }` (then T17) |
 | **T24** | **Suspended → Rejected(VetoUpheldByReview)** | guardian review flow: the retrospective `ratify`-track review of the delay enacts `guardian.uphold_veto(action_id)` ([doc 06](./06-governance-and-guardians.md) §5.4) | values enactment (via guardian pallet) | before the rerun opens; consumes the guardian's delay allowance permanently | bond refunded; then T21 fires | `ProposalRejected(VetoUpheldByReview)` |
 | **T25** | **Trading/Extended/Queued → Extended** | `guardian.force_rerun(pid)` ([doc 06](./06-governance-and-guardians.md) §5.3) | GuardianHold | pre-execution only; **one guardian rerun of either kind per proposal, ever** (shared with T11/T13); a queued mandate is cancelled in the same transaction (I-15); books reopen and all proposal-book TWAP accumulators/checkpoints reset; positions and POL stay intact; sets `rerun := true`, `extended := true`, `decide_at := reopen_block + dec.extension` | — | `ForceRerun { pid, justification_hash, window_end }` (guardian pallet) |
+| **T26** | **Screening → Cancelled(RolloverExhausted)** | `tick` (no slot / lock conflict) against a proposal that has **already taken T6 once** — the rollover allowance is per proposal, not per cause (*T5/T6 ordering and rollover exhaustion*, below) | keeper | evaluated **in place of** T6, never after it: no proposal takes T6 twice | full refund — losing a slot is contention, not misconduct | `ProposalCancelled { pid, reason: RolloverExhausted }` |
 
 Rules carried forward unchanged: idempotency (every keeper call re-invoked in the same state is a no-op returning `Ok` with a `NoOp` event or a benign error; no transition is repeatable with side effects); **no rejection, timeout, veto, or expiry path enqueues execution** (I-15, checked by state-machine model checking, [doc 15](./15-invariants-and-testing.md)).
 
@@ -163,7 +167,7 @@ Rules carried forward unchanged: idempotency (every keeper call re-invoked in th
 
 Rejection at screening is information, not misconduct: the refund arm is the default and the two slash arms are the enumerated exceptions.
 
-**T5/T6 ordering and rollover exhaustion (normative; SQ-91 resolution, 2026-07-20).** Qualification ranks candidates **bond-descending, then `pid`-ascending** — the tie-break is the deterministic submission order, so equal bonds never depend on iteration order. A candidate that wins no slot, or whose resource locks conflict, takes T6 and rolls over **exactly once**: the first deferral returns it to `Submitted` re-anchored to the next epoch (`ProposalDeferred`); a second deferral of the same proposal cancels it with a full refund. The single rollover allowance is **per proposal, not per cause** — a proposal deferred once by slot contention and then demoted by the [doc 08](./08-treasury-and-economics.md) §4.4 POL-budget shrink-to-fit has already consumed its allowance and cancels.
+**T5/T6 ordering and rollover exhaustion (normative; SQ-91 resolution, 2026-07-20).** Qualification ranks candidates **bond-descending, then `pid`-ascending** — the tie-break is the deterministic submission order, so equal bonds never depend on iteration order. A candidate that wins no slot, or whose resource locks conflict, takes T6 and rolls over **exactly once**: the first deferral returns it to `Submitted` re-anchored to the next epoch (T6, `ProposalDeferred`); a second deferral of the same proposal cancels it with a full refund (**T26**, `ProposalCancelled { reason: RolloverExhausted }`). The exhausting deferral is **terminal and MUST report itself as such** — emitting `ProposalDeferred` for it would enter a dead proposal into event-derived history as still live (SQ-166). The single rollover allowance is **per proposal, not per cause** — a proposal deferred once by slot contention and then demoted by the [doc 08](./08-treasury-and-economics.md) §4.4 POL-budget shrink-to-fit has already consumed its allowance and cancels.
 
 **T20 stale-epoch anchor (normative; SQ-86 resolution, 2026-07-20).** `StaleEpochBound` measures **epoch staleness, not per-proposal lifetime**: it is the overdue margin on the persisted **next phase boundary**, so a chain whose clock has stopped advancing trips it regardless of how new any individual proposal is. When the bound is exceeded the engine **latches a high-water proposal-id snapshot**; force-rejection then applies to exactly those proposals with `id ≤ cutoff`, and proposals submitted after the latch are immune (they never observed the stale epoch). The latch is **suppressed while the dead-man switch is armed or paused and during a recovery epoch** — a stalled clock that the dead-man already owns must not also be attributed to epoch staleness (§4.8) — and it **self-clears** once no proposal at or below the cutoff remains force-rejectable, so the mechanism is a bounded drain rather than a permanent mode.
 
@@ -184,6 +188,7 @@ stateDiagram-v2
     Submitted --> Screening: T3
     Screening --> Cancelled: T4 static fail
     Screening --> Submitted: T6 defer once
+    Screening --> Cancelled: T26 rollover exhausted
     Screening --> Qualified: T5 slot + locks
     Qualified --> Trading: T7 markets + POL
     Trading --> Extended: T8 once

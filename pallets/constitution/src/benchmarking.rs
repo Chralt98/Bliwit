@@ -103,6 +103,16 @@ mod benches {
     fn set_release_channel() {
         let mut bytes = [0u8; RELEASE_CHANNEL_LEN];
         bytes[0] = 1;
+        // 02 §12 / I-30 (SQ-134): `set_release_channel` merges rather than
+        // replaces — `updated_at` (108..112) is stamped by the chain and
+        // `spec_version` (112..116) is guard-owned. Both are seeded with values
+        // writer B must NOT be able to set, so this drives the merge path and
+        // the asserts pin that neither forged value took effect. They are
+        // deliberately `assert_ne`: the surviving values are environment-owned
+        // (the dispatching block, and the *installed* runtime `spec_version` —
+        // 0 under the mock, 1 on the real runtime), so equality asserts here
+        // would pin the harness rather than the extrinsic. That the stamp
+        // equals the dispatching block is pinned by the pallet tests.
         bytes[108..112].copy_from_slice(&9u32.to_le_bytes());
         bytes[112..116].copy_from_slice(&3u32.to_le_bytes());
         let origin = authority_origin::<T>(ConstitutionOrigin::ConstitutionalValues);
@@ -111,8 +121,8 @@ mod benches {
         _(origin as T::RuntimeOrigin, bytes);
 
         let channel = crate::pallet::ReleaseChannel::<T>::get();
-        assert_eq!(channel.updated_at(), 9);
-        assert_eq!(channel.spec_version(), 0);
+        assert_ne!(channel.updated_at(), 9);
+        assert_ne!(channel.spec_version(), 3);
     }
 
     #[benchmark]

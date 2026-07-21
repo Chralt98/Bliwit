@@ -166,7 +166,7 @@ emits exactly one event — event-derived history is complete by construction.
 `GateVetoSurvival`, `GateVetoSecurity`, `HurdleNotMet`, `ConvergenceFailed`,
 `SecondExtensionFailed`, `ProcessHold`, `ConstitutionViolation`, `ResourceConflict`,
 `RateLimited`, `VetoUpheldByReview`, `StaleQueue`, `PayloadReverted`, `NotRatified`,
-`SecuritySizing`, `AttestationMissing`.
+`SecuritySizing`, `AttestationMissing`, `RolloverExhausted`.
 
 **`DispatchOutcomeCode`** on execution records: `Ok` or `Failed { call_index, error }`.
 **`IntakeFull`**: intake queue overflow (> 64) refuses submission. **Trade domain**: a trade

@@ -91,7 +91,7 @@ pub enum RejectReason {
     NotRatified,            // D-5: values ratification absent/failed at execute
     SecuritySizing,         // D-4: InCapPrize > AttackCost̂ / 3
     AttestationMissing,     // D-18: bonded kernel attestation quorum absent
-    RolloverExhausted,      // 05 §2.1 T6: second deferral cancels with full refund (v6)
+    RolloverExhausted,      // 05 §2.1 T26: second deferral cancels with full refund (v6)
 }
 
 pub enum EpochPhase { Intake, Qualify, Seed, Trade, Decide, Review, Execute, Housekeeping }

@@ -55,12 +55,21 @@ mod benches {
         let amount = 100_000 * USDC;
         let custody_seeded = T::BenchmarkHelper::prime_pot_funding(amount);
         assert!(custody_seeded.is_ok());
+        // 03 §7 R-4: on the real runtime every statically derived custody
+        // account is genesis-endowed with `min_balance` as a permanent,
+        // unspendable floor, so the payout pot does not start at zero (the
+        // mock has no such genesis). Assert the funded delta, not the absolute
+        // balance, so the benchmark holds under both.
+        let pot_before = T::RebatePayout::pot_balance(PayoutLine::Keeper);
 
         #[extrinsic_call]
         _(origin as T::RuntimeOrigin, BudgetLine::Keeper, amount);
 
         assert_eq!(Pallet::<T>::line_balance(BudgetLine::Keeper), amount);
-        assert_eq!(T::RebatePayout::pot_balance(PayoutLine::Keeper), amount);
+        assert_eq!(
+            T::RebatePayout::pot_balance(PayoutLine::Keeper).saturating_sub(pot_before),
+            amount
+        );
     }
 
     #[benchmark]

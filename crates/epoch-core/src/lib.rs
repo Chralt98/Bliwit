@@ -1915,7 +1915,7 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             }
             self.events.push(Event::ProposalDeferred(pid));
         } else {
-            // 05 §2.1 T6: the second deferral is terminal — it cancels with a
+            // 05 §2.1 T26: the second deferral is terminal — it cancels with a
             // full refund. Reporting it as `ProposalDeferred` made
             // event-derived history claim the proposal was still live
             // (SQ-166, contract v6).

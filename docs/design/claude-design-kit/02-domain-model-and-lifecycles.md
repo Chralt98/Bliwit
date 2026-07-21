@@ -121,7 +121,7 @@ Kernel-ordered, gates first ("upside is never weighed against ruin"):
 5. **Security sizing**: `3 × InCapPrize ≤ AttackCost̂` (else `SecuritySizing` reject).
 6. CODE/META: attestation quorum (2-of-3) + values ratification `Passed` (checked at
    execute-time).
-Outcome: `Adopt` / `Extend` (once) / `Reject(reason)` — all 16 `RejectReason`s (kit file 05
+Outcome: `Adopt` / `Extend` (once) / `Reject(reason)` — all 17 `RejectReason`s (kit file 05
 §A4) need human-readable renderings.
 
 ## 5. Welfare metric — the protocol-health dashboard (05 §4)
