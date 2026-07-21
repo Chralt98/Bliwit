@@ -69,7 +69,7 @@ pub enum RejectReason {
 }
 ```
 
-**Every variant has exactly one producing site, with one deliberate exception** (B-med: RejectReason; SQ-3): `AttestationMissing` is produced at **two** sites — `decide()` step 10 at decide time (T10) and the execution guard's dispatch-time re-check (T16) — because a queue-time `AttestationRecord` can be revoked or challenge-upheld *after* queue time, which [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5) and [doc 15](./15-invariants-and-testing.md) I-19 require the guard to catch at `execute`. The producer map is otherwise normative — an implementation MUST NOT emit a variant from any site not listed below:
+**Every variant has exactly one producing site, with one deliberate exception** (B-med: RejectReason; SQ-3): `AttestationMissing` is produced at **two** sites — `decide()` step 10 at decide time (T10) and the execution guard's dispatch-time re-check (T16) — because a queue-time `AttestationRecord` can be revoked, or have a challenge resolved against it, *after* queue time, which [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5) and [doc 15](./15-invariants-and-testing.md) I-19 require the guard to catch at `execute`. The producer map is otherwise normative — an implementation MUST NOT emit a variant from any site not listed below:
 
 | Variant | Producer | Transition |
 |---|---|---|
@@ -82,7 +82,7 @@ pub enum RejectReason {
 | `ConstitutionViolation` | `decide()` step 1 (preimage mismatch at decide time) | T10 |
 | `ResourceConflict` | `decide()` step 1 (locks lost) | T10 |
 | `SecuritySizing` | `decide()` step 9 | T10 |
-| `AttestationMissing` | `decide()` step 10 (CODE/META) at decide time; **and** the execution guard's dispatch-time re-check when the queue-time `AttestationRecord` was revoked/challenge-upheld post-queue ([doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5), [doc 15](./15-invariants-and-testing.md) I-19) | T10, T16 |
+| `AttestationMissing` | `decide()` step 10 (CODE/META) at decide time; **and** the execution guard's dispatch-time re-check when the queue-time `AttestationRecord` was revoked/challenge-resolved-against-it post-queue ([doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5), [doc 15](./15-invariants-and-testing.md) I-19) | T10, T16 |
 | `RateLimited` | `decide()` step 10 (constitutional meters/spacing) | T10 |
 | `NotRatified` | execution guard: ratification referendum concluded **Failed**, or grace end reached unratified ([doc 06](./06-governance-and-guardians.md) mechanics, [doc 09](./09-execution-upgrades-and-rollout.md) dispatch check) | T16 |
 | `StaleQueue` | execution guard: version-constraint mismatch; meter contention past grace | T16 |
@@ -142,7 +142,7 @@ Changes vs. the superseded table (B-12): **T21/T22/T23 added**, **T13 restructur
 | T13 | Rerun → Extended | `tick` at the next epoch's Seed phase: books **reopen at 2× POL**, hurdle **δ+1 pp**, TWAP accumulators reset, positions intact; sets `extended := true`, `rerun := true`, `decide_at := reopen_block + dec.extension` (3 d) | keeper | next epoch's Seed | 2× POL committed | `RerunOpened` |
 | T14 | Queued → Executed | `execution_guard.execute` | Signed (keeper) | `maturity ≤ now ≤ maturity + grace(class)`; all [doc 09](./09-execution-upgrades-and-rollout.md) dispatch re-validations pass **including ratification Passed for CODE/META (D-5)** | — | `Executed { record }` |
 | T15 | Queued → Expired | `tick` | keeper | grace elapsed with no execute attempt succeeding | bond refunded; then T21 fires | `MandateExpired` |
-| T16 | Queued → Rejected(r) | `tick` / `execute` failure paths; r ∈ { `StaleQueue` (version-constraint mismatch after an intervening upgrade; repeated meter contention past grace), `NotRatified` (ratification referendum concluded Failed, or grace end reached with no Passed referendum), `AttestationMissing` (the queue-time `AttestationRecord` was revoked or a late challenge upheld post-queue — [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5), [doc 15](./15-invariants-and-testing.md) I-19) } | keeper | — | refund; then T21 fires | `ProposalRejected(r)` |
+| T16 | Queued → Rejected(r) | `tick` / `execute` failure paths; r ∈ { `StaleQueue` (version-constraint mismatch after an intervening upgrade; repeated meter contention past grace), `NotRatified` (ratification referendum concluded Failed, or grace end reached with no Passed referendum), `AttestationMissing` (the queue-time `AttestationRecord` was revoked or a late challenge resolved against it post-queue — [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5), [doc 15](./15-invariants-and-testing.md) I-19) } | keeper | — | refund; then T21 fires | `ProposalRejected(r)` |
 | T17 | Executed → Measuring | automatic in T14; vault `resolve(Accept)` | — | — | proposer reward paid | `MeasurementStarted(cohort)` |
 | T18 | Queued → FailedExecuted | `execute` payload dispatch error (payload atomically reverted; proposal state advances) | — | retry window **72 h**, then T22; ACCEPT branch stays live | 50% bond slash (proposer owns executability) | `ExecutionFailed { reason: PayloadReverted }` |
 | T19 | Measuring → Settled | `settle_cohort` (§7) | keeper | cohort epoch e+2 snapshot finalized + challenge closed; settlement at e+3 Housekeeping | — | `CohortSettled { s }` |
@@ -293,7 +293,7 @@ Changes vs. the superseded §12.3: XCM health `X` moves from S into `C_onchain` 
 | **P** (weighted geo) | Fees burned/paid (0.45) | `N(log1p(fees_USDC))`, protocol fee sink | on-chain | carry + flag | costs exactly the fees |
 | | Economically qualified users (0.35) | accounts paying ≥ dust-indexed fee on ≥ 3 distinct days, HLL-estimated, cost-weighted | on-chain sketch | carry + flag | Sybils must pay repeatedly; weight-capped |
 | | Settled value (0.20) | fee-weighted transfer value, self-transfer down-weighted | on-chain | carry + flag | wash routing — fee weighting prices it |
-| **A** (weighted geo) | Shipped audited upgrades (0.40) | milestone points ÷ target, attested MilestoneRegistry ([doc 07](./07-oracle-and-disputes.md)) | attested | 0 if none | scope inflation — enumerated scope classes, challengeable |
+| **A** (weighted geo) | Shipped audited upgrades (0.40) | `min(1, milestone points ÷ target)`, attested MilestoneRegistry ([doc 07](./07-oracle-and-disputes.md) §7 — `target` is a frozen per-MetricSpec field, never a [13](./13-parameters.md) key) | attested | 0 if none | scope inflation — enumerated scope classes, challengeable |
 | | Runtime performance (0.30) | benchmarked weight-per-op regression index, full-epoch continuous sampling | attested reproducible harness | carry | benchmark-day gaming — continuous sampling |
 | | Ecosystem integrations (0.30) | qualified independent integrations passing a 30-day on-chain fee-paying usage bar | attested registry | 0 | shells — usage bar on-chain-verifiable |
 
@@ -331,7 +331,7 @@ P_e      = Π_i max(p_i, ε_P)^{w_i}          A_e = Π_i max(a_i, ε_P)^{w_i}
 
 `I` is a pure multiplier (no weight, no ε-floor): an S1 incident zeroes `C_e`, which the g-gate turns into `W_e = 0` — the incident-multiplied semantics of the source, preserved deliberately.
 
-**Weights live in the MetricSpec.** The `MetricSpec` record gains normative fields: `pillar ∈ {S, C_onchain, C_attested, P, A}`, `weight: FixedU64`, `epsilon_floor: FixedU64`, alongside the existing `{ id, formula_ref, units, repr, source class, cadence, normalization rule, sanity bounds, missing-data rule, gaming vectors + min-cost estimate, challenge procedure, version, activation_epoch ≥ current + 2, in-flight rule }`. Registering a spec whose pillar weights do not sum to 1, or missing the gaming-vector section, MUST be rejected. Open cohorts always settle on their creation-time spec version, weights included (I-16).
+**Weights live in the MetricSpec.** The `MetricSpec` record gains normative fields: `pillar ∈ {S, C_onchain, C_attested, P, A}`, `weight: FixedU64`, `epsilon_floor: FixedU64`, and — for a milestone component of the A pillar — `target` (the divisor of §4.3's `min(1, points ÷ target)`, frozen per version so a live cohort's milestones can never be retroactively renormalized; [07](./07-oracle-and-disputes.md) §7), alongside the existing `{ id, formula_ref, units, repr, source class, cadence, normalization rule, sanity bounds, missing-data rule, gaming vectors + min-cost estimate, challenge procedure, version, activation_epoch ≥ current + 2, in-flight rule }`. Registering a spec whose pillar weights do not sum to 1, missing the gaming-vector section, or declaring a milestone component with no positive `target`, MUST be rejected. Open cohorts always settle on their creation-time spec version, weights included (I-16).
 
 **Determinism discipline (normative):**
 1. All component values are `FixedU64` (1e9) in [0,1] before aggregation.
@@ -373,6 +373,8 @@ For epoch e with `n = min(e − 1, 12)` finalized epochs available, the winsoriz
 ### 4.7 Daily gate-breach flags (deterministic; gates acting twice)
 
 Each epoch day, `S_daily` and `C_daily` (§4.4 — **on-chain components only**) are computed from that day's counters. The flag for gate g is set iff the day value is below θ_g⁻. Storage: `GateBreachFlags: map EpochId → { s_breached: bool, c_breached: bool, day_bitmap: [u32; 2] }`. These flags — and nothing else — settle the gate markets ([doc 04](./04-markets-and-pricing.md)) and arm the guardian `suspend_on_gate` power ([doc 06](./06-governance-and-guardians.md)). Ex post, gates inside `W_e` (which *does* include `C_attested` at settlement time) zero realized welfare on breach. Attested data can therefore lower a cohort's settlement `s`, but can never flip a gate flag or a gate-market settlement (B-9 closed).
+
+**Recording cardinality (normative).** `record_daily_gate` is **repeat-tolerant** by construction: flags are OR-merged, so re-recording an already-recorded `(epoch, day, spec_version)` with identical components is a *state* no-op and MUST NOT be rejected — late and duplicate submissions from independent keepers ([01](./01-system-overview.md) §4.2) are the expected operating mode, and rejecting them would turn a benign race into a failed dispatch the losing keeper must special-case. Rebate eligibility is nevertheless **state-change-gated** ([08](./08-treasury-and-economics.md) §6.3): only a recording that samples a previously unsampled day or sets a new breach flag draws on the general tranche, so duplicates cannot drain the keeper meter. Sample tracking MUST use storage distinct from the breach `day_bitmap` above, which remains a breached-days-only map.
 
 ### 4.8 Dead-man switch (carried forward)
 
@@ -532,7 +534,7 @@ TWAPs are the slew-capped accumulator means of [doc 04](./04-markets-and-pricing
 | Constitutional violation (preimage) | ✘ | – | – | – | – | – | – | – | – | – | – | Reject(ConstitutionViolation) |
 | Guardian hold at decide time | ✔ | ✘ | – | – | – | – | – | – | – | – | – | Reject(ProcessHold)† |
 | Ratification failed / absent at execute | (post-queue) | | | | | | | | | | | T16 Rejected(NotRatified)‡ |
-| Attestation revoked / challenge upheld at execute | (post-queue) | | | | | | | | | | | T16 Rejected(AttestationMissing)‡ |
+| Attestation revoked / challenge resolved against it at execute | (post-queue) | | | | | | | | | | | T16 Rejected(AttestationMissing)‡ |
 
 † A guardian hold on a *queued* item suspends via T11 instead; a hold active at decision time rejects, refundable and resubmittable.
 ‡ Not a `decide()` outcome: the single ratification deadline is execute-time (D-5); the row is included so the table remains the complete reason-code map.
@@ -577,8 +579,10 @@ C_disp = Σ_{book ∈ {acc, rej}} b_book · ln( ((p̄ + δc)·(1 − p̄)) / ((1
          // δc = DELTA[class] (+1 pp if rerun), inputs clamped to the quoting domain (doc 04)
 
 C_hold = min(V_win, sec.flow_cap · (b_acc + b_rej)) · δc
-         // adverse-selection bleed of holding a δc mispricing against measured organic flow;
-         // the sec.flow_cap ceiling bounds wash-trade inflation of V_win (threat row: doc 14)
+         // adverse-selection bleed of holding a δc mispricing against the window's
+         // contest capital: since the SQ-231 amendment V_win *is* that measure
+         // (doc 04 §7a), so churn and wash flow net out by construction rather than
+         // being merely capped; sec.flow_cap remains as the secondary ceiling (doc 14)
 ```
 
 `ManipFloor̂` is part of the Phase 3–4 measurement obligation alongside `F̂` (doc 08 §5.5): if published `ManipFloor̂` persistently reads below `3 · InCapPrize` for adopted proposals, the values layer MUST tighten δ and/or the `dec.v_min`/`pol.b` slopes before caps rise — the diagnostic exists precisely because the flow-model gate is an upper bound. The Phase-0 exit simulation ([15](15-invariants-and-testing.md) §4.9) validates this envelope at the irreducible economic line: it flags a causal wrong-PASS flip as a security failure only when the *realized* attacker cost falls **below the prize** (a profitable capture); an unprofitable flip whose realized cost is ≥ the prize but below `3 · InCapPrize` is deep-pocket griefing (TM-18) that the SF = 3 margin conservatively guards against — recorded as a diagnostic, not a Phase-0 gate failure. Economic derivation, calibration, the worked recomputation at defaults, and the secondary Ask-scaled liquidity mechanism (`pol.b`, `dec.v_min`, δ scaling with `ask`, floors = current defaults) live in [doc 08](./08-treasury-and-economics.md).

@@ -53,7 +53,7 @@ the owning pallet's state, dispatch behavior, and `try-state` result decide that
 5. Run or inspect the relevant `try-state` result. Every pallet's machine/state
    invariant coverage and the release-blocking consequence of failure are defined
    by
-   [15 §1](../../docs/architecture/15-invariants-and-testing.md#1-protocol-invariants-backend-i-1i-27).
+   [15 §1](../../docs/architecture/15-invariants-and-testing.md#1-protocol-invariants-backend-i-1i-28).
 6. For a PoV alert, compare the measured call at its worst bounded arguments with
    the committed benchmark/weight regression evidence specified in
    [15 §4.5](../../docs/architecture/15-invariants-and-testing.md#45-fuzzing-benchmarks-weights).
@@ -109,7 +109,7 @@ condition cleared in the incident postmortem.
 
 - [12 §6.3 — storage alert binding](../../docs/architecture/12-release-and-operations.md#63-monitoring-and-alerting)
 - [13 §4 — reconciled storage-bound registry](../../docs/architecture/13-parameters.md#4-reconciled-storage-bounds-d-10--one-table-all-budgets-derive-from-it)
-- [15 §1 — bounded-state invariants and `try-state`](../../docs/architecture/15-invariants-and-testing.md#1-protocol-invariants-backend-i-1i-27)
+- [15 §1 — bounded-state invariants and `try-state`](../../docs/architecture/15-invariants-and-testing.md#1-protocol-invariants-backend-i-1i-28)
 - [15 §4.5–§4.6 — PoV and generated limit coverage](../../docs/architecture/15-invariants-and-testing.md#45-fuzzing-benchmarks-weights)
 - [06 §3.2 and §6.2 — authority and trigger-gated playbooks](../../docs/architecture/06-governance-and-guardians.md#32-authority-matrix-call-level-capability-table-normative)
 - [Generated limit-coverage audit surface](../../tools/limit-coverage/registry.toml)

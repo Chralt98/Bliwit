@@ -12,7 +12,7 @@ use futarchy_primitives::{keeper::CrankClass, FixedU64};
 use registry_core::{
     FilingClass, FilingState, RegistryKind, MAX_FILINGS_PER_EPOCH, MAX_LIVE_EPOCHS,
     REG_BOND_INCIDENT, REG_BOND_MILESTONE, REG_CLOSE_BATCH, REG_EXT_WINDOW_BLOCKS,
-    REG_WINDOW_BLOCKS,
+    REG_WINDOW_BLOCKS, WT_QUORUM,
 };
 
 fn signed(n: u8) -> RuntimeOrigin {
@@ -661,10 +661,10 @@ fn reap_epoch_rebates_once_only_after_bounded_cleanup_succeeds() {
 
         System::set_block_number(CLOSE_BLOCK + ARCHIVE_DELAY + 1);
         assert_ok!(IncidentRegistry::reap_epoch(signed(BOB), 5));
-        assert_eq!(
-            KeeperRebates::get(),
-            vec![(acct(BOB), CrankClass::OracleLine)]
-        );
+        // 07 §7 *Crank funding lines* / 08 §6.3 (SQ-297): reaping is archival
+        // cleanup, so it is rebated from the metered GENERAL tranche — not the
+        // oracle budget line that funds `ack_observed` / `crank_close`.
+        assert_eq!(KeeperRebates::get(), vec![(acct(BOB), CrankClass::General)]);
         assert_noop!(
             IncidentRegistry::reap_epoch(signed(BOB), 5),
             Error::<Test, IncidentInstance>::ReapNotDue
@@ -939,5 +939,223 @@ fn milestone_over_ship_clamps_to_one() {
             milestone_close_with_points(u16::MAX),
             FixedU64(1_000_000_000)
         );
+    });
+}
+
+// --------------------------------------- milestone normalization (07 §7)
+
+#[test]
+fn a_zero_milestone_target_refuses_the_close_instead_of_recording_zero() {
+    // 07 §7 *Milestone normalization* (SQ-291): a zero or absent frozen-MetricSpec
+    // `target` MUST NOT be normalized to an aggregate of 0 — that records a
+    // fail-*adverse* A-pillar component as if it were a real measurement. The
+    // close refuses; welfare then sees no record at all, not a fabricated 0.0.
+    new_test_ext().execute_with(|| {
+        register_watchtower(WT1);
+        register_watchtower(WT2);
+        assert_ok!(MilestoneRegistry::file(
+            signed(ALICE),
+            3,
+            FilingClass::Scope(1),
+            25,
+            H,
+            VER
+        ));
+        assert_ok!(MilestoneRegistry::ack_observed(signed(WT1), 3, 0));
+        assert_ok!(MilestoneRegistry::ack_observed(signed(WT2), 3, 0));
+        System::set_block_number(CLOSE_BLOCK);
+        assert_ok!(MilestoneRegistry::crank_close(
+            signed(BOB),
+            3,
+            REG_CLOSE_BATCH as u32
+        ));
+        WelfareLog::set(Vec::new());
+
+        // The frozen MetricSpec carries no positive target at close time.
+        MilestoneTarget::set(0);
+        assert_noop!(
+            MilestoneRegistry::close_epoch(signed(BOB), 3),
+            Error::<Test, MilestoneInstance>::MilestoneTargetUnset
+        );
+        // Status quo on the failure path (G-1): no aggregate, no welfare
+        // hand-off, no close stamp — so the archive gate keeps the records too.
+        assert!(Aggregates::<Test, MilestoneInstance>::get(3).is_none());
+        assert!(WelfareLog::get().is_empty());
+        assert_eq!(FilingCount::<Test, MilestoneInstance>::get(3), 1);
+        assert!(Filings::<Test, MilestoneInstance>::get(3, 0).is_some());
+        System::set_block_number(CLOSE_BLOCK + ARCHIVE_DELAY + 1);
+        assert_noop!(
+            MilestoneRegistry::reap_epoch(signed(BOB), 3),
+            Error::<Test, MilestoneInstance>::ReapNotDue
+        );
+        assert_ok!(MilestoneRegistry::do_try_state());
+
+        // The refusal is not terminal: a spec that carries the field again closes
+        // to the real measurement (25 / 100 = 0.25), never to 0.0.
+        MilestoneTarget::set(100);
+        assert_ok!(MilestoneRegistry::close_epoch(signed(BOB), 3));
+        assert_eq!(
+            Aggregates::<Test, MilestoneInstance>::get(3),
+            Some(FixedU64(250_000_000))
+        );
+        assert_eq!(
+            WelfareLog::get(),
+            vec![(RegistryKind::Milestone, 3, 250_000_000)]
+        );
+    });
+}
+
+#[test]
+fn a_zero_milestone_target_refuses_the_filing_at_the_door() {
+    // 07 §7 *Milestone normalization*: "until the MetricSpec surface carries the
+    // field no milestone component may be admitted". Admitting a filing whose
+    // epoch can never close would escrow a bond into an epoch that holds its
+    // `FilingCount` slot forever (close refuses ⇒ no `ClosedAt` ⇒ no reap),
+    // wedging the instance at `MAX_LIVE_EPOCHS`.
+    new_test_ext().execute_with(|| {
+        MilestoneTarget::set(0);
+        let before = usdc(&acct(ALICE));
+        assert_noop!(
+            MilestoneRegistry::file(signed(ALICE), 3, FilingClass::Scope(1), 25, H, VER),
+            Error::<Test, MilestoneInstance>::MilestoneTargetUnset
+        );
+        assert_eq!(usdc(&acct(ALICE)), before);
+        assert_eq!(FilingCount::<Test, MilestoneInstance>::get(3), 0);
+        assert!(Filings::<Test, MilestoneInstance>::get(3, 0).is_none());
+        // The Incident instance never divides by a target and is unaffected.
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            3,
+            FilingClass::S2,
+            0,
+            H,
+            VER
+        ));
+        assert_ok!(MilestoneRegistry::do_try_state());
+        assert_ok!(IncidentRegistry::do_try_state());
+    });
+}
+
+// ------------------------------------- fixed windows and quorum (07 §7)
+
+#[test]
+fn registry_windows_do_not_track_a_raised_orc_window() {
+    // limit-coverage: orc.window
+    // 07 §7 *Fixed windows and quorum* (SQ-290): the registry pins the kernel
+    // floor `REG_WINDOW_BLOCKS` (72 h) as a fixed constant. Unlike the §5 oracle
+    // game — which reads live `orc.window` and therefore tracks a META raise to
+    // ≤ 120 h (see `pallet-oracle`'s `challenge_window_is_half_open_at_the_deadline`)
+    // — both registry instances stay at 72 h after such an amendment. The
+    // divergence is deliberate, so this test fails loudly if a refactor ever
+    // points the registry at the live value.
+    new_test_ext().execute_with(|| {
+        // A META amendment raises `orc.window` 72 h → 120 h (07 §14).
+        LiveOrcWindow::set(REG_WINDOW_BLOCKS + REG_EXT_WINDOW_BLOCKS);
+        assert!(LiveOrcWindow::get() > REG_WINDOW_BLOCKS);
+
+        System::set_block_number(7);
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            VER
+        ));
+        // The stored deadline is the kernel floor, not the raised live value.
+        let window_end = Filings::<Test, IncidentInstance>::get(5, 0).and_then(|f| match f.state {
+            FilingState::Filed { window_end, .. } => Some(window_end),
+            _ => None,
+        });
+        assert_eq!(window_end, Some(7 + REG_WINDOW_BLOCKS));
+        assert_ne!(window_end, Some(7 + LiveOrcWindow::get()));
+
+        // One block past the kernel deadline the challenge surface is shut —
+        // proving the window did not stretch to the amended `orc.window`.
+        System::set_block_number(u64::from(REG_WINDOW_BLOCKS) + 8);
+        assert_noop!(
+            IncidentRegistry::challenge_filing(signed(CHARLIE), 5, 0, H),
+            Error::<Test, IncidentInstance>::WindowClosed
+        );
+        // The same block is already mature for the close crank (the crank closes
+        // strictly after the deadline), so no challenge can race it.
+        register_watchtower(WT1);
+        register_watchtower(WT2);
+        assert_noop!(
+            IncidentRegistry::ack_observed(signed(WT1), 5, 0),
+            Error::<Test, IncidentInstance>::WindowClosed
+        );
+        assert_ok!(IncidentRegistry::do_try_state());
+
+        // The Milestone instance is pinned identically.
+        System::set_block_number(9);
+        assert_ok!(MilestoneRegistry::file(
+            signed(ALICE),
+            6,
+            FilingClass::Scope(1),
+            10,
+            H,
+            VER
+        ));
+        let milestone_end =
+            Filings::<Test, MilestoneInstance>::get(6, 0).and_then(|f| match f.state {
+                FilingState::Filed { window_end, .. } => Some(window_end),
+                _ => None,
+            });
+        assert_eq!(milestone_end, Some(9 + REG_WINDOW_BLOCKS));
+    });
+}
+
+#[test]
+fn registry_quorum_does_not_track_a_raised_wt_quorum() {
+    // 07 §7 *Fixed windows and quorum* (SQ-290): the registry pins `WT_QUORUM = 2`
+    // as the kernel floor. A META raise moves the oracle's §4 quorum, never the
+    // registry's — unchallenged closure still upholds at two acknowledgments, and
+    // the third is refused (`AlreadyQuorum`) so the per-filing ack set stays
+    // bounded. `wt.quorum` is classed `param-bounds`, so this pin carries no
+    // limit-coverage marker; the amendment-bounds path is the generated suite's.
+    new_test_ext().execute_with(|| {
+        // A META amendment raises `wt.quorum` 2 → 3 (07 §14).
+        LiveWtQuorum::set(WT_QUORUM + 1);
+        assert!(LiveWtQuorum::get() > WT_QUORUM);
+
+        register_watchtower(WT1);
+        register_watchtower(WT2);
+        register_watchtower(WT3);
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            VER
+        ));
+        assert_ok!(IncidentRegistry::ack_observed(signed(WT1), 5, 0));
+        assert_ok!(IncidentRegistry::ack_observed(signed(WT2), 5, 0));
+        // Quorum is the kernel floor: a third acknowledgment adds nothing and is
+        // refused, rather than being counted toward the raised live value.
+        assert_noop!(
+            IncidentRegistry::ack_observed(signed(WT3), 5, 0),
+            Error::<Test, IncidentInstance>::AlreadyQuorum
+        );
+        let acks = Filings::<Test, IncidentInstance>::get(5, 0).and_then(|f| match f.state {
+            FilingState::Filed { acks, .. } => Some(acks),
+            _ => None,
+        });
+        assert_eq!(acks, Some(WT_QUORUM));
+
+        // Two acknowledgments still satisfy unchallenged closure: the filing is
+        // upheld with no 48 h quorum-failure extension, exactly as at the floor.
+        System::set_block_number(CLOSE_BLOCK);
+        assert_ok!(IncidentRegistry::crank_close(
+            signed(BOB),
+            5,
+            REG_CLOSE_BATCH as u32
+        ));
+        assert!(matches!(
+            Filings::<Test, IncidentInstance>::get(5, 0).map(|f| f.state),
+            Some(FilingState::Upheld)
+        ));
+        assert_ok!(IncidentRegistry::do_try_state());
     });
 }

@@ -264,7 +264,11 @@ pub mod pallet {
 
         /// Infallible, fail-soft rebate sink for useful registry cranks (07 §7,
         /// 08 §6.3). This associated type is instance-scoped, like every other
-        /// registry seam, and pays from the separate ORACLE budget line.
+        /// registry seam. The funding line is per-crank, not per-pallet (07 §7
+        /// *Crank funding lines*): the dispute machinery — `ack_observed` and
+        /// `crank_close` — pays from the separate ORACLE budget line, while the
+        /// archival `reap_epoch` pays from the metered **general** keeper
+        /// tranche. Each call site passes its own [`CrankClass`].
         type KeeperRebate: KeeperRebateSink<Self::AccountId>;
 
         /// Origin/account construction for benchmarking.
@@ -448,6 +452,12 @@ pub mod pallet {
         /// (an empty epoch is welfare's "no record ⇒ 1" default, and a reaped
         /// epoch must never re-close, 07 §7).
         NothingToClose,
+        /// The Milestone instance's frozen-MetricSpec completion `target` is zero
+        /// or absent, so `min(1, points ÷ target)` is undefined: `file` and
+        /// `close_epoch` both refuse rather than record a fabricated `0.0`
+        /// A-pillar component (07 §7 *Milestone normalization*). Appended last —
+        /// the preceding variant indices are metadata-stable (02 §13).
+        MilestoneTargetUnset,
     }
 
     // --------------------------------------------------------------------- hooks
@@ -661,8 +671,16 @@ pub mod pallet {
             // `MaxFilingsPerEpoch` filings — the cap enforced in `ack_observed`).
             let limit = registry_core::WT_QUORUM as u32 * T::MaxFilingsPerEpoch::get() + 1;
             let _ = AckRecords::<T, I>::clear_prefix((epoch,), limit, None);
+            // 07 §7 *Crank funding lines*: reaping is archival cleanup with no
+            // dispute content, so it is rebated from the metered **general**
+            // keeper tranche (08 §6.3) — NOT the oracle budget line that funds
+            // `ack_observed` / `crank_close`. Charging storage housekeeping to
+            // the oracle line would couple dispute liveness to archival work;
+            // the general tranche is capped at 20 % of the keeper budget, so its
+            // exhaustion can never starve a decision-critical crank and only
+            // stops the rebate — reaping stays permissionless (SQ-297).
             // B5 recalibrates this weight for the post-commit rebate write/payout.
-            T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
+            T::KeeperRebate::rebate(&who, CrankClass::General);
             Ok(())
         }
     }
@@ -1166,6 +1184,7 @@ pub mod pallet {
                 CoreError::Overflow => Error::<T, I>::Overflow.into(),
                 CoreError::NotRegistered => Error::<T, I>::NotRegistered.into(),
                 CoreError::AlreadyQuorum => Error::<T, I>::AlreadyQuorum.into(),
+                CoreError::MilestoneTargetUnset => Error::<T, I>::MilestoneTargetUnset.into(),
             }
         }
     }

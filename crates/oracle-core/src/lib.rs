@@ -1270,10 +1270,15 @@ pub fn round_bond(
         Error::RoundNotFound
     );
     ensure!((1..=params.rounds).contains(&round), Error::RoundNotFound);
+    // 07 §6.1 (*Units and rounding*): `orc.bond_bps` is in basis points, so the
+    // product carries the `/ 10_000` divisor and that division rounds **up**.
+    // Rounding is resolved in the direction of custody (I-4 / I-28): over-custody
+    // is dust, under-custody is an unbacked claim, so a bond is never a base unit
+    // short. The `max` against the floor is applied after rounding.
     let scaled = stake_at_risk
         .checked_mul(params.bond_bps as Balance)
         .ok_or(Error::Overflow)?
-        / 10_000;
+        .div_ceil(10_000);
     let b1 = core::cmp::max(params.bond_floor, scaled);
     let multiplier = 1u128
         .checked_shl(u32::from(round.saturating_sub(1)))
@@ -1386,6 +1391,31 @@ pub mod benchmarking {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 07 §6.1 (*Units and rounding*): the base-unit product rounds **up**, so a
+    /// bond is never a base unit short of the specified value. Pins the direction
+    /// against a silent regression to truncating division (SQ-260 / SQ-289).
+    #[test]
+    fn round_bond_base_unit_product_rounds_up() {
+        let params = OracleParams {
+            // Floor at 1 so the `max` never masks the rounding under test.
+            bond_floor: 1,
+            bond_bps: 1,
+            ..OracleParams::DEFAULT
+        };
+        // 1 bps of 15,000 base units = 1.5 → MUST be 2, not 1.
+        assert_eq!(round_bond(15_000, 1, &params), Ok(2));
+        // An exact product is unaffected by the rounding direction.
+        assert_eq!(round_bond(20_000, 1, &params), Ok(2));
+        // The doubling ladder derives from the already-rounded `B_1`.
+        assert_eq!(round_bond(15_000, 2, &params), Ok(4));
+        // Rounding is applied before the floor `max`, never after it.
+        let floored = OracleParams {
+            bond_floor: 10,
+            ..params
+        };
+        assert_eq!(round_bond(15_000, 1, &floored), Ok(10));
+    }
 
     /// Keep the pre-existing core tests focused on their original transition
     /// assertions while production callers pass an explicit live snapshot.

@@ -225,6 +225,13 @@ pub enum Error {
     /// The filing already has `WT_QUORUM` acknowledgments — further acks add
     /// nothing and are rejected so the per-filing ack set stays bounded (07 §4).
     AlreadyQuorum,
+    /// The Milestone instance's frozen-MetricSpec completion `target` is zero or
+    /// absent, so `min(1, points ÷ target)` has no defined value (07 §7
+    /// *Milestone normalization*). Filing and close both refuse: normalizing to
+    /// an aggregate of `0` would record a fail-*adverse* A-pillar component as
+    /// if it were a real measurement, which the rule forbids. Appended last —
+    /// the preceding discriminants are SCALE-stable.
+    MilestoneTargetUnset,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -258,8 +265,10 @@ pub struct Registry {
     /// `points ÷ target`). A per-MetricSpec frozen field (I-16), NOT a 13/kernel
     /// constant — the FRAME pallet refreshes it from the frozen MetricSpec via
     /// `Config::Epoch` on every load; defaults to [`MILESTONE_TARGET_POINTS`] for
-    /// standalone / differential use. Guards against a zero target (rejected in
-    /// [`Registry::milestone_aggregate`]).
+    /// standalone / differential use. A zero or absent target is refused with
+    /// [`Error::MilestoneTargetUnset`] on both the `file` and the `close_epoch`
+    /// path — never normalized to an aggregate of `0` (07 §7 *Milestone
+    /// normalization*).
     pub milestone_target: u32,
 }
 
@@ -291,6 +300,15 @@ impl Registry {
             Error::AlreadyFinal
         );
         self.validate_class(input.class)?;
+        // 07 §7 *Milestone normalization*: a milestone component with no
+        // positive `target` is not admissible, so the Milestone instance refuses
+        // the filing at the door rather than escrowing a bond into an epoch whose
+        // close can never produce an aggregate. Without this the epoch's
+        // `FilingCount` entry would survive forever (close refuses ⇒ no
+        // `ClosedAt` ⇒ no reap), wedging the instance at `MAX_LIVE_EPOCHS`.
+        if matches!(self.kind, RegistryKind::Milestone) {
+            ensure!(self.milestone_target > 0, Error::MilestoneTargetUnset);
+        }
         let bond = self.required_bond();
         ensure!(bond > 0, Error::BondBelowMinimum);
         if self.filing_count.iter().all(|(e, _)| *e != input.epoch) {
@@ -565,7 +583,10 @@ impl Registry {
         );
         let aggregate = match self.kind {
             RegistryKind::Incident => self.incident_aggregate(epoch),
-            RegistryKind::Milestone => self.milestone_aggregate(epoch),
+            // Refuses on an unset target (07 §7 *Milestone normalization*). The
+            // `?` fires before any mutation below, so a refused close leaves the
+            // aggregate, the filing count and the filings exactly as they were.
+            RegistryKind::Milestone => self.milestone_aggregate(epoch)?,
         };
         ensure!(
             self.aggregates.len() < MAX_AGGREGATES,
@@ -713,7 +734,7 @@ impl Registry {
             .sum();
         FixedU64(ONE.saturating_sub(sev))
     }
-    fn milestone_aggregate(&self, epoch: EpochId) -> FixedU64 {
+    fn milestone_aggregate(&self, epoch: EpochId) -> Result<FixedU64, Error> {
         let points: u64 = self
             .filings
             .iter()
@@ -721,16 +742,18 @@ impl Registry {
             .fold(0u64, |acc, (_, f)| acc.saturating_add(f.points as u64));
         // aggregate = min(points / target, 1) on the 1e9 grid (05 §4.4 / 07 §7).
         // `target` is the frozen-MetricSpec completion target (seam field, I-16),
-        // NOT a hardcoded divisor. A zero target (mis-seeded spec) yields 0 rather
-        // than dividing by zero (G-1); the result is clamped to ONE so a cohort
-        // that over-ships (or an over-large `points` claim) can never push the A
+        // NOT a hardcoded divisor. A zero or absent target is **refused**, never
+        // normalized: 07 §7 (*Milestone normalization*) rules that emitting `0`
+        // for an unset target is a fail-*adverse* value masquerading as a
+        // measurement, so the close refuses and the epoch keeps no aggregate at
+        // all (G-1 status quo — welfare then sees no record rather than a
+        // fabricated 0.0). The result is clamped to ONE so a cohort that
+        // over-ships (or an over-large `points` claim) can never push the A
         // pillar past 1.0 — a welfare component MUST live in [0, 1].
         let target = self.milestone_target as u64;
-        if target == 0 {
-            return FixedU64(0);
-        }
+        ensure!(target > 0, Error::MilestoneTargetUnset);
         let raw = points.saturating_mul(ONE) / target;
-        FixedU64(raw.min(ONE))
+        Ok(FixedU64(raw.min(ONE)))
     }
 }
 
@@ -1035,5 +1058,78 @@ mod tests {
             Ok(FixedU64(250_000_000))
         );
         assert_eq!(r.aggregate(3), Some(FixedU64(250_000_000)));
+    }
+
+    #[test]
+    fn a_zero_milestone_target_refuses_the_close_instead_of_recording_zero() {
+        // 07 §7 *Milestone normalization* (SQ-291): a zero/absent frozen-MetricSpec
+        // `target` MUST NOT be normalized to an aggregate of 0 — that is a
+        // fail-*adverse* A-pillar component masquerading as a real measurement.
+        // The close refuses and the epoch keeps NO aggregate (G-1 status quo).
+        let mut r = Registry::new(RegistryKind::Milestone);
+        let id = r
+            .file(file_input(
+                RegistryKind::Milestone,
+                acct(1),
+                3,
+                FilingClass::Scope(1),
+            ))
+            .unwrap();
+        r.ack_observed(acct(2), 5, true, 3, id).unwrap();
+        r.ack_observed(acct(3), 6, true, 3, id).unwrap();
+        r.crank_close(REG_WINDOW_BLOCKS + 2, REG_CLOSE_BATCH)
+            .unwrap();
+        // The frozen spec is re-read on every load, so a target that goes unset
+        // between filing and close is the exact regression this pins.
+        r.milestone_target = 0;
+        assert_eq!(
+            r.close_epoch(3, REG_WINDOW_BLOCKS + 3, 10),
+            Err(Error::MilestoneTargetUnset)
+        );
+        // Status quo: no aggregate, and the pre-close bookkeeping is untouched.
+        assert_eq!(r.aggregate(3), None);
+        assert!(r.filing_count.iter().any(|(e, c)| *e == 3 && *c == 1));
+        assert!(r.filings.iter().any(|((e, _), _)| *e == 3));
+        r.try_state().unwrap();
+        // Restoring a positive target closes normally — the refusal is not terminal.
+        r.milestone_target = MILESTONE_TARGET_POINTS;
+        assert_eq!(
+            r.close_epoch(3, REG_WINDOW_BLOCKS + 3, 10),
+            Ok(FixedU64(250_000_000))
+        );
+    }
+
+    #[test]
+    fn a_zero_milestone_target_refuses_the_filing_at_the_door() {
+        // 07 §7 *Milestone normalization*: "until the MetricSpec surface carries
+        // the field no milestone component may be admitted". Admitting a filing
+        // whose epoch can never close would escrow a bond into an epoch that
+        // holds its `FilingCount` slot forever (close refuses ⇒ no reap), wedging
+        // the instance at `MAX_LIVE_EPOCHS`.
+        let mut r = Registry::new(RegistryKind::Milestone);
+        r.milestone_target = 0;
+        assert_eq!(
+            r.file(file_input(
+                RegistryKind::Milestone,
+                acct(1),
+                3,
+                FilingClass::Scope(1),
+            )),
+            Err(Error::MilestoneTargetUnset)
+        );
+        assert!(r.filings.is_empty());
+        assert!(r.filing_count.is_empty());
+        assert!(r.events.is_empty());
+        // The Incident instance never divides by a target and is unaffected.
+        let mut incident = Registry::new(RegistryKind::Incident);
+        incident.milestone_target = 0;
+        assert!(incident
+            .file(file_input(
+                RegistryKind::Incident,
+                acct(1),
+                3,
+                FilingClass::S2
+            ))
+            .is_ok());
     }
 }

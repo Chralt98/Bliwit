@@ -74,7 +74,10 @@ pub mod keeper {
         DecisionCritical,
         /// Best-effort work sharing the at-most-20% general tranche.
         General,
-        /// Oracle/registry work paid from the separate ORACLE budget line.
+        /// Dispute machinery paid from the separate ORACLE budget line — the
+        /// oracle's own cranks plus the registry cranks 07 §7 (*Crank funding
+        /// lines*) assigns there (`ack_observed`, `crank_close`). Archival
+        /// registry work (`reap_epoch`) is [`CrankClass::General`], not this.
         OracleLine,
     }
 

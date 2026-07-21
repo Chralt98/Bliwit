@@ -281,7 +281,7 @@ live. For mock data these are the correct realistic values.
 |---|---|---|
 | `orc.window` | 72 h challenge window per round | `challenge_deadline` countdown |
 | `orc.rounds` | 3 max | "Round 2 of 3" stepper |
-| `orc.bond_floor` / `orc.bond_bps` | 10k USDC / 250 bps; B₁ = max(floor, bps × stake-at-risk); doubles per round | bond calculator |
+| `orc.bond_floor` / `orc.bond_bps` | 10k USDC / 250 bps; B₁ = max(floor, ceil(bps × stake-at-risk / 10,000)); doubles per round; B₁ and R_max freeze per game at open | bond calculator |
 | `orc.reporter_stake` | 100,000 USDC | reporter registration |
 | `orc.n_min` | 3 reporters required | "awaiting reporters (2/3)" |
 | `wt.quorum` / `wt.stake` / `wt.max` | 2 acks / 25,000 USDC / ≤ 16 seats | watchtower quorum progress |

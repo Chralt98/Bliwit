@@ -113,6 +113,17 @@ parameter_types! {
     /// The Milestone completion target (frozen MetricSpec field, 07 §7 / 05 §4.4);
     /// overridable per-test to prove it is a seam, not the core's `100` default.
     pub static MilestoneTarget: u32 = 100;
+    /// The **live** `orc.window` / `wt.quorum` a META amendment may raise (07 §5,
+    /// 07 §14). The registry MUST NOT read either: 07 §7 (*Fixed windows and
+    /// quorum*) pins both registry instances to the kernel floors
+    /// `REG_WINDOW_BLOCKS` (72 h) and `WT_QUORUM` (2) as fixed constants, while
+    /// only the oracle's value-scaled §5 game tracks the raise. These statics
+    /// exist so a test can amend them upward and observe that registry behavior
+    /// does not move — and so any future refactor that plumbs a live value into
+    /// `RegistryParams` / `WatchtowerRegistry` (the natural place to wire these)
+    /// fails that test instead of silently changing the divergence (SQ-290).
+    pub static LiveOrcWindow: u32 = registry_core::REG_WINDOW_BLOCKS;
+    pub static LiveWtQuorum: u8 = registry_core::WT_QUORUM;
     /// `reg.archive_delay` in blocks — short for tests (the ledger uses 1 yr).
     pub const ArchiveDelay: u64 = 100;
     /// The registered bonded watchtowers (07 §4).
@@ -344,6 +355,8 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         FilingWindowEnd::set(1_000_000);
         FrozenSpec::set(3);
         MilestoneTarget::set(100);
+        LiveOrcWindow::set(registry_core::REG_WINDOW_BLOCKS);
+        LiveWtQuorum::set(registry_core::WT_QUORUM);
         RegisteredWatchtowers::set(alloc::vec::Vec::new());
         WelfareLog::set(alloc::vec::Vec::new());
         WelfareFails::set(false);

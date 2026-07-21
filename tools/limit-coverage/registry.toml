@@ -429,7 +429,7 @@ key = "orc.window"
 class = "dispatch-limit"
 genesis = true
 error = "Oracle::WindowClosed"
-reason = "13 §1 / 07 §5: the marked test drives the live-Params consumer (amend-then-observe boundary movement); the generated suite covers the amendment dispatch path."
+reason = "13 §1 / 07 §5: TWO consumers with deliberately different tracking (07 §7 *Fixed windows and quorum*, SQ-290). pallet-oracle reads the LIVE value — its marked test drives the amend-then-observe boundary movement; pallet-registry deliberately does NOT track it and pins the 72 h kernel floor REG_WINDOW_BLOCKS instead, so a META raise to <= 120 h moves the oracle's window and leaves both registry instances at 72 h — its marked test amends the live value upward and asserts the registry boundary does not move. The generated suite covers the amendment dispatch path."
 
 [[entry]]
 key = "orc.rep_stake"
@@ -447,7 +447,7 @@ reason = "13 §1: derived B_1(c,m) at the dispute engine; intentionally unseeded
 key = "wt.quorum"
 class = "param-bounds"
 genesis = true
-reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key suite; the oracle consumer reads live Params (genesis-default fallback) since B10."
+reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key suite. TWO consumers with deliberately different tracking (07 §7 *Fixed windows and quorum*, SQ-290): the oracle consumer reads live Params (genesis-default fallback) since B10 and therefore tracks a META raise upward, while pallet-registry deliberately does NOT track it and pins the WT_QUORUM = 2 kernel floor for unchallenged closure — pinned by `registry_quorum_does_not_track_a_raised_wt_quorum` (no limit-coverage marker: the key is param-bounds, not dispatch-limit)."
 
 [[entry]]
 key = "wt.stake"
@@ -738,6 +738,12 @@ key = "MAX_NESTED"
 class = "dispatch-limit"
 error = "frame_system::CallFiltered"
 reason = "13 §2; 15 §4.6: dispatch-path limit coverage."
+
+[[entry]]
+key = "MAX_PAYLOAD_DECODE_DEPTH"
+class = "dispatch-limit"
+behavior = "decode_all_with_depth_limit"
+reason = "13 §2 / 09 §1.2(11) (SQ-225): the guard's preimage decode bails at the depth limit and fails closed, so an over-deep hash-committed preimage resolves to BadPreimage instead of recursing into a wasm stack-height trap. The bound is enforced by the codec below the pallet boundary, so the SQ-156 behavior binding applies rather than a Module error."
 
 [[entry]]
 key = "lmsr-domain-bound"
