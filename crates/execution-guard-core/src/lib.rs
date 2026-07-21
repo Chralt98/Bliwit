@@ -339,7 +339,6 @@ pub struct ExecutionGuard {
     pub pending_upgrade: Option<PendingUpgrade>,
     pub current_spec_name: RuntimeVersionConstraint,
     pub held_resources: Vec<(ProposalId, ResourceId)>,
-    pub blocked_meters: Vec<ResourceId>,
     /// Differential projection of the pallet's epoch-scoped gate suspension.
     pub gate_suspended: bool,
     pub hard_gate_breach: bool,
@@ -356,7 +355,6 @@ impl ExecutionGuard {
             pending_upgrade: None,
             current_spec_name,
             held_resources: Vec::new(),
-            blocked_meters: Vec::new(),
             gate_suspended: false,
             hard_gate_breach: false,
             dead_man_freeze: false,
@@ -750,12 +748,12 @@ impl ExecutionGuard {
                 Error::AttestationMissing
             );
         }
-        ensure!(
-            q.meters_declared
-                .iter()
-                .all(|m| !self.blocked_meters.contains(m)),
-            Error::MetersBlocked
-        );
+        // Rate-meter admission (09 §1.2(7)) is enforced at the runtime layer:
+        // the dispatched treasury/issuance calls meter themselves, and the
+        // `code.spacing` meter is checked in the pallet. The former
+        // `BlockedMeters` generic-resource set was retired as inert — it never
+        // had a production writer (SQ-146) — so no meter check remains in the
+        // frame-free core.
         ensure!(
             q.meters_declared
                 .iter()
@@ -907,10 +905,12 @@ impl ExecutionGuard {
                     }
                     (true, _) => RatificationStatus::NoPassedRecord,
                 },
-                meters_clear: q
-                    .meters_declared
-                    .iter()
-                    .all(|m| !self.blocked_meters.contains(m)),
+                // 02 §4 field "rate meters would admit execution now". The
+                // frame-free core cannot preview the runtime treasury/issuance
+                // meters, and the retired `BlockedMeters` set (SQ-146) was
+                // always empty, so this was already unconditionally `true`.
+                // A live preview at the runtime view layer is deferred (SQ-461).
+                meters_clear: true,
             })
             .collect()
     }
@@ -1235,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn stale_version_and_meter_contention_block_execution() {
+    fn stale_version_blocks_execution() {
         let mut g = ExecutionGuard::new(vc(2));
         let calls = vec![call(CallDomain::Param)];
         let mut q = queued(ProposalClass::Param);
@@ -1249,13 +1249,6 @@ mod tests {
             g.check_dispatch_time(&g.queue[0], &guardian, &att, &pl(calls.clone()), 10)
                 .unwrap_err(),
             Error::StaleQueue
-        );
-        g.current_spec_name = vc(1);
-        g.blocked_meters.push(*b"resource");
-        assert_eq!(
-            g.check_dispatch_time(&g.queue[0], &guardian, &att, &pl(calls), 10)
-                .unwrap_err(),
-            Error::MetersBlocked
         );
     }
 

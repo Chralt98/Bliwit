@@ -171,14 +171,15 @@ fn queue_view_exposes_sorted_core_projection_and_meter_state() {
         meters.sort_unstable();
         meters.dedup();
         assert!(!meters.is_empty());
-        BlockedMeters::<Test>::put(BoundedVec::try_from(meters).expect("two blocked meters fit"));
 
         let view = GuardPallet::queue_view();
         assert_eq!(
             view.iter().map(|entry| entry.pid).collect::<Vec<_>>(),
             vec![1, 2]
         );
-        assert!(view.iter().all(|entry| !entry.meters_clear));
+        // `meters_clear` is unconditionally `true` after the SQ-146 retirement of
+        // the inert `BlockedMeters` set (a live preview is deferred, SQ-461).
+        assert!(view.iter().all(|entry| entry.meters_clear));
         assert!(view.iter().all(|entry| matches!(
             entry.ratification,
             futarchy_primitives::RatificationStatus::NotRequired
@@ -672,14 +673,6 @@ fn ordered_checks_6_to_10_reject_capability_meter_lock_guardian_and_freezes() {
         assert_noop!(
             GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
             Error::<Test>::CapabilityDenied
-        );
-    });
-    new_test_ext().execute_with(|| {
-        setup_param(1, 1);
-        BlockedMeters::<Test>::put(BoundedVec::try_from(vec![[1; 8]]).expect("one blocked meter"));
-        assert_noop!(
-            GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
-            Error::<Test>::MetersBlocked
         );
     });
     new_test_ext().execute_with(|| {
@@ -1872,12 +1865,6 @@ fn try_state_covers_bounds_bindings_locks_and_i7_i17_envelope() {
         CodeSpacing::set(0);
         assert!(GuardPallet::do_try_state().is_err());
     });
-    new_test_ext().execute_with(|| {
-        BlockedMeters::<Test>::put(
-            BoundedVec::try_from(vec![[1; 8], [1; 8]]).expect("two meters fit"),
-        );
-        assert!(GuardPallet::do_try_state().is_err());
-    });
 }
 
 struct DifferentialEpoch;
@@ -1923,10 +1910,6 @@ fn assert_shell_matches_core(model: &execution_guard_core::ExecutionGuard) {
     let mut model_held = model.held_resources.clone();
     model_held.sort();
     assert_eq!(shell_held.encode(), model_held.encode());
-    assert_eq!(
-        BlockedMeters::<Test>::get().into_inner(),
-        model.blocked_meters
-    );
     assert_eq!(HardGateBreach::<Test>::get(), model.hard_gate_breach);
     assert_eq!(DeadManFreeze::<Test>::get(), model.dead_man_freeze);
     assert_eq!(MigrationHalt::<Test>::get(), model.migration_halt);

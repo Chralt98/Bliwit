@@ -617,8 +617,6 @@ fn telemetry_collateral_reuses_ledger_l2_and_flags_only_positive_residue(
 #[test]
 fn telemetry_migration_stall_reports_latched_and_live_detector_states() -> Result<(), &'static str>
 {
-    use parity_scale_codec::Encode;
-
     tests::development_ext().execute_with(|| {
         assert!(!crate::telemetry::migration_cursor_stalled());
 
@@ -633,17 +631,18 @@ fn telemetry_migration_stall_reports_latched_and_live_detector_states() -> Resul
         assert!(crate::telemetry::migration_cursor_stalled());
 
         crate::configs::MigrationHaltSources::put(0);
+        // The stall predicate now reads the SDK `cursor.started_at` directly
+        // (SQ-132(d)(i)); no runtime progress marker is primed. A cursor whose
+        // start block is > MIGRATION_STALL_BLOCKS in the past is stalled.
         let since = System::block_number().saturating_add(1);
         let cursor = pallet_migrations::ActiveCursor {
             index: 2,
             inner_cursor: Some(BoundedVec::truncate_from(vec![1, 2, 3])),
             started_at: since,
         };
-        let marker = sp_io::hashing::blake2_256(&(cursor.index, &cursor.inner_cursor).encode());
         pallet_migrations::Cursor::<Runtime>::put(pallet_migrations::MigrationCursor::Active(
             cursor,
         ));
-        crate::configs::MigrationProgressMarker::put((marker, since));
         System::set_block_number(
             since
                 .saturating_add(futarchy_primitives::kernel::MIGRATION_STALL_BLOCKS)

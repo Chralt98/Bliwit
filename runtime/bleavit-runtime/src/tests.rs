@@ -6631,7 +6631,6 @@ fn valid_zero_mbm_recovery_image_clears_migration_failure_and_stall_sources() {
         assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
         assert_eq!(crate::configs::MigrationHaltSources::get(), 0);
         assert!(crate::configs::MigrationFailedStep::get().is_none());
-        assert!(crate::configs::MigrationProgressMarker::get().is_none());
     });
 }
 
@@ -9669,24 +9668,9 @@ fn queue_meters_are_rederived_from_the_batch_not_copied_from_resource_locks() {
         assert!(queued.meters_declared.iter().all(|meter| {
             pallet_execution_guard::HeldResources::<Runtime>::get().contains(&(PID, *meter))
         }));
-
-        let blocked = match pallet_execution_guard::pallet::StoredBlockedMeters::try_from(
-            queued.meters_declared.to_vec(),
-        ) {
-            Ok(blocked) => blocked,
-            Err(_) => {
-                assert!(false, "derived queue meters must fit the live-meter bound");
-                return;
-            }
-        };
-        pallet_execution_guard::BlockedMeters::<Runtime>::put(blocked);
-        System::set_block_number(maturity);
-        assert_eq!(
-            ExecutionGuard::execute(RuntimeOrigin::signed(account(148)), PID)
-                .map_err(|error| error.error),
-            Err(pallet_execution_guard::Error::<Runtime>::MetersBlocked.into()),
-        );
-        assert!(pallet_execution_guard::Queue::<Runtime>::contains_key(PID));
+        // (The former `BlockedMeters`-set → `MetersBlocked` execute assertion was
+        // removed with that inert storage item, SQ-146. The re-derivation of live
+        // meters above is this test's subject.)
     });
 }
 
@@ -13824,7 +13808,7 @@ fn view_account_positions_includes_baseline_instruments_and_terminal_state() {
 
 #[test]
 fn view_execution_queue_reuses_guard_projection_and_fails_closed() {
-    use pallet_execution_guard::pallet::{StoredBlockedMeters, StoredMeters};
+    use pallet_execution_guard::pallet::StoredMeters;
 
     development_ext().execute_with(|| {
         let version = pallet_execution_guard::CurrentSpecName::<Runtime>::get()
@@ -13853,17 +13837,15 @@ fn view_execution_queue_reuses_guard_projection_and_fails_closed() {
                 },
             );
         }
-        pallet_execution_guard::BlockedMeters::<Runtime>::put(
-            StoredBlockedMeters::try_from(vec![meter]).expect("one blocked meter fits"),
-        );
-
         let view = crate::views::execution_queue();
         assert_eq!(
             view.iter().map(|entry| entry.pid).collect::<Vec<_>>(),
             (1..=32).collect::<Vec<_>>()
         );
         assert_eq!(view.len(), 32);
-        assert!(view.iter().all(|entry| !entry.meters_clear));
+        // `meters_clear` is unconditionally `true` after the SQ-146 retirement of
+        // the inert `BlockedMeters` set (live preview deferred, SQ-461).
+        assert!(view.iter().all(|entry| entry.meters_clear));
         assert!(view.iter().all(|entry| matches!(
             entry.ratification,
             futarchy_primitives::RatificationStatus::NotRequired

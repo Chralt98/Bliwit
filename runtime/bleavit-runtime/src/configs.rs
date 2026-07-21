@@ -72,7 +72,13 @@ parameter_types! {
     pub const Ss58Prefix: u16 = chain_identity::SS58_PREFIX;
 }
 
-type SingleBlockMigrations = ();
+// B16: this runtime's first storage migration — retires the inert
+// `ExecutionGuard::BlockedMeters` (SQ-146) and the runtime stall-progress marker
+// (SQ-132), gated on `pallet-execution-guard` storage version `0 -> 1`. See
+// `crate::migrations`. NB: `SingleBlockMigrations` runs inside `on_runtime_upgrade`
+// and creates **no** `pallet-migrations` cursor, so it never engages the
+// `OnlyInherents` multi-block-migration lockdown (09 §3.2).
+type SingleBlockMigrations = (crate::migrations::RetireB16State,);
 
 #[derive_impl(frame_system::config_preludes::ParaChainDefaultConfig)]
 impl frame_system::Config for Runtime {
@@ -450,18 +456,10 @@ pub type MigrationFailedStep = frame_support::storage::types::StorageValue<
     frame_support::pallet_prelude::OptionQuery,
 >;
 
-pub struct MigrationProgressMarkerStorage;
-impl StorageInstance for MigrationProgressMarkerStorage {
-    fn pallet_prefix() -> &'static str {
-        "BleavitRuntimeMigration"
-    }
-    const STORAGE_PREFIX: &'static str = "ProgressMarker";
-}
-pub type MigrationProgressMarker = frame_support::storage::types::StorageValue<
-    MigrationProgressMarkerStorage,
-    ([u8; 32], BlockNumber),
-    frame_support::pallet_prelude::OptionQuery,
->;
+// The runtime stall-progress marker (`BleavitRuntimeMigration::ProgressMarker`)
+// and its blake2 cursor hash were retired by B16 (SQ-132): the stall predicate
+// now reads the SDK `cursor.started_at` directly (09 §3.2(d)(i)). The orphaned
+// key is cleared by `crate::migrations::RetireB16State`.
 
 const MIGRATION_FAILURE_HALT: u8 = 0b001;
 pub(crate) const MIGRATION_STALL_HALT: u8 = 0b010;
@@ -475,11 +473,30 @@ fn sync_execution_migration_halt(sources: u8) {
 }
 
 fn set_migration_halt_source(source: u8) {
-    let sources = MigrationHaltSources::mutate(|sources| {
+    let (previous, sources) = MigrationHaltSources::mutate(|sources| {
+        let previous = *sources;
         *sources |= source;
-        *sources
+        (previous, *sources)
     });
     sync_execution_migration_halt(sources);
+    // 09 §3.2(4): emit the `MigrationHalted` diagnostic on the *first* activation
+    // of the halt — the transition from no execution-halt source to one —
+    // carrying the SDK cursor's exact bytes and reported failed step. The event
+    // is off the frozen 02 §6 ingest set by that section's (a)-(c) rule (an
+    // operator/monitoring diagnostic, 12 §6.3), so it carries no contract bump.
+    if previous & EXECUTION_HALT_SOURCES == 0 && sources & EXECUTION_HALT_SOURCES != 0 {
+        emit_migration_halted();
+    }
+}
+
+fn emit_migration_halted() {
+    let cursor_bytes = pallet_migrations::Cursor::<Runtime>::get()
+        .map(|cursor| cursor.encode())
+        .unwrap_or_default();
+    // `truncate_from` only truncates in the pathological CursorMaxLen case; a
+    // real cursor's exact bytes fit. A source-less halt yields empty bytes.
+    let cursor = pallet_execution_guard::pallet::MigrationHaltCursor::truncate_from(cursor_bytes);
+    crate::ExecutionGuard::note_migration_halted(cursor, MigrationFailedStep::get());
 }
 
 fn clear_migration_halt_sources(mask: u8) {
@@ -488,12 +505,6 @@ fn clear_migration_halt_sources(mask: u8) {
         *sources
     });
     sync_execution_migration_halt(remaining);
-}
-
-fn active_migration_marker(cursor: &pallet_migrations::ActiveCursorOf<Runtime>) -> [u8; 32] {
-    // `started_at` is lifecycle metadata, not cursor progress. Track the MBM
-    // index and the migration-owned cursor bytes that `step` actually returns.
-    sp_io::hashing::blake2_256(&(cursor.index, &cursor.inner_cursor).encode())
 }
 
 pub(crate) fn retire_stuck_migration_cursor_for_remediation() -> bool {
@@ -507,7 +518,6 @@ pub(crate) fn retire_stuck_migration_cursor_for_remediation() -> bool {
     };
     if retire {
         pallet_migrations::Cursor::<Runtime>::kill();
-        MigrationProgressMarker::kill();
     }
     retire
 }
@@ -515,39 +525,33 @@ pub(crate) fn retire_stuck_migration_cursor_for_remediation() -> bool {
 pub(crate) fn active_migration_stall_is_live(
     cursor: &pallet_migrations::ActiveCursorOf<Runtime>,
 ) -> bool {
-    MigrationProgressMarker::get().is_some_and(|(marker, since)| {
-        marker == active_migration_marker(cursor)
-            && System::block_number().saturating_sub(since) > kernel::MIGRATION_STALL_BLOCKS
-    })
+    // 09 §3.2(d): a migration is stalled iff its own start block is more than
+    // MIGRATION_STALL_BLOCKS in the past — read from the SDK's own `started_at`
+    // (SQ-132(d)(i)), never a runtime-maintained progress marker. It is a pure
+    // function of state `pallet-migrations` already keeps, so a lawful migration
+    // that drains a map while returning byte-identical cursors never false-raises.
+    System::block_number().saturating_sub(cursor.started_at) > kernel::MIGRATION_STALL_BLOCKS
 }
 
 fn track_migration_progress() {
-    let now = System::block_number();
     match pallet_migrations::Cursor::<Runtime>::get() {
         Some(pallet_migrations::MigrationCursor::Active(cursor)) => {
-            let marker = active_migration_marker(&cursor);
-            match MigrationProgressMarker::get() {
-                Some((previous, since)) if previous == marker => {
-                    // A lawful `SteppedMigration::step` may mutate storage yet
-                    // return identical cursor bytes. Such work lasting >900
-                    // blocks can conservatively false-trigger this bounded,
-                    // deterministic tracker. The halt self-clears when
-                    // `completed()` fires; the normative semantic definition
-                    // of "stalled" remains an open specification question.
-                    if now.saturating_sub(since) > kernel::MIGRATION_STALL_BLOCKS {
-                        set_migration_halt_source(MIGRATION_STALL_HALT);
-                    }
-                }
-                _ => MigrationProgressMarker::put((marker, now)),
+            // Backstop only. Every registered MBM declares
+            // `max_steps < MIGRATION_STALL_BLOCKS`, and their sum is likewise
+            // bounded (integrity test, 09 §3.2(d)(ii)/(iii)), so the SDK's own
+            // budget fires arm 1 (*failed migration step*) strictly before this
+            // stall block is reached. This arm can fire only if that build-time
+            // enforcement is bypassed.
+            if active_migration_stall_is_live(&cursor) {
+                set_migration_halt_source(MIGRATION_STALL_HALT);
             }
         }
         Some(pallet_migrations::MigrationCursor::Stuck) => {
             // The failure callback normally records this first. Seeing an
             // externally restored stuck cursor is still a machine trigger.
             set_migration_halt_source(MIGRATION_FAILURE_HALT);
-            MigrationProgressMarker::kill();
         }
-        None => MigrationProgressMarker::kill(),
+        None => {}
     }
 }
 
@@ -599,7 +603,6 @@ impl frame_support::migrations::MigrationStatusHandler for MigrationStatusToGuar
 
     fn completed() {
         MigrationFailedStep::kill();
-        MigrationProgressMarker::kill();
         crate::ExecutionGuard::migration_completed();
         // MBM completion clears only migration failure/stall sources. An
         // applied-code mismatch remains halted until a later valid applied
@@ -5274,7 +5277,6 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
             set_migration_halt_source(APPLIED_DETECTION_HALT);
         } else {
             MigrationFailedStep::kill();
-            MigrationProgressMarker::kill();
             // A valid recovery image may intentionally carry zero MBMs, in
             // which case `MigrationStatusHandler::completed()` never fires.
             // Any MBM in the new image that later fails/stalls re-raises its

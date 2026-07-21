@@ -818,20 +818,6 @@ fn benchmark_fill_records() {
 }
 
 #[cfg(feature = "runtime-benchmarks")]
-fn benchmark_fill_envelopes() {
-    let blocked = (0..MAX_BLOCKED_METERS_BOUND)
-        .map(|index| {
-            let mut meter = [0xff; 8];
-            meter[4..8].copy_from_slice(&index.to_le_bytes());
-            meter
-        })
-        .collect::<Vec<_>>();
-    if let Ok(blocked) = StoredBlockedMeters::try_from(blocked) {
-        BlockedMeters::<Test>::put(blocked);
-    }
-}
-
-#[cfg(feature = "runtime-benchmarks")]
 fn benchmark_fill_upgrade_history(now: BlockNumber) {
     let spacing = CodeSpacing::get();
     let count = MAX_EXECUTION_RECORDS as BlockNumber;
@@ -929,7 +915,6 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         );
         benchmark_fill_queue();
         benchmark_fill_records();
-        benchmark_fill_envelopes();
         benchmark_fill_ratifications();
     }
     fn prime_execute(pid: ProposalId, calls: u32) {
@@ -959,7 +944,6 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         .expect("benchmark Code queue ratification must succeed");
         benchmark_fill_queue();
         benchmark_fill_records();
-        benchmark_fill_envelopes();
         run_to_maturity(pid);
         benchmark_fill_upgrade_history(System::block_number().saturated_into());
     }
@@ -974,7 +958,6 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         );
         benchmark_fill_queue();
         benchmark_fill_records();
-        benchmark_fill_envelopes();
         run_to_maturity(pid);
         set_dispatch_failure(true);
         let _ = ExecutionGuard::execute(RuntimeOrigin::signed(keeper()), pid);
@@ -999,7 +982,6 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         );
         benchmark_fill_queue();
         benchmark_fill_records();
-        benchmark_fill_envelopes();
         let _ = ExecutionGuard::ratify(
             RuntimeOrigin::from(pallet_origins::Origin::ConstitutionalValues),
             1,
@@ -1023,7 +1005,6 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         );
         benchmark_fill_queue();
         benchmark_fill_records();
-        benchmark_fill_envelopes();
         CurrentSpecName::<Test>::put(spec(99));
     }
 }

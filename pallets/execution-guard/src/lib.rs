@@ -65,7 +65,6 @@ pub const MAX_CALLS_BOUND: u32 = MAX_CALLS as u32;
 pub const MAX_DOMAINS_BOUND: u32 = MAX_DECLARED_DOMAINS as u32;
 pub const MAX_LOCKS_PER_PROPOSAL_BOUND: u32 = MAX_RESOURCE_LOCKS as u32;
 pub const MAX_HELD_RESOURCES_BOUND: u32 = MAX_QUEUE_BOUND * MAX_LOCKS_PER_PROPOSAL_BOUND;
-pub const MAX_BLOCKED_METERS_BOUND: u32 = futarchy_primitives::bounds::MAX_METERS;
 pub const MAX_RATIFICATIONS_BOUND: u32 =
     futarchy_primitives::bounds::INTAKE_QUEUE + futarchy_primitives::bounds::MAX_LIVE_PROPOSALS;
 
@@ -291,7 +290,12 @@ pub mod pallet {
         SaturatedConversion, TryRuntimeError,
     };
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    // Bumped 0 -> 1 by B16 (SQ-132/SQ-146): the first storage migration this
+    // runtime has ever shipped retires `BlockedMeters` (inert, no production
+    // writer) and the runtime-level `MigrationProgressMarker`/cursor-hash. The
+    // versioned migration that clears both keys lives in
+    // `runtime::migrations::RetireB16State` and is gated on this version.
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -331,9 +335,15 @@ pub mod pallet {
     pub type StoredRecords = BoundedVec<ExecutionRecord, ConstU32<MAX_RECORDS_BOUND>>;
     pub type StoredHeldResources =
         BoundedVec<(ProposalId, ResourceId), ConstU32<MAX_HELD_RESOURCES_BOUND>>;
-    pub type StoredBlockedMeters = BoundedVec<ResourceId, ConstU32<MAX_BLOCKED_METERS_BOUND>>;
     pub type StoredUpgradeSpacingHistory =
         BoundedVec<(BlockNumber, BlockNumber), ConstU32<MAX_RECORDS_BOUND>>;
+    /// Bound for the diagnostic cursor bytes carried by [`Event::MigrationHalted`]
+    /// (09 §3.2(4)). Matches the runtime `pallet-migrations` `CursorMaxLen`
+    /// (`MIGRATION_CURSOR_MAX_LEN`) so a real cursor's exact bytes always fit; the
+    /// runtime truncates defensively rather than fail if that pathological max is
+    /// ever met.
+    pub type MigrationHaltCursor =
+        BoundedVec<u8, ConstU32<{ futarchy_primitives::bounds::MIGRATION_CURSOR_MAX_LEN }>>;
     pub type RuntimeBatch<T> =
         BoundedVec<<T as frame_system::Config>::RuntimeCall, ConstU32<MAX_CALLS_BOUND>>;
     pub type RuntimeCode<T> = BoundedVec<u8, <T as Config>::MaxRuntimeCodeBytes>;
@@ -453,9 +463,6 @@ pub mod pallet {
     pub type HeldResources<T: Config> = StorageValue<_, StoredHeldResources, ValueQuery>;
 
     #[pallet::storage]
-    pub type BlockedMeters<T: Config> = StorageValue<_, StoredBlockedMeters, ValueQuery>;
-
-    #[pallet::storage]
     pub type HardGateBreach<T: Config> = StorageValue<_, bool, ValueQuery>;
 
     #[pallet::storage]
@@ -562,6 +569,18 @@ pub mod pallet {
         PendingOutflowSyncFailed {
             queued: u32,
             fail_static: bool,
+        },
+        /// PB-MIGRATION machine-trigger diagnostic (09 §3.2(4)): emitted on the
+        /// first activation of a migration halt source (failed step, stall, or
+        /// applied-code mismatch). `cursor` carries the SDK cursor's exact bytes
+        /// (empty for a source-less halt); `failed_step` is the SDK-reported step
+        /// index. This is an operator/monitoring diagnostic (12 §6.3, RB-UPGRADE),
+        /// **outside** the frozen 02 §6 ingest set by that section's (a)-(c) rule
+        /// — the same off-contract class as `PendingOutflowSyncFailed`, so it
+        /// carries no `INTEGRATION_CONTRACT_VERSION` bump.
+        MigrationHalted {
+            cursor: MigrationHaltCursor,
+            failed_step: Option<u32>,
         },
     }
 
@@ -1067,6 +1086,17 @@ pub mod pallet {
             PreMigrationAnchor::<T>::kill();
         }
 
+        /// Deposit the PB-MIGRATION [`Event::MigrationHalted`] diagnostic
+        /// (09 §3.2(4)). Called by the runtime halt-source bridge on the first
+        /// activation of an execution-halt source, carrying the SDK cursor's
+        /// exact bytes and reported failed step. Off the 02 §6 ingest set.
+        pub fn note_migration_halted(cursor: MigrationHaltCursor, failed_step: Option<u32>) {
+            Self::deposit_event(Event::MigrationHalted {
+                cursor,
+                failed_step,
+            });
+        }
+
         pub fn queue_reject_reason(pid: ProposalId) -> Option<RejectReason> {
             let queued = Queue::<T>::get(pid)?;
             let now = Self::now();
@@ -1095,9 +1125,11 @@ pub mod pallet {
         }
 
         /// Read-only 02 §3 execution-queue projection. Hydration sorts by
-        /// proposal id and [`ExecutionGuard::view`] single-homes ratification
-        /// and blocked-meter semantics. A missing/invalid runtime version is a
-        /// G-1 empty sentinel rather than a partially trusted queue.
+        /// proposal id and [`ExecutionGuard::view`] single-homes ratification.
+        /// `QueuedExecutionView.meters_clear` is `true` post-SQ-146 retirement of
+        /// the inert `BlockedMeters` set; a live rate-meter preview is deferred
+        /// (SQ-461). A missing/invalid runtime version is a G-1 empty sentinel
+        /// rather than a partially trusted queue.
         pub fn queue_view() -> Vec<futarchy_primitives::QueuedExecutionView> {
             match Self::load() {
                 Ok(guard) => guard.view(),
@@ -1213,15 +1245,10 @@ pub mod pallet {
                 );
             }
 
-            // (7) rate meters.
-            let blocked = BlockedMeters::<T>::get();
-            ensure!(
-                queued
-                    .meters_declared
-                    .iter()
-                    .all(|meter| !blocked.contains(meter)),
-                Error::<T>::MetersBlocked
-            );
+            // (7) rate meters (09 §1.2(7)). The `code.spacing` meter is checked
+            // here; treasury/issuance meters are enforced by the dispatched
+            // calls themselves. The former generic `BlockedMeters` resource set
+            // was retired as inert — it never had a production writer (SQ-146).
             if queued
                 .declared_domains
                 .contains(&CallDomain::InternalRootAuthorizeUpgrade)
@@ -1736,7 +1763,6 @@ pub mod pallet {
                 pending_upgrade: PendingUpgrade::<T>::get(),
                 current_spec_name: Self::current_spec()?,
                 held_resources: HeldResources::<T>::get().into_inner(),
-                blocked_meters: BlockedMeters::<T>::get().into_inner(),
                 gate_suspended: T::Guardian::gate_suspended(),
                 hard_gate_breach: HardGateBreach::<T>::get(),
                 dead_man_freeze: DeadManFreeze::<T>::get(),
@@ -1759,8 +1785,6 @@ pub mod pallet {
                 .map_err(|_| Error::<T>::QueueFull)?;
             let held = StoredHeldResources::try_from(state.held_resources.clone())
                 .map_err(|_| Error::<T>::TooManyLocks)?;
-            let blocked = StoredBlockedMeters::try_from(state.blocked_meters.clone())
-                .map_err(|_| Error::<T>::MetersBlocked)?;
 
             let old = Queue::<T>::iter_keys().collect::<Vec<_>>();
             for pid in old {
@@ -1776,7 +1800,6 @@ pub mod pallet {
             }
             CurrentSpecName::<T>::put(state.current_spec_name);
             HeldResources::<T>::put(held);
-            BlockedMeters::<T>::put(blocked);
             HardGateBreach::<T>::put(state.hard_gate_breach);
             DeadManFreeze::<T>::put(state.dead_man_freeze);
             MigrationHalt::<T>::put(state.migration_halt);
@@ -1969,14 +1992,6 @@ pub mod pallet {
                 {
                     return Err(TryRuntimeError::Other(
                         "execution guard duplicate/orphan resource lock",
-                    ));
-                }
-            }
-            let blocked = BlockedMeters::<T>::get();
-            for (index, meter) in blocked.iter().enumerate() {
-                if blocked.iter().take(index).any(|seen| seen == meter) {
-                    return Err(TryRuntimeError::Other(
-                        "execution guard duplicate blocked meter",
                     ));
                 }
             }
