@@ -53,6 +53,59 @@ CORETIME_OPS_SEATS = (
     ("coretimeQuoteAuthority", "operations quote authority", "ss58"),
     ("coretimeRenewalAccount", "Coretime-side renewal account", "bytes32"),
 )
+# 03 §7 R-4. Single-sourced in the runtime as
+# futarchy_primitives::currency::USDC_CENT.
+USDC_MIN_BALANCE = 10_000
+# staging-xcm 24's derived serde shape for identity.rs::usdc_location():
+# Location::new(1, [Parachain(1000), PalletInstance(50), GeneralIndex(1337)]).
+USDC_LOCATION = {
+    "parents": 1,
+    "interior": {
+        "X3": [
+            {"Parachain": 1000},
+            {"PalletInstance": 50},
+            {"GeneralIndex": 1337},
+        ]
+    },
+}
+# AccountIdConversion for PalletId: b"modl" + the 8-byte PalletId + optional
+# 8-byte sub-seed, then zero-padding to AccountId32. Each entry remains
+# re-derivable beside the hardcoded ss58-7777 presentation string.
+USDC_ENDOWED_ACCOUNTS = {
+    # PalletId b"bl/ledgr", no sub-seed.
+    "ledger_sovereign": "fvGJck7fS1t2ejm7TyRMiteKHuDAN2G8Fb4bUq4N7pC8vwE3u",
+    # PalletId b"bl/ledgr", sub-seed b"INSURANC".
+    "ledger_insurance": "fvGJck7fS1t2ejm7TyRhcrwJWAdTsdZmqdcDWshHCJSChV9T5",
+    # PalletId b"bl/ledgr", sub-seed b"BOOK____".
+    "ledger_book": "fvGJck7fS1t2ejm7TyRfijG5qkHRwtNmqApPRwj8LQ5WNnGPr",
+    # PalletId b"bl/ledgr", sub-seed b"POL_____".
+    "ledger_pol": "fvGJck7fS1t2ejm7TyRjX7bM8xnwS4uv4wdQH8yP4R5nmPEgM",
+    # PalletId b"bl/ledgr", sub-seed b"POL_BASE".
+    "ledger_pol_baseline": "fvGJck7fS1t2ejm7TyRjX7bM7kkEJajB9AgQLpGFXKK6kMrtc",
+    # PalletId b"bl/ledgr", sub-seed b"FEES____".
+    "ledger_fees": "fvGJck7fS1t2ejm7TyRgo5ZdbDuPx4SuWAYZcGNkExrk7XAN9",
+    # PalletId b"bl/ledgr", sub-seed b"TREASRY_".
+    "ledger_treasury": "fvGJck7fS1t2ejm7TyRkcGJM9ZWMGqjUwaeas8gJnGJ7e7E7y",
+    # PalletId b"bl/trsry", no sub-seed.
+    "treasury_main": "fvGJck7fS1t2fpsb9pvvJ2EYTyx6sgq1NkVTTZqzwipoLqtzp",
+    # PalletId b"bl/trsry", sub-seed b"KEEPER__".
+    "treasury_keeper": "fvGJck7fS1t2fpsb9pwGivHa8vtqjyagJ7ewS1GG86JyNUMK4",
+    # PalletId b"bl/trsry", sub-seed b"ORACLE__".
+    "treasury_oracle": "fvGJck7fS1t2fpsb9pwHpghdH5GxgxAp1Ry3utTBSxzNF4xkN",
+}
+# 09 §4/§6.1: DOT is held locally under the parent Location and funds coretime
+# renewal. `identity.rs::dot_location()` is `Location::parent()`, and
+# `Junctions::Here` is a unit variant of a plain-derive enum, so its serde shape
+# is the bare string "Here".
+DOT_LOCATION = {"parents": 1, "interior": "Here"}
+DOT_MIN_BALANCE = 1
+# Every asset the runtime declares in `foreignAssets.assets` at genesis, with
+# the doc section that owns it. Both carry the same catastrophic authority if
+# their owner is wrong, so both are gated identically.
+DECLARED_ASSETS = {
+    "USDC": (USDC_LOCATION, USDC_MIN_BALANCE, "03 §7 R-4"),
+    "DOT": (DOT_LOCATION, DOT_MIN_BALANCE, "09 §4/§6.1"),
+}
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 BASE58_VALUES = {character: index for index, character in enumerate(BASE58_ALPHABET)}
 
@@ -130,6 +183,12 @@ def ss58_account_id(address: str) -> bytes | None:
     return decoded[prefix_length:-2]
 
 
+def pallet_sub_account(pallet_id: bytes, sub: bytes | None = None) -> bytes:
+    """Derive AccountId32 exactly as AccountIdConversion for PalletId does."""
+    encoded = b"modl" + pallet_id + (sub or b"")
+    return encoded.ljust(32, b"\0")[:32]
+
+
 def contains_todo(value: Any) -> bool:
     if isinstance(value, str):
         return "TODO" in value
@@ -138,6 +197,191 @@ def contains_todo(value: Any) -> bool:
     if isinstance(value, dict):
         return any(contains_todo(key) or contains_todo(item) for key, item in value.items())
     return False
+
+
+def validate_declared_asset(
+    asset_rows: list[Any],
+    label: str,
+    location: dict[str, Any],
+    minimum_balance: int,
+    citation: str,
+    failures: list[str],
+) -> None:
+    """Require the full canonical `foreignAssets.assets` row for one asset.
+
+    `pallet-assets` genesis rows are `(id, owner, is_sufficient, min_balance)`,
+    and its `build` installs `owner` as owner AND issuer AND admin AND freezer
+    — mint, burn and freeze authority over every unit of the asset on chain.
+    Matching only the Location and `min_balance` would therefore let a release
+    pass a spec that hands an external key control of protocol collateral, or
+    that clears `is_sufficient` (03 §7 R-4's opening clause for USDC, and what
+    keeps the endowed protocol accounts alive without provider references).
+    All four fields are checked, and the owner must be the ledger sovereign
+    that `runtime/bleavit-runtime/src/genesis.rs` derives.
+    """
+    expected_owner = ss58_account_id(USDC_ENDOWED_ACCOUNTS["ledger_sovereign"])
+    if expected_owner is None:
+        failures.append(
+            f"{citation}: validator has an invalid derived ledger sovereign address"
+        )
+        return
+
+    matches = [
+        row
+        for row in asset_rows
+        if isinstance(row, list) and len(row) == 4 and row[0] == location
+    ]
+    if not matches:
+        failures.append(
+            f"{citation}: foreignAssets.assets must declare the canonical "
+            f"{label} Location"
+        )
+        return
+    if len(matches) > 1:
+        failures.append(
+            f"{citation}: foreignAssets.assets declares the canonical {label} "
+            "Location more than once"
+        )
+        return
+
+    _, owner, is_sufficient, declared_minimum = matches[0]
+    if not isinstance(owner, str) or ss58_account_id(owner) != expected_owner:
+        failures.append(
+            f"{citation}: the {label} asset owner must be the derived ledger "
+            f"sovereign {USDC_ENDOWED_ACCOUNTS['ledger_sovereign']!r} (genesis "
+            "installs the owner as issuer, admin and freezer), found "
+            f"{owner!r}"
+        )
+    if is_sufficient is not True:
+        failures.append(
+            f"{citation}: the {label} asset must be declared sufficient "
+            f"(is_sufficient = true), found {is_sufficient!r}"
+        )
+    if declared_minimum != minimum_balance or isinstance(declared_minimum, bool):
+        failures.append(
+            f"{citation}: the {label} asset must declare min_balance "
+            f"{minimum_balance}, found {declared_minimum!r}"
+        )
+
+
+def validate_usdc_genesis(patch: dict[str, Any], failures: list[str]) -> None:
+    """Enforce the exact, minimal 03 §7 R-4 USDC genesis issuance."""
+    required_by_account: dict[bytes, tuple[str, str]] = {}
+    for label, address in USDC_ENDOWED_ACCOUNTS.items():
+        account = ss58_account_id(address)
+        if account is None:
+            failures.append(
+                f"03 §7 R-4: validator has an invalid derived {label} USDC address"
+            )
+            continue
+        required_by_account[account] = (label, address)
+
+    foreign_assets = patch.get("foreignAssets")
+    if not isinstance(foreign_assets, dict):
+        failures.append("03 §7 R-4: genesis patch must include a foreignAssets section")
+        return
+
+    asset_rows = foreign_assets.get("assets")
+    if not isinstance(asset_rows, list):
+        failures.append("03 §7 R-4: foreignAssets.assets must be an array")
+        return
+    for label, (location, minimum, citation) in DECLARED_ASSETS.items():
+        validate_declared_asset(
+            asset_rows, label, location, minimum, citation, failures
+        )
+
+    account_rows = foreign_assets.get("accounts")
+    if not isinstance(account_rows, list):
+        failures.append("03 §7 R-4: foreignAssets.accounts must be an array")
+        return
+
+    seen_usdc_accounts: set[bytes] = set()
+    for index, row in enumerate(account_rows):
+        if (
+            not isinstance(row, list)
+            or len(row) != 3
+            or not isinstance(row[0], dict)
+            or not isinstance(row[1], str)
+            or not isinstance(row[2], int)
+            or isinstance(row[2], bool)
+            or row[2] < 0
+        ):
+            failures.append(
+                "03 §7 R-4: foreignAssets.accounts"
+                f"[{index}] must be [Location object, SS58 account, non-negative integer balance]"
+            )
+            continue
+
+        account = ss58_account_id(row[1])
+        if account is None:
+            failures.append(
+                f"03 §7 R-4: foreignAssets.accounts[{index}] has an invalid "
+                "32-byte SS58 account"
+            )
+            continue
+
+        required = required_by_account.get(account)
+        is_usdc = row[0] == USDC_LOCATION
+        if required is not None and not is_usdc:
+            failures.append(
+                f"03 §7 R-4: required account {required[0]} {row[1]!r} is endowed "
+                "with the wrong asset Location instead of canonical USDC"
+            )
+            continue
+        if not is_usdc:
+            continue
+
+        if account in seen_usdc_accounts:
+            failures.append(
+                "03 §7 R-4: foreignAssets.accounts contains duplicate row for "
+                f"the same (USDC, account) pair {row[1]!r}"
+            )
+            continue
+        seen_usdc_accounts.add(account)
+
+        # Any extra unit would be unbacked USDC issuance with no Asset Hub reserve.
+        if required is None:
+            failures.append(
+                "03 §7 R-4: unbacked USDC genesis endowment to non-required "
+                f"account {row[1]!r} is forbidden"
+            )
+            continue
+        if row[2] != USDC_MIN_BALANCE:
+            failures.append(
+                f"03 §7 R-4: {required[0]} {required[1]} must receive exactly "
+                f"{USDC_MIN_BALANCE} USDC base units; found {row[2]}"
+            )
+
+    for account, (label, address) in required_by_account.items():
+        if account not in seen_usdc_accounts:
+            failures.append(
+                f"03 §7 R-4: required USDC genesis endowment is absent for "
+                f"{label} {address}"
+            )
+
+    balance_rows = (
+        patch.get("balances", {}).get("balances")
+        if isinstance(patch.get("balances"), dict)
+        else None
+    )
+    if isinstance(balance_rows, list):
+        native_protocol_pots = {
+            account
+            for address, _amount in PROTOCOL_POTS.values()
+            if (account := ss58_account_id(address)) is not None
+        }
+        for index, row in enumerate(balance_rows):
+            if not isinstance(row, list) or len(row) != 2 or not isinstance(row[0], str):
+                continue
+            account = ss58_account_id(row[0])
+            # USDC endowments belong only in ForeignAssets. treasury_main is the
+            # deliberate overlap: its existing native VIT reserve remains here.
+            if account in required_by_account and account not in native_protocol_pots:
+                failures.append(
+                    "03 §7 R-4: USDC-endowed protocol account "
+                    f"{row[0]!r} must not appear in native balances.balances "
+                    f"(row {index})"
+                )
 
 
 def validate_genesis(
@@ -159,6 +403,8 @@ def validate_genesis(
         return
     if contains_todo(patch):
         failures.append('08 §2.1: genesis runtime patch must not contain a "TODO" string')
+
+    validate_usdc_genesis(patch, failures)
 
     # The runtime reads its para id from genesis (`staging_parachain_info`), not
     # from the chain-spec extension — a release spec whose top-level `para_id`

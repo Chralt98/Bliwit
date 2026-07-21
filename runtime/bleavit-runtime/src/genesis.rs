@@ -7,6 +7,7 @@ use serde_json::Value;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_genesis_builder::PresetId;
 use sp_runtime::traits::AccountIdConversion;
+use staging_xcm::latest::Location;
 
 use crate::{
     configs::{LedgerPalletId, TreasuryPalletId},
@@ -60,6 +61,44 @@ pub fn treasury_account() -> AccountId {
     TreasuryPalletId::get().into_account_truncating()
 }
 
+/// 03 §7 R-4: every statically derived protocol account that custodies USDC is
+/// genesis-endowed with exactly `min_balance` so no legal flow can reap it.
+/// The ledger's custody paths all use `Preservation::Preserve`, so this
+/// endowment is a permanent floor rather than spendable balance. Deliberately
+/// minimal: genesis-minted USDC carries no Asset Hub reserve behind it.
+pub fn usdc_genesis_endowments() -> Vec<(Location, AccountId, Balance)> {
+    let asset = usdc_location();
+    let amount = futarchy_primitives::currency::USDC_CENT;
+    vec![
+        (
+            asset.clone(),
+            LedgerPalletId::get().into_account_truncating(),
+            amount,
+        ),
+        (asset.clone(), crate::configs::insurance_account(), amount),
+        (asset.clone(), crate::configs::book_account(), amount),
+        (asset.clone(), crate::configs::pol_account(), amount),
+        (
+            asset.clone(),
+            crate::configs::pol_baseline_account(),
+            amount,
+        ),
+        (asset.clone(), crate::configs::fee_account(), amount),
+        (
+            asset.clone(),
+            crate::configs::treasury_protocol_account(),
+            amount,
+        ),
+        (asset.clone(), treasury_account(), amount),
+        (
+            asset.clone(),
+            crate::configs::treasury_keeper_account(),
+            amount,
+        ),
+        (asset, crate::configs::treasury_oracle_account(), amount),
+    ]
+}
+
 /// 08 §2.1 community-distribution pot, held until Phase-4 arming. Its
 /// 24-month distribution cannot start as a genesis schedule because the
 /// Phase-4 arming block is unknowable at genesis.
@@ -86,6 +125,7 @@ fn testnet_genesis(
     let charlie = AccountId::new(CHARLIE_PUBLIC);
     let dave = AccountId::new(DAVE_PUBLIC);
     let owner: AccountId = LedgerPalletId::get().into_account_truncating();
+    let usdc_endowments = usdc_genesis_endowments();
 
     build_struct_json_patch!(RuntimeGenesisConfig {
         balances: BalancesConfig {
@@ -138,7 +178,13 @@ fn testnet_genesis(
                     futarchy_primitives::chain_identity::DOT_DECIMALS,
                 ),
             ],
-            accounts: vec![],
+            // Per-market book/fee accounts cannot be genesis-endowed: they do
+            // not exist until `create_market` and are reaped at close. Also
+            // excluded are the market (`bl/mrket`), epoch, execution-guard,
+            // welfare-settlement, guardian, and both registry sovereigns: none
+            // is named by 03 §7 R-4, and registry payouts deliberately use
+            // `Expendable`.
+            accounts: usdc_endowments,
             next_asset_id: None,
             reserves: vec![],
         },

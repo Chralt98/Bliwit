@@ -8,7 +8,7 @@ use frame_support::{
     parameter_types,
     traits::{
         fungibles::{Inspect, Mutate},
-        tokens::Preservation,
+        tokens::{Fortitude, Preservation},
         ConstBool, ConstU128, ConstU32, ConstU64, ConstU8, Contains, EqualPrivilegeOnly, Get,
         InstanceFilter, Nothing, OriginTrait, QueryPreimage, StorageInstance, StorePreimage,
         TransformOrigin, UnfilteredDispatchable, VariantCountOf, WithdrawReasons,
@@ -2198,6 +2198,40 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
                     id,
                     pol_baseline_account(),
                 )?;
+                // 03 §7 R-4: Seed is the earliest point at which this
+                // per-market account exists. Only the Baseline book custodies
+                // plain USDC; its permanent floor makes Preserve custody
+                // satisfiable when a retained sell fee is below min_balance.
+                let asset = usdc_location();
+                let source = pol_baseline_account();
+                let book = market_book_account(id);
+                let minimum_balance =
+                    <ForeignAssets as Inspect<AccountId>>::minimum_balance(asset.clone());
+                let book_balance =
+                    <ForeignAssets as Inspect<AccountId>>::balance(asset.clone(), &book);
+                if book_balance < minimum_balance {
+                    let shortfall = minimum_balance.saturating_sub(book_balance);
+                    let affordable = <ForeignAssets as Inspect<AccountId>>::reducible_balance(
+                        asset.clone(),
+                        &source,
+                        Preservation::Preserve,
+                        Fortitude::Polite,
+                    );
+                    if affordable >= shortfall {
+                        // Best-effort by design (G-1): an unexpected transfer
+                        // failure leaves only small Baseline sells unavailable,
+                        // matching pre-B14 behavior. Propagating it would roll
+                        // back the whole epoch tick and wedge every proposal in
+                        // the batch, a strictly broader liveness failure.
+                        let _ = <ForeignAssets as Mutate<AccountId>>::transfer(
+                            asset,
+                            &source,
+                            &book,
+                            shortfall,
+                            Preservation::Preserve,
+                        );
+                    }
+                }
                 id
             }
         };
@@ -4078,7 +4112,10 @@ impl pallet_futarchy_treasury::PotFunding<AccountId> for TreasuryPotFunding {
             &crate::genesis::treasury_account(),
             &destination,
             amount,
-            Preservation::Expendable,
+            // 03 §7 R-4 / 08 §1.4: MAIN is a permanent custody account.
+            // Bound funding by `main_balance - min_balance`; failure toward the
+            // status quo is G-1-conservative and cannot reap MAIN.
+            Preservation::Preserve,
         )
         .map(|_| ())
     }

@@ -803,6 +803,21 @@ fn open_runtime_param_proposal(
     Ok(proposal)
 }
 
+fn open_seeded_param_market_set(
+    pid: futarchy_primitives::ProposalId,
+) -> Option<futarchy_primitives::MarketSet> {
+    use pallet_epoch::EpochParamsProvider;
+
+    let params = <crate::configs::RuntimeEpochParams as EpochParamsProvider>::get();
+    fund_param_market_lifecycles(1);
+    open_runtime_param_proposal(
+        pid,
+        System::block_number().saturating_add(params.decision_window),
+    )
+    .ok()?
+    .markets
+}
+
 fn create_synthetic_markets_for_void(
     pid: futarchy_primitives::ProposalId,
 ) -> Result<(), DispatchError> {
@@ -2403,14 +2418,18 @@ fn phase_inflow_caps_use_real_foreign_asset_issuance_and_live_params() {
     development_ext().execute_with(|| {
         // 13 §1 default: phase3.tvl_cap = 2,000,000 USDC (µUSDC, 6 decimals).
         let global_cap = 2_000_000_000_000_u128;
-        let issued = global_cap - 100;
+        let genesis_issuance = ForeignAssets::total_issuance(usdc_location());
+        let issued = global_cap
+            .saturating_sub(genesis_issuance)
+            .saturating_sub(100);
         assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
             usdc_location(),
             &account(46),
             issued,
         )
         .is_ok());
-        assert_eq!(ForeignAssets::total_issuance(usdc_location()), issued);
+        let current_issuance = ForeignAssets::total_issuance(usdc_location());
+        assert_eq!(current_issuance, global_cap.saturating_sub(100));
         assert_ok!(<PhaseInflowCaps as XcmInflowCaps<AccountId>>::usdc_mint_admissible(100));
         assert_eq!(
             <PhaseInflowCaps as XcmInflowCaps<AccountId>>::usdc_mint_admissible(101),
@@ -2423,7 +2442,7 @@ fn phase_inflow_caps_use_real_foreign_asset_issuance_and_live_params() {
         assert_ok!(Constitution::set_param(
             pallet_origins::Origin::FutarchyMeta.into(),
             pallet_constitution::key16(b"phase3.tvl_cap"),
-            pallet_constitution::ParamValue::Balance(issued),
+            pallet_constitution::ParamValue::Balance(current_issuance),
         ));
         assert_eq!(
             <PhaseInflowCaps as XcmInflowCaps<AccountId>>::usdc_mint_admissible(1),
@@ -2861,6 +2880,7 @@ fn production_xcm_treasury_class_can_recover_only_the_protocol_keyed_trap() {
         let protocol = crate::configs::treasury_protocol_account();
         let protocol_location = local_xcm_account(&protocol);
         let amount = 20 * currency::USDC;
+        let protocol_before = ForeignAssets::balance(usdc_location(), &protocol);
         let Some((hash, assets)) = create_local_production_xcm_trap(&protocol_location, amount, 60)
         else {
             return;
@@ -2882,7 +2902,10 @@ fn production_xcm_treasury_class_can_recover_only_the_protocol_keyed_trap() {
             ProposalClass::Treasury,
         ));
         assert_eq!(PolkadotXcm::asset_trap(&hash), 0);
-        assert_eq!(ForeignAssets::balance(usdc_location(), &protocol), amount);
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &protocol),
+            protocol_before.saturating_add(amount),
+        );
         assert_eq!(
             pallet_inflow_caps::CumulativeDeposits::<Runtime>::get(&protocol),
             amount
@@ -2917,6 +2940,481 @@ fn development_preset_builds_and_pins_usdc_and_para_identity() {
             currency::VIT_EXISTENTIAL_DEPOSIT
         );
         assert_eq!(Balances::total_issuance(), currency::VIT_TOTAL_SUPPLY);
+    });
+}
+
+/// SQ-288 / 03 §5.3, §7 R-4: the last claimant of the last open vault can
+/// drain system-wide escrow without the ledger sovereign being reaped.
+#[test]
+fn last_redeemer_of_last_vault_can_fully_exit() {
+    use futarchy_primitives::{Branch, PositionId, PositionKind};
+    use pallet_market::core_market::BookKind;
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 14_001;
+        const MARKET_ID: futarchy_primitives::MarketId = 14_001;
+        let claimant = account(214);
+        let stake = currency::USDC;
+        let position_deposit = crate::configs::LedgerPositionDeposit::get();
+        let minimum_balance = ForeignAssets::minimum_balance(usdc_location());
+
+        assert_ok!(Market::create_market(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            MARKET_ID,
+            BookKind::Decision {
+                proposal: PID,
+                branch: Branch::Accept,
+            },
+            account(215),
+            account(216),
+            crate::configs::balance_param(b"pol.b.param"),
+        ));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &claimant,
+            stake
+                .saturating_add(position_deposit.saturating_mul(2))
+                .saturating_add(minimum_balance),
+        ));
+        assert_ok!(ConditionalLedger::split(
+            RuntimeOrigin::signed(claimant.clone()),
+            PID,
+            stake,
+        ));
+
+        // The losing claim remains outstanding but is deposit-exempt in a
+        // protocol account. The claimant is therefore the sole payable holder.
+        assert_ok!(ConditionalLedger::transfer(
+            RuntimeOrigin::signed(claimant.clone()),
+            PositionId::Proposal {
+                proposal: PID,
+                branch: Branch::Reject,
+                kind: PositionKind::BranchUsdc,
+            },
+            crate::configs::insurance_account(),
+            stake,
+        ));
+        assert_ok!(ConditionalLedger::resolve(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            PID,
+            Branch::Accept,
+        ));
+        assert_ok!(ConditionalLedger::settle_scalar(
+            RuntimeOrigin::signed(crate::configs::welfare_settlement_account()),
+            PID,
+            futarchy_primitives::FixedU64(kernel::SCORE_SCALE),
+        ));
+
+        let claimant_before = ForeignAssets::balance(usdc_location(), &claimant);
+        assert_ok!(ConditionalLedger::redeem(
+            RuntimeOrigin::signed(claimant.clone()),
+            PID,
+            stake,
+        ));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &claimant).saturating_sub(claimant_before),
+            stake.saturating_add(position_deposit),
+        );
+        assert_eq!(
+            pallet_conditional_ledger::Vaults::<Runtime>::get(PID).map(|vault| vault.escrowed),
+            Some(0),
+        );
+        assert_ok!(ConditionalLedger::do_try_state());
+    });
+}
+
+#[test]
+fn genesis_endows_every_r4_protocol_account() {
+    use alloc::collections::BTreeSet;
+
+    development_ext().execute_with(|| {
+        let endowments = crate::genesis::usdc_genesis_endowments();
+        assert_eq!(endowments.len(), 10);
+        let mut accounts = BTreeSet::new();
+        for (asset, account, amount) in endowments {
+            assert_eq!(asset, usdc_location());
+            assert_eq!(amount, currency::USDC_CENT);
+            assert!(accounts.insert(account.clone()), "duplicate R-4 account");
+            assert_eq!(
+                ForeignAssets::balance(usdc_location(), &account),
+                currency::USDC_CENT,
+            );
+        }
+        assert_ok!(ConditionalLedger::do_try_state());
+    });
+}
+
+#[test]
+fn genesis_usdc_issuance_is_exactly_the_r4_floor() {
+    development_ext().execute_with(|| {
+        assert_eq!(
+            ForeignAssets::total_issuance(usdc_location()),
+            currency::USDC_CENT.saturating_mul(10),
+        );
+    });
+}
+
+#[test]
+fn r4_account_addresses_are_stable() {
+    let expected = [
+        (
+            "ledger sovereign",
+            "6d6f646c626c2f6c656467720000000000000000000000000000000000000000",
+        ),
+        (
+            "ledger INSURANCE",
+            "6d6f646c626c2f6c65646772494e535552414e43000000000000000000000000",
+        ),
+        (
+            "ledger BOOK",
+            "6d6f646c626c2f6c65646772424f4f4b5f5f5f5f000000000000000000000000",
+        ),
+        (
+            "ledger POL",
+            "6d6f646c626c2f6c65646772504f4c5f5f5f5f5f000000000000000000000000",
+        ),
+        (
+            "ledger POL_BASELINE",
+            "6d6f646c626c2f6c65646772504f4c5f42415345000000000000000000000000",
+        ),
+        (
+            "ledger FEES",
+            "6d6f646c626c2f6c65646772464545535f5f5f5f000000000000000000000000",
+        ),
+        (
+            "ledger TREASURY",
+            "6d6f646c626c2f6c65646772545245415352595f000000000000000000000000",
+        ),
+        (
+            "treasury MAIN",
+            "6d6f646c626c2f74727372790000000000000000000000000000000000000000",
+        ),
+        (
+            "treasury KEEPER",
+            "6d6f646c626c2f74727372794b45455045525f5f000000000000000000000000",
+        ),
+        (
+            "treasury ORACLE",
+            "6d6f646c626c2f74727372794f5241434c455f5f000000000000000000000000",
+        ),
+    ];
+    let endowments = crate::genesis::usdc_genesis_endowments();
+    assert_eq!(SS58_PREFIX, chain_identity::SS58_PREFIX);
+    assert_eq!(endowments.len(), expected.len());
+    for ((_, account, _), (name, expected_hex)) in endowments.iter().zip(expected) {
+        let raw: &[u8] = account.as_ref();
+        assert_eq!(
+            format!("{}", sp_core::hexdisplay::HexDisplay::from(&raw)),
+            expected_hex,
+            "unstable ss58-{} identity for {name}",
+            SS58_PREFIX,
+        );
+    }
+}
+
+#[test]
+fn pol_account_funded_to_exact_seed_amount_can_seed() {
+    use pallet_market::core_market::{seed_headroom, BookKind};
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 14_002;
+        const MARKET_ID: futarchy_primitives::MarketId = 14_002;
+        let pol = crate::configs::pol_account();
+        let b = crate::configs::balance_param(b"pol.b.param");
+        let headroom = seed_headroom(b).expect("bounded live POL seed");
+
+        // Genesis already supplies the permanent R-4 floor; mint only the
+        // exact spendable amount required by this book's seed.
+        assert_ok!(ForeignAssets::mint_into(usdc_location(), &pol, headroom,));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &pol),
+            headroom.saturating_add(currency::USDC_CENT),
+        );
+        assert_ok!(Market::create_market(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            MARKET_ID,
+            BookKind::Decision {
+                proposal: PID,
+                branch: futarchy_primitives::Branch::Accept,
+            },
+            account(217),
+            account(218),
+            b,
+        ));
+        assert_ok!(Market::seed(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            MARKET_ID,
+            pol.clone(),
+        ));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &pol),
+            currency::USDC_CENT,
+        );
+        // 03 §9 L-2 remains green: genesis over-custody is safe slack.
+        assert_ok!(ConditionalLedger::do_try_state());
+    });
+}
+
+#[test]
+fn baseline_seed_survives_pol_baseline_funded_to_exact_headroom() {
+    use pallet_market::core_market::seed_headroom;
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 14_006;
+        let decision_headroom = seed_headroom(crate::configs::balance_param(b"pol.b.param"))
+            .expect("bounded decision b");
+        let gate_headroom =
+            seed_headroom(crate::configs::balance_param(b"pol.b_gate")).expect("bounded gate b");
+        let baseline_headroom = seed_headroom(crate::configs::balance_param(b"pol.b_baseline"))
+            .expect("bounded Baseline b");
+        let pol_baseline = crate::configs::pol_baseline_account();
+        let minimum_balance = ForeignAssets::minimum_balance(usdc_location());
+
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &crate::configs::pol_account(),
+            decision_headroom
+                .saturating_add(gate_headroom.saturating_mul(2))
+                .saturating_add(currency::USDC),
+        ));
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &pol_baseline,
+            baseline_headroom,
+        ));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &pol_baseline),
+            minimum_balance.saturating_add(baseline_headroom),
+        );
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = Balance::MAX;
+        });
+
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        let mut proposal = empty_param_proposal(PID, account(221), H256::zero(), 0);
+        proposal.metric_spec = 1;
+        proposal.state = ProposalState::Qualified;
+        proposal.decide_at = schedule.epoch_start_block.saturating_add(
+            schedule
+                .length
+                .saturating_mul(futarchy_primitives::phase_offsets::DECIDE_NUM)
+                / futarchy_primitives::phase_offsets::DENOMINATOR,
+        );
+        pallet_epoch::Proposals::<Runtime>::insert(PID, proposal);
+
+        let seed_at = schedule.epoch_start_block.saturating_add(
+            schedule
+                .length
+                .saturating_mul(futarchy_primitives::phase_offsets::SEED_NUM)
+                / futarchy_primitives::phase_offsets::DENOMINATOR,
+        );
+        System::set_block_number(seed_at);
+        let batch = pallet_epoch::TickBatch::try_from(vec![PID]).expect("one pid fits TickBatch");
+        assert_ok!(Epoch::tick(RuntimeOrigin::signed(account(222)), batch));
+
+        let opened = pallet_epoch::Proposals::<Runtime>::get(PID)
+            .and_then(|stored| stored.markets)
+            .expect("the Baseline affordability shortfall must not roll back the tick");
+        let baseline = pallet_market::Markets::<Runtime>::get(opened.baseline)
+            .expect("the Baseline market must still open");
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &pol_baseline),
+            minimum_balance,
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &baseline.account),
+            0,
+            "an unaffordable best-effort floor leaves the Baseline book unendowed",
+        );
+    });
+}
+
+#[test]
+fn baseline_book_endowment_is_idempotent() {
+    use sp_runtime::traits::AccountIdConversion;
+
+    development_ext().execute_with(|| {
+        let first = pallet_market::NextMarketId::<Runtime>::get().max(1);
+        let baseline_id = first
+            .checked_add(6)
+            .expect("the six PARAM proposal books fit before Baseline");
+        let baseline_account = crate::configs::MarketPalletId::get()
+            .into_sub_account_truncating((*b"BOOK", baseline_id));
+        let minimum_balance = ForeignAssets::minimum_balance(usdc_location());
+
+        // Model a retry after the best-effort floor has already landed. The
+        // seed path must top up only a deficit, never apply a second floor.
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &baseline_account,
+            minimum_balance,
+        ));
+        let Some(markets) = open_seeded_param_market_set(14_007) else {
+            assert!(false, "PARAM markets must open");
+            return;
+        };
+        assert_eq!(markets.baseline, baseline_id);
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &baseline_account),
+            minimum_balance,
+            "a pre-existing Baseline floor must not be endowed twice",
+        );
+    });
+}
+
+#[test]
+fn baseline_book_is_endowed_at_seed() {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 14_003;
+        let Some(markets) = open_seeded_param_market_set(PID) else {
+            assert!(false, "PARAM markets must open");
+            return;
+        };
+        let Some(baseline) = pallet_market::Markets::<Runtime>::get(markets.baseline) else {
+            assert!(false, "Baseline book must exist");
+            return;
+        };
+
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &baseline.account),
+            currency::USDC_CENT,
+        );
+        assert_ok!(ConditionalLedger::do_try_state());
+    });
+}
+
+#[test]
+fn small_baseline_sell_below_the_fee_floor_succeeds() {
+    use futarchy_primitives::{ScalarSide, TradeSide};
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 14_004;
+        let Some(markets) = open_seeded_param_market_set(PID) else {
+            assert!(false, "PARAM markets must open");
+            return;
+        };
+        let trader = account(219);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &trader,
+            currency::USDC.saturating_mul(2),
+        ));
+        assert_ok!(Market::buy(
+            RuntimeOrigin::signed(trader.clone()),
+            markets.baseline,
+            ScalarSide::Long,
+            kernel::MIN_TRADE_USDC,
+            Balance::MAX,
+        ));
+
+        let Some(before_sell) = pallet_market::Markets::<Runtime>::get(markets.baseline) else {
+            assert!(false, "Baseline book must remain live");
+            return;
+        };
+        let Ok(quote) = pallet_market::core_market::quote(
+            &before_sell,
+            TradeSide::SellLong,
+            kernel::MIN_TRADE_USDC,
+            <Runtime as pallet_market::Config>::Fee::get(),
+        ) else {
+            assert!(false, "minimum Baseline sell must be quotable");
+            return;
+        };
+        assert!(quote.fee > 0);
+        assert!(quote.fee < currency::USDC_CENT);
+
+        assert_ok!(Market::sell(
+            RuntimeOrigin::signed(trader),
+            markets.baseline,
+            ScalarSide::Long,
+            kernel::MIN_TRADE_USDC,
+            1,
+        ));
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &before_sell.account),
+            currency::USDC_CENT.saturating_add(quote.fee),
+        );
+        assert_ok!(ConditionalLedger::do_try_state());
+    });
+}
+
+#[test]
+fn decision_and_gate_books_custody_no_plain_usdc() {
+    use futarchy_primitives::ScalarSide;
+
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 14_005;
+        let Some(markets) = open_seeded_param_market_set(PID) else {
+            assert!(false, "PARAM markets must open");
+            return;
+        };
+        let Some(gates) = markets.gates else {
+            assert!(false, "PARAM gate market set must exist");
+            return;
+        };
+        let trader = account(220);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &trader,
+            currency::USDC.saturating_mul(10),
+        ));
+
+        let traded = [
+            markets.accept,
+            markets.reject,
+            gates[0],
+            gates[1],
+            gates[2],
+            gates[3],
+        ];
+        for id in traded {
+            assert_ok!(Market::buy(
+                RuntimeOrigin::signed(trader.clone()),
+                id,
+                ScalarSide::Long,
+                kernel::MIN_TRADE_USDC,
+                Balance::MAX,
+            ));
+            assert_ok!(Market::sell(
+                RuntimeOrigin::signed(trader.clone()),
+                id,
+                ScalarSide::Long,
+                kernel::MIN_TRADE_USDC,
+                1,
+            ));
+            let Some(book) = pallet_market::Markets::<Runtime>::get(id) else {
+                assert!(false, "traded decision or gate book must remain live");
+                return;
+            };
+            assert_eq!(ForeignAssets::balance(usdc_location(), &book.account), 0);
+        }
+
+        assert_ok!(Market::buy(
+            RuntimeOrigin::signed(trader.clone()),
+            markets.baseline,
+            ScalarSide::Long,
+            kernel::MIN_TRADE_USDC,
+            Balance::MAX,
+        ));
+        assert_ok!(Market::sell(
+            RuntimeOrigin::signed(trader),
+            markets.baseline,
+            ScalarSide::Long,
+            kernel::MIN_TRADE_USDC,
+            1,
+        ));
+
+        for id in traded.into_iter().chain([markets.baseline]) {
+            let Some(book) = pallet_market::Markets::<Runtime>::get(id) else {
+                assert!(false, "seeded market book must remain live");
+                return;
+            };
+            assert_eq!(
+                ForeignAssets::balance(usdc_location(), &book.fees_account),
+                0,
+            );
+        }
+        assert_ok!(ConditionalLedger::do_try_state());
     });
 }
 
@@ -3442,13 +3940,13 @@ fn treasury_rebate_payout_moves_real_usdc_from_the_selected_pot() {
         assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
             usdc_location(),
             &keeper_pot,
-            amount + retained,
+            amount,
         )
         .is_ok());
         assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
             usdc_location(),
             &oracle_pot,
-            amount + retained,
+            amount,
         )
         .is_ok());
         assert_eq!(
@@ -3505,6 +4003,7 @@ fn treasury_keeper_line_funding_moves_matching_real_usdc_into_the_pot() {
         )
         .is_ok());
         let main_before = ForeignAssets::balance(usdc_location(), &main);
+        let pot_before = ForeignAssets::balance(usdc_location(), &keeper_pot);
 
         assert_ok!(FutarchyTreasury::fund_budget_line(
             pallet_origins::Origin::FutarchyTreasury.into(),
@@ -3513,7 +4012,10 @@ fn treasury_keeper_line_funding_moves_matching_real_usdc_into_the_pot() {
         ));
 
         assert_eq!(FutarchyTreasury::line_balance(BudgetLine::Keeper), amount);
-        assert_eq!(ForeignAssets::balance(usdc_location(), &keeper_pot), amount);
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &keeper_pot),
+            pot_before.saturating_add(amount),
+        );
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &main),
             main_before - amount
@@ -3535,6 +4037,7 @@ fn treasury_custody_sync_cannot_sweep_or_double_count_epoch_bond_escrow() {
         let epoch_escrow = epoch_account();
         let treasury_main = treasury_account();
         let keeper_pot = treasury_keeper_account();
+        let keeper_pot_before = ForeignAssets::balance(usdc_location(), &keeper_pot);
         assert_ne!(epoch_escrow, treasury_main);
         assert_ne!(epoch_escrow, keeper_pot);
 
@@ -3617,7 +4120,7 @@ fn treasury_custody_sync_cannot_sweep_or_double_count_epoch_bond_escrow() {
         );
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &keeper_pot),
-            funding
+            keeper_pot_before.saturating_add(funding),
         );
         assert!(Epoch::do_try_state().is_ok());
         assert!(FutarchyTreasury::do_try_state().is_ok());
@@ -8369,16 +8872,6 @@ fn sq92_epoch_void_settles_the_baseline_and_unstrands_a_single_sided_holder() {
             &counterparty,
             funding
         ));
-        // 03 §7 R-4: the ledger sovereign is genesis-endowed and can never be
-        // reaped. The fixture models that endowment (the asset's own
-        // `min_balance`, never a literal) so the *last* redeemer of the vault
-        // is not blocked by the collateral pallet's `Preservation::Preserve`.
-        assert_ok!(ForeignAssets::mint_into(
-            usdc_location(),
-            &ConditionalLedger::account_id(),
-            <ForeignAssets as FungiblesInspect<AccountId>>::minimum_balance(usdc_location()),
-        ));
-
         // Split, then dispose of the SHORT leg: `holder` is now single-sided
         // and cannot reach par through `merge_baseline` any more.
         assert_ok!(ConditionalLedger::split_baseline(
@@ -8530,11 +9023,6 @@ fn sq92_epoch_void_with_a_live_baseline_book_keeps_market_try_state_green() {
             usdc_location(),
             &holder,
             stake.saturating_mul(4)
-        ));
-        assert_ok!(ForeignAssets::mint_into(
-            usdc_location(),
-            &ConditionalLedger::account_id(),
-            <ForeignAssets as FungiblesInspect<AccountId>>::minimum_balance(usdc_location()),
         ));
         assert_ok!(ConditionalLedger::split_baseline(
             RuntimeOrigin::signed(holder.clone()),
@@ -13545,9 +14033,11 @@ fn view_nav_maps_every_contract_field_from_hand_built_state() {
             state.pending_outflows = frame_support::BoundedVec::truncate_from(vec![7, 8]);
             state.pol_commitments = frame_support::BoundedVec::truncate_from(vec![9]);
         });
+        let insurance = crate::configs::insurance_account();
+        let insurance_before = ForeignAssets::balance(usdc_location(), &insurance);
         assert_ok!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
             usdc_location(),
-            &crate::configs::insurance_account(),
+            &insurance,
             55_000_000,
         ));
 
@@ -13557,7 +14047,7 @@ fn view_nav_maps_every_contract_field_from_hand_built_state() {
         assert_eq!(view.total, 1_186);
         assert_eq!(view.main, 1_000);
         assert_eq!(view.pol, 30);
-        assert_eq!(view.insurance, 55_000_000);
+        assert_eq!(view.insurance, insurance_before.saturating_add(55_000_000),);
         assert_eq!(view.keeper, 30);
         assert_eq!(view.oracle, 40);
         assert_eq!(view.rewards, 50);

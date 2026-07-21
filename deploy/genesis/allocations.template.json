@@ -12,6 +12,72 @@
     "coretime_quote_authority": "TODO",
     "coretime_renewal_account": "TODO"
   },
+  "usdc_genesis_endowments": {
+    "_assets_row_requirement": "The patch MUST also declare foreignAssets.assets rows for USDC and DOT as [Location, owner, is_sufficient, min_balance] with owner = the derived ledger sovereign fvGJck7fS1t2ejm7TyRMiteKHuDAN2G8Fb4bUq4N7pC8vwE3u and is_sufficient = true. pallet-assets genesis installs the owner as issuer, admin AND freezer, so any other owner holds mint/burn/freeze authority over all protocol collateral; the chain-spec validator rejects both deviations.",
+    "_comment": "03 §7 R-4: exactly min_balance (10000 base units = 0.01 USDC) per protocol-derived account makes each account non-reapable. The total 100000 base units = 0.10 USDC is deliberately unbacked genesis issuance, minimal by construction. amount_base_units values are decimal strings in this manifest and must be converted to JSON integers in foreignAssets.accounts in the runtime patch.",
+    "accounts": [
+      {
+        "label": "ledger_sovereign",
+        "account": "fvGJck7fS1t2ejm7TyRMiteKHuDAN2G8Fb4bUq4N7pC8vwE3u",
+        "_derivation": "PalletId bl/ledgr; no sub-seed",
+        "amount_base_units": "10000"
+      },
+      {
+        "label": "ledger_insurance",
+        "account": "fvGJck7fS1t2ejm7TyRhcrwJWAdTsdZmqdcDWshHCJSChV9T5",
+        "_derivation": "PalletId bl/ledgr; sub-seed INSURANC",
+        "amount_base_units": "10000"
+      },
+      {
+        "label": "ledger_book",
+        "account": "fvGJck7fS1t2ejm7TyRfijG5qkHRwtNmqApPRwj8LQ5WNnGPr",
+        "_derivation": "PalletId bl/ledgr; sub-seed BOOK____",
+        "amount_base_units": "10000"
+      },
+      {
+        "label": "ledger_pol",
+        "account": "fvGJck7fS1t2ejm7TyRjX7bM8xnwS4uv4wdQH8yP4R5nmPEgM",
+        "_derivation": "PalletId bl/ledgr; sub-seed POL_____",
+        "amount_base_units": "10000"
+      },
+      {
+        "label": "ledger_pol_baseline",
+        "account": "fvGJck7fS1t2ejm7TyRjX7bM7kkEJajB9AgQLpGFXKK6kMrtc",
+        "_derivation": "PalletId bl/ledgr; sub-seed POL_BASE",
+        "amount_base_units": "10000"
+      },
+      {
+        "label": "ledger_fees",
+        "account": "fvGJck7fS1t2ejm7TyRgo5ZdbDuPx4SuWAYZcGNkExrk7XAN9",
+        "_derivation": "PalletId bl/ledgr; sub-seed FEES____",
+        "amount_base_units": "10000"
+      },
+      {
+        "label": "ledger_treasury",
+        "account": "fvGJck7fS1t2ejm7TyRkcGJM9ZWMGqjUwaeas8gJnGJ7e7E7y",
+        "_derivation": "PalletId bl/ledgr; sub-seed TREASRY_",
+        "amount_base_units": "10000"
+      },
+      {
+        "label": "treasury_main",
+        "account": "fvGJck7fS1t2fpsb9pvvJ2EYTyx6sgq1NkVTTZqzwipoLqtzp",
+        "_derivation": "PalletId bl/trsry; no sub-seed",
+        "amount_base_units": "10000"
+      },
+      {
+        "label": "treasury_keeper",
+        "account": "fvGJck7fS1t2fpsb9pwGivHa8vtqjyagJ7ewS1GG86JyNUMK4",
+        "_derivation": "PalletId bl/trsry; sub-seed KEEPER__",
+        "amount_base_units": "10000"
+      },
+      {
+        "label": "treasury_oracle",
+        "account": "fvGJck7fS1t2fpsb9pwHpghdH5GxgxAp1Ry3utTBSxzNF4xkN",
+        "_derivation": "PalletId bl/trsry; sub-seed ORACLE__",
+        "amount_base_units": "10000"
+      }
+    ]
+  },
   "groups": [
     {
       "name": "treasury_reserve",

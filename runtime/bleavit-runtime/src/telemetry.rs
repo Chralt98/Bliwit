@@ -183,11 +183,13 @@ pub fn pol() -> Option<BoundedVec<PolTelemetry, MAX_POL_TELEMETRY_ROWS>> {
     // correct.
     let mut proposal_live: Balance = 0;
     let mut baseline_live: Balance = 0;
+    let mut baseline_books: Balance = 0;
     for (market, amount) in pallet_market::LivePolCommitments::<Runtime>::get() {
         // A missing backing book makes collection itself impossible, so the
         // family degrades absent per 12 §6.3.
         let book = pallet_market::Markets::<Runtime>::get(market)?;
         let component = if matches!(book.kind, BookKind::Baseline { .. }) {
+            baseline_books = baseline_books.checked_add(1)?;
             &mut baseline_live
         } else {
             &mut proposal_live
@@ -200,6 +202,13 @@ pub fn pol() -> Option<BoundedVec<PolTelemetry, MAX_POL_TELEMETRY_ROWS>> {
     let standing_baseline =
         pallet_market::core_market::seed_headroom(crate::configs::balance_param(b"pol.b_baseline"))
             .ok()?;
+    // 03 §7 R-4 / 04 §8.3: each live Baseline book consumed one live
+    // min_balance endowment outside pol.budget_epoch, and the standing capacity
+    // for the next mandatory book must include its endowment too. Count only
+    // identity-checked live commitments plus that one explicit standing book.
+    let baseline_books_with_standing = baseline_books.checked_add(1)?;
+    let baseline_endowments = ForeignAssets::minimum_balance(usdc_location())
+        .checked_mul(baseline_books_with_standing)?;
     BoundedVec::try_from(vec![
         PolTelemetry {
             component: PolComponent::Pol,
@@ -209,7 +218,9 @@ pub fn pol() -> Option<BoundedVec<PolTelemetry, MAX_POL_TELEMETRY_ROWS>> {
         PolTelemetry {
             component: PolComponent::Baseline,
             effective_pol_usdc: FutarchyTreasury::line_balance(BudgetLine::PolBaseline),
-            pol_floor_usdc: baseline_live.checked_add(standing_baseline)?,
+            pol_floor_usdc: baseline_live
+                .checked_add(standing_baseline)?
+                .checked_add(baseline_endowments)?,
         },
     ])
     .ok()

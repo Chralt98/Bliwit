@@ -437,6 +437,23 @@ fn telemetry_pol_compares_each_line_with_only_its_matching_requirement() -> Resu
             state.lines = BoundedVec::truncate_from(lines);
         });
 
+        let minimum_balance = ForeignAssets::minimum_balance(crate::usdc_location());
+        let standing_rows = required(
+            crate::telemetry::pol(),
+            "standing Baseline POL accounting must produce telemetry",
+        )?;
+        let standing_baseline = required(
+            standing_rows
+                .iter()
+                .find(|row| row.component == PolComponent::Baseline),
+            "standing Baseline component must be present",
+        )?;
+        assert_eq!(
+            standing_baseline.pol_floor_usdc,
+            baseline_headroom.saturating_add(minimum_balance),
+            "next-epoch capacity must not report the exact unaffordable cliff",
+        );
+
         // One live proposal book and one live Baseline book: the floors must
         // split by book kind, never pooling Baseline obligations into `POL`.
         let account = |seed: u8| crate::AccountId::from([seed; 32]);
@@ -487,8 +504,10 @@ fn telemetry_pol_compares_each_line_with_only_its_matching_requirement() -> Resu
         assert_eq!(baseline.effective_pol_usdc, baseline_funding);
         assert_eq!(
             baseline.pol_floor_usdc,
-            baseline_headroom.saturating_add(baseline_headroom),
-            "Baseline floor must carry its live obligation plus next-epoch headroom"
+            baseline_headroom
+                .saturating_add(baseline_headroom)
+                .saturating_add(minimum_balance.saturating_mul(2)),
+            "Baseline floor must carry each book endowment plus next-epoch headroom"
         );
 
         // Overflowing live obligations must fail closed, not publish a
