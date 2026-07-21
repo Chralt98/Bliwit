@@ -69,7 +69,7 @@ pub enum RejectReason {
 }
 ```
 
-**Every variant has exactly one producing site, with one deliberate exception** (B-med: RejectReason; SQ-3): `AttestationMissing` is produced at **two** sites — `decide()` step 10 at decide time (T10) and the execution guard's dispatch-time re-check (T16) — because a queue-time `AttestationRecord` can be revoked or challenge-upheld *after* queue time, which [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5) and [doc 15](./15-invariants-and-testing.md) I-19 require the guard to catch at `execute`. The producer map is otherwise normative — an implementation MUST NOT emit a variant from any site not listed below:
+**Every variant has exactly one producing site, with one deliberate exception** (B-med: RejectReason; SQ-3): `AttestationMissing` is produced at **two** sites — `decide()` step 10 at decide time (T10) and the execution guard's dispatch-time re-check (T16) — because a queue-time `AttestationRecord` can be revoked, or have a challenge resolved against it, *after* queue time, which [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5) and [doc 15](./15-invariants-and-testing.md) I-19 require the guard to catch at `execute`. The producer map is otherwise normative — an implementation MUST NOT emit a variant from any site not listed below:
 
 | Variant | Producer | Transition |
 |---|---|---|
@@ -82,7 +82,7 @@ pub enum RejectReason {
 | `ConstitutionViolation` | `decide()` step 1 (preimage mismatch at decide time) | T10 |
 | `ResourceConflict` | `decide()` step 1 (locks lost) | T10 |
 | `SecuritySizing` | `decide()` step 9 | T10 |
-| `AttestationMissing` | `decide()` step 10 (CODE/META) at decide time; **and** the execution guard's dispatch-time re-check when the queue-time `AttestationRecord` was revoked/challenge-upheld post-queue ([doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5), [doc 15](./15-invariants-and-testing.md) I-19) | T10, T16 |
+| `AttestationMissing` | `decide()` step 10 (CODE/META) at decide time; **and** the execution guard's dispatch-time re-check when the queue-time `AttestationRecord` was revoked/challenge-resolved-against-it post-queue ([doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5), [doc 15](./15-invariants-and-testing.md) I-19) | T10, T16 |
 | `RateLimited` | `decide()` step 10 (constitutional meters/spacing) | T10 |
 | `NotRatified` | execution guard: ratification referendum concluded **Failed**, or grace end reached unratified ([doc 06](./06-governance-and-guardians.md) mechanics, [doc 09](./09-execution-upgrades-and-rollout.md) dispatch check) | T16 |
 | `StaleQueue` | execution guard: version-constraint mismatch; meter contention past grace | T16 |
@@ -142,7 +142,7 @@ Changes vs. the superseded table (B-12): **T21/T22/T23 added**, **T13 restructur
 | T13 | Rerun → Extended | `tick` at the next epoch's Seed phase: books **reopen at 2× POL**, hurdle **δ+1 pp**, TWAP accumulators reset, positions intact; sets `extended := true`, `rerun := true`, `decide_at := reopen_block + dec.extension` (3 d) | keeper | next epoch's Seed | 2× POL committed | `RerunOpened` |
 | T14 | Queued → Executed | `execution_guard.execute` | Signed (keeper) | `maturity ≤ now ≤ maturity + grace(class)`; all [doc 09](./09-execution-upgrades-and-rollout.md) dispatch re-validations pass **including ratification Passed for CODE/META (D-5)** | — | `Executed { record }` |
 | T15 | Queued → Expired | `tick` | keeper | grace elapsed with no execute attempt succeeding | bond refunded; then T21 fires | `MandateExpired` |
-| T16 | Queued → Rejected(r) | `tick` / `execute` failure paths; r ∈ { `StaleQueue` (version-constraint mismatch after an intervening upgrade; repeated meter contention past grace), `NotRatified` (ratification referendum concluded Failed, or grace end reached with no Passed referendum), `AttestationMissing` (the queue-time `AttestationRecord` was revoked or a late challenge upheld post-queue — [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5), [doc 15](./15-invariants-and-testing.md) I-19) } | keeper | — | refund; then T21 fires | `ProposalRejected(r)` |
+| T16 | Queued → Rejected(r) | `tick` / `execute` failure paths; r ∈ { `StaleQueue` (version-constraint mismatch after an intervening upgrade; repeated meter contention past grace), `NotRatified` (ratification referendum concluded Failed, or grace end reached with no Passed referendum), `AttestationMissing` (the queue-time `AttestationRecord` was revoked or a late challenge resolved against it post-queue — [doc 09](./09-execution-upgrades-and-rollout.md) §1.2(5), [doc 15](./15-invariants-and-testing.md) I-19) } | keeper | — | refund; then T21 fires | `ProposalRejected(r)` |
 | T17 | Executed → Measuring | automatic in T14; vault `resolve(Accept)` | — | — | proposer reward paid | `MeasurementStarted(cohort)` |
 | T18 | Queued → FailedExecuted | `execute` payload dispatch error (payload atomically reverted; proposal state advances) | — | retry window **72 h**, then T22; ACCEPT branch stays live | 50% bond slash (proposer owns executability) | `ExecutionFailed { reason: PayloadReverted }` |
 | T19 | Measuring → Settled | `settle_cohort` (§7) | keeper | cohort epoch e+2 snapshot finalized + challenge closed; settlement at e+3 Housekeeping | — | `CohortSettled { s }` |
@@ -534,7 +534,7 @@ TWAPs are the slew-capped accumulator means of [doc 04](./04-markets-and-pricing
 | Constitutional violation (preimage) | ✘ | – | – | – | – | – | – | – | – | – | – | Reject(ConstitutionViolation) |
 | Guardian hold at decide time | ✔ | ✘ | – | – | – | – | – | – | – | – | – | Reject(ProcessHold)† |
 | Ratification failed / absent at execute | (post-queue) | | | | | | | | | | | T16 Rejected(NotRatified)‡ |
-| Attestation revoked / challenge upheld at execute | (post-queue) | | | | | | | | | | | T16 Rejected(AttestationMissing)‡ |
+| Attestation revoked / challenge resolved against it at execute | (post-queue) | | | | | | | | | | | T16 Rejected(AttestationMissing)‡ |
 
 † A guardian hold on a *queued* item suspends via T11 instead; a hold active at decision time rejects, refundable and resubmittable.
 ‡ Not a `decide()` outcome: the single ratification deadline is execute-time (D-5); the row is included so the table remains the complete reason-code map.

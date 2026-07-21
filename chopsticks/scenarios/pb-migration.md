@@ -1,6 +1,13 @@
 <!-- 15 §1/§4.7; 06 §6.2; 09 §3.2. -->
 # PB-MIGRATION steps
 
+> **Stale since 2026-07-20 (SQ-127/SQ-144 ruled).** This card still images the
+> retired paired `PendingUpgrade` + two-hash checkpoint form. The anchor is now
+> captured at code *application*, is `(block_number, block_hash)`, lives in its
+> own guard item, and try-state is a one-way implication (09 §3.2(2)). Re-image
+> when the implementation lands (PLAN.md SQ-127/SQ-144, batch X).
+
+
 1. Start `pb-migration.yml`; verify the real migration halt, active playbook,
    and paired pending/checkpoint/authorization-history cells.
 2. Resource-bounded branch: invoke the bounded continuation control no more

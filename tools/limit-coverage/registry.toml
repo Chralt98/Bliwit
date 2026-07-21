@@ -740,6 +740,12 @@ error = "frame_system::CallFiltered"
 reason = "13 §2; 15 §4.6: dispatch-path limit coverage."
 
 [[entry]]
+key = "MAX_PAYLOAD_DECODE_DEPTH"
+class = "dispatch-limit"
+behavior = "decode_all_with_depth_limit"
+reason = "13 §2 / 09 §1.2(11) (SQ-225): the guard's preimage decode bails at the depth limit and fails closed, so an over-deep hash-committed preimage resolves to BadPreimage instead of recursing into a wasm stack-height trap. The bound is enforced by the codec below the pallet boundary, so the SQ-156 behavior binding applies rather than a Module error."
+
+[[entry]]
 key = "lmsr-domain-bound"
 class = "dispatch-limit"
 error = "Market::PriceBoundExceeded"

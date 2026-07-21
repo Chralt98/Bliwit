@@ -1,6 +1,13 @@
 <!-- 15 §1/§4.7; 02 §11; 09 §2.1. -->
 # Upgrade transition steps
 
+> **Stale since 2026-07-20 (SQ-127/SQ-144 ruled).** This card still images the
+> retired paired `PendingUpgrade` + two-hash checkpoint form. The anchor is now
+> captured at code *application*, is `(block_number, block_hash)`, lives in its
+> own guard item, and try-state is a one-way implication (09 §3.2(2)). Re-image
+> when the implementation lands (PLAN.md SQ-127/SQ-144, batch X).
+
+
 1. Authorize branch: remove the checked-in `PendingUpgrade` override, have the
    B6 driver enqueue a fully attested CODE proposal, and drive it through
    `execute(pid)`. Assert its resulting pending record exactly matches the

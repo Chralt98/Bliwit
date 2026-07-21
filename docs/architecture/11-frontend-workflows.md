@@ -123,7 +123,7 @@ The frontend re-checks **every** check the backend performs at dispatch time ([0
 | 3. Preimage | `Preimage.PreimageFor(payload_hash, len)` present; client re-hashes and compares to the trading-time commitment |
 | 4. Runtime version | `RuntimeVersionConstraint` == live `spec_name`/`spec_version` |
 | 5. **Ratification (CODE/META and ratify-required classes)** | linked `ratify`-track referendum is `Approved` — the single **execute-time deadline** of D-5 ([06](06-governance-and-guardians.md)); missing/unpassed ⇒ the runtime rejects with `RejectReason::NotRatified`, and the FE blocks with the same reason pre-sign |
-| 6. **Attestation presence (CODE/META)** | ≥ 2-of-3 signed attestation records present in the bonded-attestor registry ([06](06-governance-and-guardians.md)/[09](09-execution-upgrades-and-rollout.md)) |
+| 6. **Attestation presence (CODE/META)** | the committed attestation records still exist, unrevoked, with no challenge resolved against them — a **record** check, not a live-registry check; the ≥ 2-of-3 quorum over the bonded registry is a *queue-time* precondition already discharged (mirrors 09 §1.2(5) item-for-item per X-11i; re-sited 2026-07-20, SQ-97) ([06](06-governance-and-guardians.md)/[09](09-execution-upgrades-and-rollout.md)) |
 | 7. **Capability rules** | call domains of the decoded batch ⊆ declared domains; each domain's `CapabilityRule` admits the class origin (`Constitution` capability table) |
 | 8. **Rate meters** | treasury meters (per-proposal ≤ 5% NAV; 30-day ≤ 10%; 180-day ≤ 30% *(normative values: [13](13-parameters.md))*) and issuance meters have headroom for `meters_declared` |
 | 9. **Resource locks** | `Epoch.ResourceLocks` still held by `pid` for every declared domain |

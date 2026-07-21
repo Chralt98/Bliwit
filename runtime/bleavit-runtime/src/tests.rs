@@ -4618,6 +4618,7 @@ fn nesting_budget_accepts_the_limit_and_fails_closed_beyond_it() {
 /// spec-legal shallow batch still decodes.
 #[test]
 fn deep_preimage_batch_decode_fails_closed_at_the_depth_limit() {
+    // limit-coverage: MAX_PAYLOAD_DECODE_DEPTH
     use parity_scale_codec::DecodeLimit;
 
     // Construct + encode the over-deep call on a large-stack helper thread:

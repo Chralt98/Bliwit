@@ -90,7 +90,7 @@ Scope of the existing gate parameters is **every market-bearing class: PARAM, TR
 | `ops.coretime_fee_dot` (key: `ops.ct_fee_dot`; DOT fee budget withdrawn beside each renewal quote for the two remote XCM legs) | Balance | planck (DOT) | 5,000,000,000 (0.5 DOT) **[VERIFY against live relay/Coretime fees at Phase-2/3 onboarding; ops-gated]** | 100,000,000 (0.01 DOT) | 100,000,000,000 (10 DOT) | ×2 | 1 | TREASURY | [09](09-execution-upgrades-and-rollout.md) §4 |
 | `ops.coretime_quote_ttl` (key: `ops.ct_quote_ttl`; executable-freshness window of an open renewal quote; expiry is the sole permissionless prune trigger) | u32 | blocks | 100,800 (~7 d) | 7,200 (~12 h) | 403,200 (~28 d) | ×2 | 1 | TREASURY | [09](09-execution-upgrades-and-rollout.md) §4 |
 | `grd.review_deadline` (key: `grd.review_dl`; guardian retro-ratification deadline) | u32 | epochs | 2 | 1 | 4 | 1 | 2 | META | [06](06-governance-and-guardians.md) §5.4 |
-| `att.bond` (attestor bond) | Balance | VIT | 25,000 | ×0.5 | ×10 | ×2 | 2 | entrenched | [06](06-governance-and-guardians.md) §7 |
+| `att.bond` (attestor bond) | Balance | VIT | 25,000 | ×0.5 | ×10 | ×2 | 2 | entrenched | [06](06-governance-and-guardians.md) §7 — **binds at seating**, not live: the challenge floor and the *attestor's* slash base read the bond held by that member (the challenger instead forfeits 50% of its own posted bond), so an amendment reaches a member only at the next `attestor.set_members` (SQ-248) |
 | `att.challenge_window` (key: `att.window`) | u32 | blocks | 43,200 (72 h) | 43,200 | 72,000 | — | 2 | META | [06](06-governance-and-guardians.md) §7, [09](09-execution-upgrades-and-rollout.md) §2.4 |
 | `ledger.min_split` (= MinTransfer) | Balance | USDC | 0.01 (10⁴ base units) | 0.01 (K floor) | 1 | — | 2 | META | [03](03-conditional-ledger.md) |
 | `ledger.archive_delay` (key: `ledger.archive`) | u32 | blocks | 1 yr | 90 d | — | — | 2 | META | [03](03-conditional-ledger.md) |
@@ -113,7 +113,8 @@ Safety rationale (row-wise, carried forward): kernel floors/ceilings exist so no
 | `MinTrade` / `MaxTrade` | 1 USDC / b/4 per extrinsic (single-trade impact ≤ 0.25 logit) | [04](04-markets-and-pricing.md) |
 | `dec.extension` | 43,200 blocks (3 d), at most once per proposal | [05](05-welfare-and-decision-engine.md) |
 | `prop.max_calls` / `max_bytes` / `max_weight` | 16 / 64 KiB / 25% of block limit | [09](09-execution-upgrades-and-rollout.md) |
-| `MAX_NESTED` (SafetyFilter recursion; wrapper set closed incl. `proxy_announced`, `as_multi_threshold_1`) | 4 levels, ≤ 16 calls | [06](06-governance-and-guardians.md), [09](09-execution-upgrades-and-rollout.md) |
+| `MAX_NESTED` (SafetyFilter recursion; wrapper set closed incl. `proxy_announced`, `as_multi_threshold_1`) | 4 levels, ≤ 16 calls — the call bound counts **nodes** (each wrapper and each leaf) against one budget shared by the whole evaluation, never reset per wrapper (SQ-31; [06](06-governance-and-guardians.md) §3.3) | [06](06-governance-and-guardians.md), [09](09-execution-upgrades-and-rollout.md) |
+| `MAX_PAYLOAD_DECODE_DEPTH` (SCALE decode-recursion bound at the guard's preimage boundary) | 256 — equal to substrate's own extrinsic decode-depth limit | [09](09-execution-upgrades-and-rollout.md) §1.2(11) |
 | LMSR domain bound | `\|q_L − q_S\|/b ≤ 48`; quoting clamp [0.001, 0.999] | [04](04-markets-and-pricing.md) |
 | LMSR error bounds | exp2/log2 ≤ 2 ulp (64.64); composed cost ≤ 8 ulp; per-trade cost error ≤ 8·2⁻⁶⁴·b | [04](04-markets-and-pricing.md) |
 | Rounding discipline | charges round up, payouts round down (maker-adverse/escrow-favoring); ledger divisions round against the claimant | [03](03-conditional-ledger.md), [04](04-markets-and-pricing.md) |
@@ -122,7 +123,7 @@ Safety rationale (row-wise, carried forward): kernel floors/ceilings exist so no
 | `DescriptorLeadTime` | 43,200 blocks (72 h) between `UpgradeAuthorized` and permissionless application | [09](09-execution-upgrades-and-rollout.md) |
 | `MIGRATION_STALL_BLOCKS` | Active cursor stalled **> 900 blocks** raises the PB-MIGRATION halt | [09](09-execution-upgrades-and-rollout.md) §3.2 |
 | PB-LEDGER-FREEZE | ≤ 14 days, one renewal only (values referendum); admissible only under the I-4 drift flag | [06](06-governance-and-guardians.md), [09](09-execution-upgrades-and-rollout.md) |
-| Expedited CODE lane | 72 h gate market + 3-day fast-track values ratification; admissible only while PB-LEDGER-FREEZE active | [06](06-governance-and-guardians.md), [09](09-execution-upgrades-and-rollout.md) |
+| Expedited CODE lane | 72 h gate market + 3-day fast-track values ratification; admissible only while **PB-LEDGER-FREEZE is active or a PB-MIGRATION halt is raised** (both arms normative — 09 §3.1; the second was omitted here and is restored by the SQ-132(d) sweep, 2026-07-20) | [06](06-governance-and-guardians.md), [09](09-execution-upgrades-and-rollout.md) |
 | Watchtower window extension (`orc.ext_window`) | one +48 h (28,800-block) extension per `(component, epoch)` lifecycle if `wt.quorum` acknowledgments absent | [07](07-oracle-and-disputes.md) |
 | `OracleSettleDeadline(m)` | start of epoch(m+1) Housekeeping (**d20** at the default length): any `(component, m)` not challenge-closed settles **neutrally** for every consuming cohort; late verdicts settle bonds only (I-18) | [07](07-oracle-and-disputes.md) §11, [05](05-welfare-and-decision-engine.md) §7 |
 | `orc.max_proof_bytes` | 256 KiB per `recompute_proof` | [07](07-oracle-and-disputes.md) §9 |
