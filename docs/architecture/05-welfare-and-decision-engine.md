@@ -626,12 +626,12 @@ pallet-epoch::settle_cohort(e, batch)                       [Signed keeper; curs
 
 pallet-epoch::finalize_epoch_baseline(e)                    [Signed, permissionless; §7(6)]
   └─ Baseline(e) only, and only for an orphan epoch (§7(6) preconditions):
-       pallet-welfare::compute_settlement(baseline e, neutral)
+       pallet-welfare::settle_baseline_void(e)               [neutral passthrough; reads no welfare state]
          └─ dispatches with pallet-welfare's SettleAuthority origin:
               ledger.settle_baseline(e, 0.5)                 (spec-fixed constant; no score computed)
 ```
 
-**Two triggers, one authority (normative; SQ-320).** `compute_settlement` is reachable from **exactly two** `pallet-epoch` entry points and from nowhere else: `settle_cohort` (the measured path) and `finalize_epoch_baseline` (the orphan-epoch neutral path of §7(6)). Both dispatch under the same single `SettleAuthority` origin owned by `pallet-welfare`, so the one-origin-per-path rule is unchanged — §7(6) adds a second *trigger*, never a second authority. The orphan path computes no score: it carries the spec-fixed `s = 0.5`, so it reads no snapshot, no MetricSpec and no gate flags, and it can settle **only** a Baseline vault — never a proposal vault and never a gate.
+**Two triggers, one authority (normative; SQ-320).** The `ledger.settle_baseline(e, ·)` terminal is reachable from **exactly two** `pallet-epoch` entry points and from nowhere else: `settle_cohort` → `compute_settlement` (the measured path, which computes `s` and reads the MetricSpec and gate flags) and `finalize_epoch_baseline` → `settle_baseline_void` (the orphan-epoch neutral path of §7(6)). The orphan path does **not** enter `compute_settlement` — it is a distinct neutral passthrough precisely because it computes no score: it carries the spec-fixed `s = 0.5`, so it reads no snapshot, no MetricSpec and no gate flags, and it can settle **only** a Baseline vault, never a proposal vault and never a gate. Both entry points nevertheless dispatch under the same single `SettleAuthority` origin owned by `pallet-welfare`, so the one-origin-per-path rule is unchanged — §7(6) adds a second *trigger* of the shared settlement authority, never a second authority.
 
 Authority-table fragment (full table: [doc 06](./06-governance-and-guardians.md)):
 
@@ -641,7 +641,7 @@ Authority-table fragment (full table: [doc 06](./06-governance-and-guardians.md)
 | `void(pid)` | `ResolveAuthority` = pallet-epoch | T20 / PB-ORACLE-VOID path ([doc 06](./06-governance-and-guardians.md)) |
 | `settle_scalar(pid, s)` | `SettleAuthority` = **pallet-welfare only** | `compute_settlement`, itself reachable only via `pallet-epoch::settle_cohort` |
 | `settle_gate(pid, gate, outcome)` | `SettleAuthority` = pallet-welfare only | same path |
-| `settle_baseline(epoch, s)` | `SettleAuthority` = pallet-welfare only | `compute_settlement`, reachable via `pallet-epoch::settle_cohort` (measured `s`) **or** `pallet-epoch::finalize_epoch_baseline` (neutral `s = 0.5`, §7(6)) |
+| `settle_baseline(epoch, s)` | `SettleAuthority` = pallet-welfare only | `compute_settlement` via `pallet-epoch::settle_cohort` (measured `s`) **or** `settle_baseline_void` via `pallet-epoch::finalize_epoch_baseline` (neutral `s = 0.5`, §7(6); no `compute_settlement`, no welfare read) |
 
 No other pallet, origin, playbook, or values track can invoke any settlement call. Oracle outcomes influence settlement exclusively through the components `pallet-welfare` reads (with challenge windows closed — I-18); `pallet-oracle` holds no ledger authority.
 
