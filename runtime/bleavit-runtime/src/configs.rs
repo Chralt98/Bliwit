@@ -3302,28 +3302,14 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
                 futarchy_primitives::RejectReason::ConstitutionViolation,
             );
         }
-        // Mirror the guard's own `enqueue` domain preconditions so `decide` is total
-        // (09 §1.1; SQ-308).
-        //
-        // Disposition is **refund**, not slash. 05 §2.1's T4 taxonomy is explicit
-        // that "confiscation requires a verified culpable act" and that "the refund
-        // arm is the default and the two slash arms are the enumerated exceptions".
-        // This failure is in neither exception: the footprint matches, the capability
-        // check passed, and the call re-derived cleanly. The only fault is a
-        // classifier projection artifact — `authorize_upgrade` is matched by
-        // `is_sub_type` at top level only, so nesting it inside the `utility.batch_all`
-        // wrapper that 05 §1.4 explicitly blesses collapses it onto the *apply*
-        // domain. Slashing a proposer 100% for using a permitted wrapper would be
-        // confiscation without a culpable act.
-        if !domains_admissible(proposal.class, &calls) {
-            return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
-        }
-        if matches!(proposal.class, futarchy_primitives::ProposalClass::Treasury)
-            && (derived_treasury_ask(&calls) != Some(proposal.ask)
-                || Self::in_cap_prize(proposal).is_none())
-        {
-            return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
-        }
+        // A verified false footprint is a culpable act (05 §2.1 T4) and is slashed
+        // regardless of any co-occurring refundable fault. It is evaluated BEFORE the
+        // refundable domain/ask arms below so a proposer cannot escape the 100%
+        // false-declaration slash by *also* committing a refundable domain violation
+        // (e.g. a domain-inadmissible payload that would otherwise refund at
+        // `domains_admissible`): the false declaration is slashed first, and the
+        // refundable arms are only reached once the declaration is known truthful
+        // (SQ-480).
         let footprint = match footprint {
             Ok(footprint) => footprint,
             Err(error) => return footprint_failure(error),
@@ -3342,6 +3328,28 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
             return StaticCheckDisposition::SlashAll(
                 futarchy_primitives::RejectReason::ConstitutionViolation,
             );
+        }
+        // Mirror the guard's own `enqueue` domain preconditions so `decide` is total
+        // (09 §1.1; SQ-308).
+        //
+        // Disposition is **refund**, not slash. 05 §2.1's T4 taxonomy is explicit
+        // that "confiscation requires a verified culpable act" and that "the refund
+        // arm is the default and the two slash arms are the enumerated exceptions".
+        // This failure is in neither exception: the footprint has been verified to
+        // match (checked just above), the capability check passed, and the call
+        // re-derived cleanly. The only fault is a classifier projection artifact —
+        // `authorize_upgrade` is matched by `is_sub_type` at top level only, so
+        // nesting it inside the `utility.batch_all` wrapper that 05 §1.4 explicitly
+        // blesses collapses it onto the *apply* domain. Slashing a proposer 100% for
+        // using a permitted wrapper would be confiscation without a culpable act.
+        if !domains_admissible(proposal.class, &calls) {
+            return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
+        }
+        if matches!(proposal.class, futarchy_primitives::ProposalClass::Treasury)
+            && (derived_treasury_ask(&calls) != Some(proposal.ask)
+                || Self::in_cap_prize(proposal).is_none())
+        {
+            return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
         }
         StaticCheckDisposition::Eligible
     }

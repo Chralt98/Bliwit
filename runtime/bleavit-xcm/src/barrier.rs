@@ -174,8 +174,11 @@ impl DenyExecution for DenyUnsupportedInstructions {
 /// mint-step scope (SQ-253) exempts `pallet-xcm`'s trapped-imbalance reconstruction,
 /// and a refusal at its metered deposit leg simply returns the assets to the trap
 /// they came from, stranding nothing new. When the gate does fire, the bound covers
-/// the **whole** holding — reclaimed assets included — because a deposit leg cannot
-/// tell the sources apart.
+/// the holding that survives fee payment — reclaimed assets included, but USDC a
+/// pre-deposit `PayFees` commits and never refunds excluded — because that is exactly
+/// what the metered deposit leg can move (SQ-481). Every uncertainty about the fee
+/// resolves to *no* reduction, so the pre-check can never admit a deposit the meter
+/// would refuse (R-7).
 ///
 /// Both reads are pure: nothing is reserved here, and the cumulative meter is still
 /// written exactly once, at the deposit leg.
@@ -194,6 +197,14 @@ struct LocalInflow {
     /// beneficiary and `DepositReserveAsset`'s `dest` (which is credited to `dest`'s
     /// local sovereign account *before* the onward message is sent).
     targets: Vec<Location>,
+    /// Count of `PayFees` instructions across the locally-executing scopes. Only the
+    /// first is ever effective (`already_paid_fees`), so a fee subtraction is
+    /// attempted only when exactly one is present.
+    pay_fees_count: u32,
+    /// Whether any `RefundSurplus` executes locally. It merges the unspent fee
+    /// register back into holding for a later deposit, so its presence forbids any
+    /// fee subtraction.
+    refund_surplus_seen: bool,
 }
 
 impl<Caps, LocationToAccountId, AccountId> DenyOverCapInflows<Caps, LocationToAccountId, AccountId>
@@ -213,6 +224,56 @@ where
             *slot = slot.checked_add(*amount).ok_or(())?;
         }
         Ok(())
+    }
+
+    /// USDC amount an inbound `PayFees` provably removes from holding before every
+    /// beneficiary deposit and never returns — the tightening the metered deposit leg
+    /// already reflects. Zero unless the program has the one unambiguous clean shape,
+    /// because a value that is too high would let an over-cap deposit through (R-7,
+    /// 09 §5.2):
+    ///   * exactly one `PayFees` executes locally — only the first is effective, and
+    ///     the effective one is not singled out among several;
+    ///   * no `RefundSurplus` executes locally — it merges the unspent fee register
+    ///     back into holding, where a later deposit can still move it;
+    ///   * that `PayFees` is a *top-level* instruction paid in USDC with no deposit
+    ///     target ordered before it — a deposit before the fee meters the full pre-fee
+    ///     holding, whereas an appendix/error-handler deposit always runs after it.
+    ///
+    /// `BuyExecution` never contributes: the executor refunds its unspent portion
+    /// straight back to holding (`PayFees` routes it to the separate fees register).
+    fn deposit_fee_reduction<Call>(
+        instructions: &[Instruction<Call>],
+        found: &LocalInflow,
+    ) -> u128 {
+        if found.refund_surplus_seen || found.pay_fees_count != 1 {
+            return 0;
+        }
+        let mut seen_target = false;
+        for instruction in instructions {
+            match instruction {
+                Instruction::DepositAsset { .. } | Instruction::DepositReserveAsset { .. } => {
+                    seen_target = true;
+                }
+                Instruction::PayFees { asset } => {
+                    if seen_target {
+                        return 0;
+                    }
+                    return Self::usdc_of(asset);
+                }
+                _ => {}
+            }
+        }
+        // The single `PayFees` runs in a nested scope, not at top level; be conservative.
+        0
+    }
+
+    /// The USDC amount of one asset, or zero if it is not the pinned USDC (a fee paid
+    /// in another asset leaves the USDC holding — hence the credited amount — intact).
+    fn usdc_of(asset: &Asset) -> u128 {
+        match (&asset.id, &asset.fun) {
+            (AssetId(id), Fungibility::Fungible(amount)) if id == &usdc_location() => *amount,
+            _ => 0,
+        }
     }
 
     /// Walk only the scopes that execute **on this chain**. `SetAppendix` and
@@ -252,6 +313,12 @@ where
                 Instruction::DepositReserveAsset { dest, .. } => {
                     found.targets.push(dest.clone());
                 }
+                Instruction::PayFees { .. } => {
+                    found.pay_fees_count = found.pay_fees_count.saturating_add(1);
+                }
+                Instruction::RefundSurplus => {
+                    found.refund_surplus_seen = true;
+                }
                 Instruction::SetAppendix(xcm) | Instruction::SetErrorHandler(xcm) => {
                     let next = depth.checked_add(1).ok_or(())?;
                     Self::scan(&xcm.0, next, remaining, found)?;
@@ -280,14 +347,20 @@ where
         // first local instruction with nothing minted and nothing trapped. It is
         // `phase3.deposit_cap` that lacked a pre-mint home, because the beneficiary
         // is invisible to the `AssetTransactor` interface; this gate supplies it.
-        let Some(bound) = found.entering_usdc.checked_add(found.reclaimed_usdc) else {
+        let Some(holding) = found.entering_usdc.checked_add(found.reclaimed_usdc) else {
             return false;
         };
-        // The whole holding is a sound upper bound on what any single deposit leg can
-        // move, so checking every target against it can only ever be stricter than the
-        // deposit leg — never laxer. A target this chain cannot resolve to a local
-        // account fails closed. Targets are deduplicated so a program cannot inflate
-        // the number of storage reads by repeating one.
+        // Bound each target against the *post-fee* holding the deposit leg will meter,
+        // not the whole pre-fee holding: USDC a pre-deposit `PayFees` commits and never
+        // refunds never reaches `deposit_asset`, so charging the beneficiary for it here
+        // wrongly rejects a program with only post-fee headroom (SQ-481). The reduction
+        // is a conservative *lower* bound on that removal, so `bound` stays a sound
+        // upper bound on any single deposit — checking every target against it can only
+        // ever be stricter than the deposit leg, never laxer (R-7, 09 §5.2).
+        let bound = holding.saturating_sub(Self::deposit_fee_reduction(instructions, &found));
+        // A target this chain cannot resolve to a local account fails closed. Targets
+        // are deduplicated so a program cannot inflate the number of storage reads by
+        // repeating one.
         let mut checked: Vec<&Location> = Vec::new();
         for target in &found.targets {
             if checked.contains(&target) {

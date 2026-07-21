@@ -16154,3 +16154,57 @@ fn top_level_authorize_upgrade_still_screens_and_enqueues() {
         );
     });
 }
+
+#[test]
+fn false_footprint_is_slashed_even_when_also_domain_inadmissible() {
+    // A proposal that is simultaneously (a) domain-inadmissible — nested
+    // `authorize_upgrade` inside `utility.batch_all`, which `domains_admissible`
+    // refunds — and (b) false-footprint — declared resources ≠ derived footprint —
+    // must be SLASHED for the false declaration, not refunded for the domain fault.
+    // A verified false footprint is a culpable act (05 §2.1 T4); a proposer must not
+    // escape the 100% false-declaration slash by *also* committing a co-occurring
+    // refundable fault. The footprint-equality check therefore precedes the
+    // domain/ask refunds in `static_check` (SQ-480 review round on SQ-308).
+    development_ext().execute_with(|| {
+        let Some((payload_hash, payload_len)) =
+            note_runtime_batch(vec![nested_authorize_upgrade_batch()])
+        else {
+            assert!(false, "nested upgrade fixture must encode");
+            return;
+        };
+        let proposer = account(248);
+        let pid = pallet_epoch::NextProposalId::<Runtime>::get();
+        let mut submitted = empty_param_proposal(pid, proposer, payload_hash, payload_len);
+        submitted.class = ProposalClass::Code;
+        submitted.bond = crate::configs::balance_param(b"prop.bond.code");
+        // The derived footprint is the singleton apply resource `[0x03]`. Declaring a
+        // *different* resource (`0x01`, a param/registry key) is a false claim — the
+        // culpable act the slash arm exists for.
+        submitted.resources = match futarchy_primitives::BoundedVec::try_from(vec![
+            expected_resource_key(0x01, None),
+        ]) {
+            Ok(resources) => resources,
+            Err(_) => {
+                assert!(false, "one resource must fit");
+                return;
+            }
+        };
+        let disposition =
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::static_check(&submitted);
+        assert!(
+            matches!(
+                disposition,
+                pallet_epoch::StaticCheckDisposition::SlashAll(
+                    futarchy_primitives::RejectReason::ConstitutionViolation
+                )
+            ),
+            // Before the SQ-480 reorder this returned `Refund(ProcessHold)`: the
+            // `domains_admissible` refund fired first and the false footprint went
+            // unpunished.
+            "a false footprint must be slashed even when the payload is also \
+             domain-inadmissible: {disposition:?}",
+        );
+    });
+}

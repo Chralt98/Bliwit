@@ -1222,6 +1222,169 @@ fn caps_group_fee_only_usdc_program_is_still_subject_to_the_global_mint_gate() {
 }
 
 // -------------------------------------------------------------------------
+// Pre-mint gate meters the post-fee credited amount (09 §5.2; SQ-481)
+// -------------------------------------------------------------------------
+
+type TestInflowGate =
+    crate::barrier::DenyOverCapInflows<TestCaps, TestLocationToAccountId, AccountId>;
+
+/// Run only the pre-mint per-account inflow gate over `program`; `true` == admitted.
+fn inflow_gate_admits(program: Xcm<()>) -> bool {
+    let mut instructions = program.0;
+    let mut properties = Properties {
+        weight_credit: Weight::zero(),
+        message_id: None,
+    };
+    <TestInflowGate as DenyExecution>::deny_execution::<()>(
+        &asset_hub_location(),
+        &mut instructions,
+        MAX_WEIGHT,
+        &mut properties,
+    )
+    .is_ok()
+}
+
+#[test]
+fn caps_group_pre_mint_gate_meters_the_post_fee_amount_for_usdc_payfees() {
+    // A program that pays its execution fee in USDC via `PayFees` deposits only the
+    // holding that survives the fee — exactly what `CappedInflows::deposit_asset`
+    // meters. The pre-mint gate must bound the beneficiary against that post-fee
+    // amount (100 − 10 = 90), not the whole pre-fee holding (100): a user with 90
+    // remaining headroom is entitled to receive the 90 they will actually be
+    // credited (SQ-481). Before the fix this program was wrongly refused (bound 100).
+    let payfees_inbound = || {
+        Xcm(vec![
+            ReserveAssetDeposited(Assets::from(asset(usdc_location(), 100))),
+            ClearOrigin,
+            PayFees {
+                asset: asset(usdc_location(), 10),
+            },
+            DepositAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(1)),
+                beneficiary: account_location(ALICE_BYTES),
+            },
+        ])
+    };
+    new_test_ext().execute_with(|| {
+        // Remaining headroom exactly equals the post-fee credited amount.
+        set_caps(u128::MAX, 90);
+        assert!(
+            inflow_gate_admits(payfees_inbound()),
+            "post-fee deposit (90) fits the 90 headroom and must be admitted"
+        );
+    });
+    new_test_ext().execute_with(|| {
+        // One unit less headroom than the post-fee amount: the metered deposit (90)
+        // would breach the cap, so the gate must still refuse. This pins the bound at
+        // exactly the post-fee 90 — never looser — so it can never admit an over-cap
+        // deposit (R-7).
+        set_caps(u128::MAX, 89);
+        assert!(
+            !inflow_gate_admits(payfees_inbound()),
+            "a metered deposit of 90 over an 89 cap must be refused"
+        );
+    });
+}
+
+#[test]
+fn caps_group_pre_mint_gate_admits_a_fee_only_usdc_program() {
+    // A program whose USDC is entirely consumed by the fee credits zero to its
+    // beneficiary, so its real `deposit_asset` meter never moves. It must not be
+    // refused for the pre-fee holding it never deposits (SQ-481).
+    new_test_ext().execute_with(|| {
+        set_caps(u128::MAX, 1);
+        let fee_only = Xcm(vec![
+            WithdrawAsset(Assets::from(asset(usdc_location(), 100))),
+            PayFees {
+                asset: asset(usdc_location(), 100),
+            },
+            DepositAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(1)),
+                beneficiary: account_location(ALICE_BYTES),
+            },
+        ]);
+        assert!(
+            inflow_gate_admits(fee_only),
+            "a fee-only program credits zero and must not be rejected"
+        );
+    });
+}
+
+#[test]
+fn caps_group_pre_mint_gate_still_refuses_an_over_cap_post_fee_deposit() {
+    // The fee subtraction must not loosen the gate into admitting an over-cap
+    // deposit: with 85 headroom, the metered post-fee deposit of 90 still breaches
+    // the cap and must be refused (R-7).
+    new_test_ext().execute_with(|| {
+        set_caps(u128::MAX, 85);
+        let program = Xcm(vec![
+            ReserveAssetDeposited(Assets::from(asset(usdc_location(), 100))),
+            PayFees {
+                asset: asset(usdc_location(), 10),
+            },
+            DepositAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(1)),
+                beneficiary: account_location(ALICE_BYTES),
+            },
+        ]);
+        assert!(
+            !inflow_gate_admits(program),
+            "a 90 post-fee deposit over an 85 cap must be refused"
+        );
+    });
+}
+
+#[test]
+fn caps_group_pre_mint_gate_ignores_a_pay_fees_ordered_after_a_deposit() {
+    // A `PayFees` that follows the `DepositAsset` removes nothing before it: the
+    // deposit meters the full pre-fee holding (100). The gate must therefore *not*
+    // subtract the fee, and must refuse a 100 deposit over a 90 cap — otherwise a
+    // reordered program would evade the cap (R-7).
+    new_test_ext().execute_with(|| {
+        set_caps(u128::MAX, 90);
+        let reordered = Xcm(vec![
+            ReserveAssetDeposited(Assets::from(asset(usdc_location(), 100))),
+            DepositAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(1)),
+                beneficiary: account_location(ALICE_BYTES),
+            },
+            PayFees {
+                asset: asset(usdc_location(), 10),
+            },
+        ]);
+        assert!(
+            !inflow_gate_admits(reordered),
+            "a deposit before the fee meters the full holding and must be refused"
+        );
+    });
+}
+
+#[test]
+fn caps_group_pre_mint_gate_ignores_a_refundable_pay_fees() {
+    // `RefundSurplus` can merge the unspent `PayFees` back into holding for a later
+    // deposit, so its presence forbids any subtraction: the deposit could still move
+    // the full holding (100), which must be refused over a 90 cap (R-7).
+    new_test_ext().execute_with(|| {
+        set_caps(u128::MAX, 90);
+        let refunded = Xcm(vec![
+            ReserveAssetDeposited(Assets::from(asset(usdc_location(), 100))),
+            PayFees {
+                asset: asset(usdc_location(), 10),
+            },
+            RefundSurplus,
+            DepositAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(1)),
+                beneficiary: account_location(ALICE_BYTES),
+            },
+        ]);
+        assert!(
+            !inflow_gate_admits(refunded),
+            "a refundable fee must not be subtracted from the deposit bound"
+        );
+    });
+}
+
+// -------------------------------------------------------------------------
 // Health tracking (09 §6.4; I-24)
 // -------------------------------------------------------------------------
 
