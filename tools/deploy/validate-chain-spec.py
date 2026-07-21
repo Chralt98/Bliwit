@@ -93,6 +93,19 @@ USDC_ENDOWED_ACCOUNTS = {
     # PalletId b"bl/trsry", sub-seed b"ORACLE__".
     "treasury_oracle": "fvGJck7fS1t2fpsb9pwHpghdH5GxgxAp1Ry3utTBSxzNF4xkN",
 }
+# 09 §4/§6.1: DOT is held locally under the parent Location and funds coretime
+# renewal. `identity.rs::dot_location()` is `Location::parent()`, and
+# `Junctions::Here` is a unit variant of a plain-derive enum, so its serde shape
+# is the bare string "Here".
+DOT_LOCATION = {"parents": 1, "interior": "Here"}
+DOT_MIN_BALANCE = 1
+# Every asset the runtime declares in `foreignAssets.assets` at genesis, with
+# the doc section that owns it. Both carry the same catastrophic authority if
+# their owner is wrong, so both are gated identically.
+DECLARED_ASSETS = {
+    "USDC": (USDC_LOCATION, USDC_MIN_BALANCE, "03 §7 R-4"),
+    "DOT": (DOT_LOCATION, DOT_MIN_BALANCE, "09 §4/§6.1"),
+}
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 BASE58_VALUES = {character: index for index, character in enumerate(BASE58_ALPHABET)}
 
@@ -186,6 +199,71 @@ def contains_todo(value: Any) -> bool:
     return False
 
 
+def validate_declared_asset(
+    asset_rows: list[Any],
+    label: str,
+    location: dict[str, Any],
+    minimum_balance: int,
+    citation: str,
+    failures: list[str],
+) -> None:
+    """Require the full canonical `foreignAssets.assets` row for one asset.
+
+    `pallet-assets` genesis rows are `(id, owner, is_sufficient, min_balance)`,
+    and its `build` installs `owner` as owner AND issuer AND admin AND freezer
+    — mint, burn and freeze authority over every unit of the asset on chain.
+    Matching only the Location and `min_balance` would therefore let a release
+    pass a spec that hands an external key control of protocol collateral, or
+    that clears `is_sufficient` (03 §7 R-4's opening clause for USDC, and what
+    keeps the endowed protocol accounts alive without provider references).
+    All four fields are checked, and the owner must be the ledger sovereign
+    that `runtime/bleavit-runtime/src/genesis.rs` derives.
+    """
+    expected_owner = ss58_account_id(USDC_ENDOWED_ACCOUNTS["ledger_sovereign"])
+    if expected_owner is None:
+        failures.append(
+            f"{citation}: validator has an invalid derived ledger sovereign address"
+        )
+        return
+
+    matches = [
+        row
+        for row in asset_rows
+        if isinstance(row, list) and len(row) == 4 and row[0] == location
+    ]
+    if not matches:
+        failures.append(
+            f"{citation}: foreignAssets.assets must declare the canonical "
+            f"{label} Location"
+        )
+        return
+    if len(matches) > 1:
+        failures.append(
+            f"{citation}: foreignAssets.assets declares the canonical {label} "
+            "Location more than once"
+        )
+        return
+
+    _, owner, is_sufficient, declared_minimum = matches[0]
+    if not isinstance(owner, str) or ss58_account_id(owner) != expected_owner:
+        failures.append(
+            f"{citation}: the {label} asset owner must be the derived ledger "
+            f"sovereign {USDC_ENDOWED_ACCOUNTS['ledger_sovereign']!r} (genesis "
+            "installs the owner as issuer, admin and freezer), found "
+            f"{owner!r}"
+        )
+    if is_sufficient is not True:
+        failures.append(
+            f"{citation}: the {label} asset must be declared sufficient "
+            f"(is_sufficient = true), found {is_sufficient!r}"
+        )
+    if declared_minimum != minimum_balance or isinstance(declared_minimum, bool):
+        failures.append(
+            f"{citation}: the {label} asset must declare min_balance "
+            f"{minimum_balance}, found {declared_minimum!r}"
+        )
+
+
 def validate_usdc_genesis(patch: dict[str, Any], failures: list[str]) -> None:
     """Enforce the exact, minimal 03 §7 R-4 USDC genesis issuance."""
     required_by_account: dict[bytes, tuple[str, str]] = {}
@@ -204,16 +282,12 @@ def validate_usdc_genesis(patch: dict[str, Any], failures: list[str]) -> None:
         return
 
     asset_rows = foreign_assets.get("assets")
-    if not isinstance(asset_rows, list) or not any(
-        isinstance(row, list)
-        and len(row) == 4
-        and row[0] == USDC_LOCATION
-        and row[3] == USDC_MIN_BALANCE
-        for row in asset_rows
-    ):
-        failures.append(
-            "03 §7 R-4: foreignAssets.assets must declare the canonical USDC "
-            f"Location with min_balance {USDC_MIN_BALANCE}"
+    if not isinstance(asset_rows, list):
+        failures.append("03 §7 R-4: foreignAssets.assets must be an array")
+        return
+    for label, (location, minimum, citation) in DECLARED_ASSETS.items():
+        validate_declared_asset(
+            asset_rows, label, location, minimum, citation, failures
         )
 
     account_rows = foreign_assets.get("accounts")

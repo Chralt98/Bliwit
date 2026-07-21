@@ -178,13 +178,18 @@ def synthetic_dev_spec() -> dict[str, object]:
                     "balances": {"balances": balances},
                     "vesting": {"vesting": [[CHARLIE, *schedule], [DAVE, *schedule]]},
                     "foreignAssets": {
+                        # Owner is the derived ledger sovereign, never a user
+                        # key: `pallet-assets` genesis installs the owner as
+                        # issuer, admin and freezer too, so this row carries
+                        # mint/burn/freeze authority over protocol collateral.
                         "assets": [
                             [
-                                copy.deepcopy(validator.USDC_LOCATION),
-                                ALICE,
+                                copy.deepcopy(location),
+                                validator.USDC_ENDOWED_ACCOUNTS["ledger_sovereign"],
                                 True,
-                                validator.USDC_MIN_BALANCE,
+                                minimum,
                             ]
+                            for location, minimum, _ in validator.DECLARED_ASSETS.values()
                         ],
                         "accounts": foreign_asset_accounts,
                     },
@@ -377,6 +382,99 @@ class ValidateGenesisTests(unittest.TestCase):
 
         self.assertTrue(
             any("assets must declare" in failure for failure in failures), failures
+        )
+
+    def test_declared_asset_owner_must_be_the_ledger_sovereign(self) -> None:
+        # `pallet-assets` genesis installs the owner as issuer, admin and
+        # freezer, so an external owner would hold mint/burn/freeze authority
+        # over all protocol collateral. Each declared asset is checked.
+        for index, label in enumerate(validator.DECLARED_ASSETS):
+            with self.subTest(asset=label):
+                spec = copy.deepcopy(self.valid_spec)
+                assets = spec["genesis"]["runtimeGenesis"]["patch"]["foreignAssets"][
+                    "assets"
+                ]
+                assets[index][1] = ALICE
+
+                failures = self.validate(spec)
+
+                self.assertTrue(
+                    any(
+                        f"the {label} asset owner must be the derived ledger sovereign"
+                        in failure
+                        for failure in failures
+                    ),
+                    failures,
+                )
+
+    def test_declared_asset_must_be_sufficient(self) -> None:
+        # 03 §7 R-4's opening clause for USDC; clearing it also removes what
+        # keeps the endowed protocol accounts alive without provider refs.
+        for index, label in enumerate(validator.DECLARED_ASSETS):
+            with self.subTest(asset=label):
+                spec = copy.deepcopy(self.valid_spec)
+                assets = spec["genesis"]["runtimeGenesis"]["patch"]["foreignAssets"][
+                    "assets"
+                ]
+                assets[index][2] = False
+
+                failures = self.validate(spec)
+
+                self.assertTrue(
+                    any(
+                        f"the {label} asset must be declared sufficient" in failure
+                        for failure in failures
+                    ),
+                    failures,
+                )
+
+    def test_declared_asset_min_balance_must_match(self) -> None:
+        for index, (label, (_, minimum, _)) in enumerate(
+            validator.DECLARED_ASSETS.items()
+        ):
+            with self.subTest(asset=label):
+                spec = copy.deepcopy(self.valid_spec)
+                assets = spec["genesis"]["runtimeGenesis"]["patch"]["foreignAssets"][
+                    "assets"
+                ]
+                assets[index][3] = minimum + 1
+
+                failures = self.validate(spec)
+
+                self.assertTrue(
+                    any(
+                        f"the {label} asset must declare min_balance" in failure
+                        for failure in failures
+                    ),
+                    failures,
+                )
+
+    def test_declared_asset_may_not_be_declared_twice(self) -> None:
+        spec = copy.deepcopy(self.valid_spec)
+        assets = spec["genesis"]["runtimeGenesis"]["patch"]["foreignAssets"]["assets"]
+        assets.append(copy.deepcopy(assets[0]))
+
+        failures = self.validate(spec)
+
+        self.assertTrue(
+            any("Location more than once" in failure for failure in failures), failures
+        )
+
+    def test_foreign_assets_must_declare_dot(self) -> None:
+        spec = copy.deepcopy(self.valid_spec)
+        assets = spec["genesis"]["runtimeGenesis"]["patch"]["foreignAssets"]["assets"]
+        spec["genesis"]["runtimeGenesis"]["patch"]["foreignAssets"]["assets"] = [
+            row for row in assets if row[0] != validator.DOT_LOCATION
+        ]
+
+        failures = self.validate(spec)
+
+        self.assertTrue(
+            any(
+                "must declare the canonical DOT Location" in failure
+                for failure in failures
+            ),
+            failures,
         )
 
     def test_usdc_endowments_do_not_leak_into_native_balances(self) -> None:
