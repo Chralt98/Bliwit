@@ -24,6 +24,11 @@ fn attestor_events() -> Vec<Event<Test>> {
         .collect()
 }
 
+/// The core `[u8; 32]` view of a mock account, for `AttestorInfo` lookups.
+fn core_acct(n: u8) -> futarchy_primitives::AccountId {
+    acct(n).into()
+}
+
 fn attest_two(pid: u64, artifact_hash: futarchy_primitives::H256) {
     assert_ok!(Attestor::attest(
         RuntimeOrigin::signed(acct(1)),
@@ -566,8 +571,20 @@ fn odd_bonds_round_challenge_floor_and_both_forfeits_up() {
 }
 
 #[test]
-fn false_resolution_rejects_if_the_losing_attestor_is_no_longer_stored() {
+fn recall_no_longer_strands_an_open_challenge_on_the_adverse_branch() {
+    // SUPERSEDES `false_resolution_rejects_if_the_losing_attestor_is_no_longer_stored`,
+    // which pinned the SQ-262 defect as intended behaviour: a recall used to drop
+    // the departing attestor's row outright, so `resolve_challenge(id, false)`
+    // returned `NotMember` and the challenge stayed `Open` forever. That is the
+    // residual SQ-248 recorded — "a for-cause recall shields the attestor from
+    // adjudication". Seating now retains a liable member as an inactive row, so
+    // the adverse verdict lands and the record reaches a terminal state.
+    //
+    // The core's `NotMember` guard on that branch survives as a defensive check
+    // (G-1); it is no longer reachable through dispatch, and the core try-state
+    // invariant "every open challenge has a member row" is what keeps it so.
     new_test_ext().execute_with(|| {
+        set_block(1);
         assert_ok!(Attestor::attest(
             RuntimeOrigin::signed(acct(1)),
             1,
@@ -585,14 +602,12 @@ fn false_resolution_rejects_if_the_losing_attestor_is_no_longer_stored() {
             vec![acct(4), acct(5), acct(6)],
         ));
 
-        assert_noop!(
-            Attestor::resolve_challenge(ratify_origin(), 0, false),
-            Error::<Test>::NotMember
-        );
+        assert_ok!(Attestor::resolve_challenge(ratify_origin(), 0, false));
         assert!(matches!(
             Attestations::<Test>::get()[0].challenge,
-            Some(ChallengeStatus::Open { .. })
+            Some(ChallengeStatus::Rejected)
         ));
+        assert_ok!(Attestor::do_try_state());
     });
 }
 
@@ -749,6 +764,163 @@ fn recall_after_attest_is_valid_and_drops_recalled_attestor_from_quorum() {
         // two distinct active attestors, so it is no longer met.
         set_block(u64::from(CHALLENGE_WINDOW_BLOCKS + 2));
         assert!(!Attestor::has_quorum(9, hash(7)));
+    });
+}
+
+#[test]
+fn recall_retains_a_liable_attestor_so_an_open_challenge_still_resolves() {
+    // SQ-262 (06 §7; 09 §2.4). A values-track recall removes governance
+    // authority immediately, but it MUST NOT destroy the departing attestor's
+    // slash basis while a challenge against one of their attestations is still
+    // open: the challenge would otherwise be unresolvable forever (the adverse
+    // verdict returns `NotMember`), which permanently suppresses the attestation
+    // from quorum and permanently shields the attestor from a `false_count`
+    // strike — a for-cause recall would launder the offense.
+    new_test_ext().execute_with(|| {
+        set_block(1);
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            1,
+            hash(1),
+            hash(2),
+        ));
+        assert_ok!(Attestor::challenge_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            0,
+            hash(3),
+            CHALLENGE_BOND,
+        ));
+        // Recall acct(1); the incoming roster does not include them.
+        assert_ok!(Attestor::set_members(
+            values_origin(),
+            vec![acct(4), acct(5), acct(6)],
+        ));
+
+        // Governance authority is gone immediately: the recalled attestor is
+        // retained but inactive, and cannot attest again.
+        let retained = Members::<Test>::get()
+            .into_iter()
+            .find(|member| member.account == core_acct(1))
+            .expect("a liable attestor is retained as the slash basis");
+        assert!(!retained.active);
+        assert_eq!(retained.bond, ATTESTOR_BOND);
+        assert_noop!(
+            Attestor::attest(RuntimeOrigin::signed(acct(1)), 2, hash(1), hash(2)),
+            Error::<Test>::NotMember
+        );
+        // The retained row does not count toward the active registry floor.
+        assert_eq!(
+            Members::<Test>::get()
+                .iter()
+                .filter(|member| member.active)
+                .count(),
+            3
+        );
+
+        // The adverse verdict now lands against the retained basis.
+        assert_ok!(Attestor::resolve_challenge(ratify_origin(), 0, false));
+        let after = Members::<Test>::get()
+            .into_iter()
+            .find(|member| member.account == core_acct(1))
+            .expect("still retained until the record settles");
+        assert_eq!(after.false_count, 1);
+        assert_eq!(after.bond, ATTESTOR_BOND - (ATTESTOR_BOND / 2));
+        assert!(matches!(
+            Attestations::<Test>::get()[0].challenge,
+            Some(ChallengeStatus::Rejected)
+        ));
+        assert_ok!(Attestor::do_try_state());
+    });
+}
+
+#[test]
+fn recall_preserves_a_continuing_members_strike_count() {
+    // SQ-262 / 06 §7 ejection discipline. Re-electing a roster must not wipe a
+    // continuing member's `false_count`, or one no-op `set_members` resets every
+    // strike and the second-false ejection threshold is unreachable. 13 §1's
+    // `att.bond` row (SQ-248) says the *bond* re-binds at seating; nothing
+    // re-binds the strike count.
+    new_test_ext().execute_with(|| {
+        set_block(1);
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            1,
+            hash(1),
+            hash(2),
+        ));
+        assert_ok!(Attestor::challenge_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            0,
+            hash(3),
+            CHALLENGE_BOND,
+        ));
+        assert_ok!(Attestor::resolve_challenge(ratify_origin(), 0, false));
+        assert_eq!(
+            Members::<Test>::get()
+                .iter()
+                .find(|member| member.account == core_acct(1))
+                .map(|member| member.false_count),
+            Some(1)
+        );
+
+        // Re-elect the same roster: the strike survives, the bond re-binds.
+        assert_ok!(Attestor::set_members(
+            values_origin(),
+            vec![acct(1), acct(2), acct(3)],
+        ));
+        let member = Members::<Test>::get()
+            .into_iter()
+            .find(|member| member.account == core_acct(1))
+            .expect("continuing member");
+        assert_eq!(member.false_count, 1);
+        assert_eq!(member.bond, ATTESTOR_BOND);
+        assert!(member.active);
+
+        // A second adjudicated-false attestation therefore still ejects.
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            2,
+            hash(1),
+            hash(2),
+        ));
+        assert_ok!(Attestor::challenge_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            1,
+            hash(3),
+            CHALLENGE_BOND,
+        ));
+        assert_ok!(Attestor::resolve_challenge(ratify_origin(), 1, false));
+        assert!(attestor_events()
+            .iter()
+            .any(|event| matches!(event, Event::AttestorEjected { .. })));
+        assert_ok!(Attestor::do_try_state());
+    });
+}
+
+#[test]
+fn recall_drops_an_attestor_carrying_no_outstanding_liability() {
+    // The retention of SQ-262 is bounded: once every window has closed and no
+    // challenge is open, the departing row carries no slash basis and is
+    // removed, so recalls cannot accumulate dead rows against the 16-seat bound.
+    new_test_ext().execute_with(|| {
+        set_block(1);
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            1,
+            hash(1),
+            hash(2),
+        ));
+        // Window closes with no challenge: the record is unchallengeable.
+        set_block(u64::from(CHALLENGE_WINDOW_BLOCKS + 2));
+        assert_ok!(Attestor::set_members(
+            values_origin(),
+            vec![acct(4), acct(5), acct(6)],
+        ));
+        assert_eq!(Members::<Test>::get().len(), 3);
+        assert!(!Members::<Test>::get()
+            .iter()
+            .any(|member| member.account == core_acct(1)));
+        assert_ok!(Attestor::do_try_state());
     });
 }
 

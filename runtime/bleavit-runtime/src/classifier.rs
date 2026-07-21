@@ -640,21 +640,28 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             pallet_oracle::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::IncidentRegistry(call) => match call {
+            // `resolve_challenge` is gated on `EnsureOracleResolution` by both
+            // instances (`registry_config!`), so its authority-matrix row is the
+            // same as `oracle.adjudicate`'s — not `Public` (SQ-295). Classifying
+            // it `Public` admitted it for every origin and, being
+            // non-privileged, carried it through the proxy/multisig wrapper set
+            // that rejects the oracle's terminal call.
+            pallet_registry::Call::resolve_challenge { .. } => leaf(CallDomain::OracleResolution),
             pallet_registry::Call::file { .. }
             | pallet_registry::Call::challenge_filing { .. }
             | pallet_registry::Call::ack_observed { .. }
             | pallet_registry::Call::crank_close { .. }
-            | pallet_registry::Call::resolve_challenge { .. }
             | pallet_registry::Call::close_epoch { .. }
             | pallet_registry::Call::reap_epoch { .. } => leaf(CallDomain::Public),
             pallet_registry::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::MilestoneRegistry(call) => match call {
+            // Same authority as the Incident instance (SQ-295).
+            pallet_registry::Call::resolve_challenge { .. } => leaf(CallDomain::OracleResolution),
             pallet_registry::Call::file { .. }
             | pallet_registry::Call::challenge_filing { .. }
             | pallet_registry::Call::ack_observed { .. }
             | pallet_registry::Call::crank_close { .. }
-            | pallet_registry::Call::resolve_challenge { .. }
             | pallet_registry::Call::close_epoch { .. }
             | pallet_registry::Call::reap_epoch { .. } => leaf(CallDomain::Public),
             pallet_registry::Call::__Ignore(_, _) => denied(),
@@ -1026,6 +1033,15 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             | RuntimeCall::Attestor(pallet_attestor::Call::set_members { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::resolve_challenge { .. })
             | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. })
+            // Both registry instances gate `resolve_challenge` on
+            // `EnsureOracleResolution` (SQ-295). Now that the classifier states
+            // that authority, the bare leaf must be admitted here too — a
+            // privileged leaf is otherwise rejected by the origin-blind base
+            // filter at scheduler dispatch, before the pallet's own
+            // `ResolutionAuthority` check runs, leaving the configured values
+            // path unreachable (the SQ-32 stock-scheduler accommodation).
+            | RuntimeCall::IncidentRegistry(pallet_registry::Call::resolve_challenge { .. })
+            | RuntimeCall::MilestoneRegistry(pallet_registry::Call::resolve_challenge { .. })
             | RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::ratify { .. })
     )
 }

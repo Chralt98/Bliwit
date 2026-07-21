@@ -10668,12 +10668,27 @@ fn sq75_both_registry_instances_are_base_filter_public_and_resolve_is_origin_gat
         .into_iter()
         .map(RuntimeCall::MilestoneRegistry)
         .collect();
-    for call in incident.iter().chain(milestone.iter()) {
+    // Index 4 is `resolve_challenge`, the one governance-gated call in the set:
+    // both instances bind it to `EnsureOracleResolution`, so since SQ-295 it
+    // carries that authority in the classifier rather than `Public`. It stays
+    // base-filter admissible as a bare leaf (`is_values_enactment_leaf`, the
+    // SQ-32 scheduler accommodation) but, being privileged, is no longer
+    // carried by the closed wrapper set — parity with `oracle.adjudicate`.
+    const RESOLVE: usize = 4;
+    for (index, call) in incident
+        .iter()
+        .enumerate()
+        .chain(milestone.iter().enumerate())
+    {
         assert!(RuntimeBaseCallFilter::contains(call));
         let wrapped = RuntimeCall::Utility(pallet_utility::Call::batch {
             calls: vec![call.clone()],
         });
-        assert!(RuntimeBaseCallFilter::contains(&wrapped));
+        assert_eq!(
+            RuntimeBaseCallFilter::contains(&wrapped),
+            index != RESOLVE,
+            "wrapper admissibility must follow the call's real authority (SQ-295)"
+        );
     }
 
     development_ext().execute_with(|| {

@@ -223,8 +223,14 @@ inventory! {
         leaf oracle_resolution => ["adjudicate"];
         leaf public => ["register_reporter", "deregister_reporter", "report", "challenge", "recompute_proof", "register_watchtower", "ack_observed", "crank_round_close", "crank_reserve_probe"];
     }
-    "IncidentRegistry" { leaf public => ["file", "challenge_filing", "ack_observed", "crank_close", "resolve_challenge", "close_epoch", "reap_epoch"]; }
-    "MilestoneRegistry" { leaf public => ["file", "challenge_filing", "ack_observed", "crank_close", "resolve_challenge", "close_epoch", "reap_epoch"]; }
+    "IncidentRegistry" {
+        leaf oracle_resolution => ["resolve_challenge"];
+        leaf public => ["file", "challenge_filing", "ack_observed", "crank_close", "close_epoch", "reap_epoch"];
+    }
+    "MilestoneRegistry" {
+        leaf oracle_resolution => ["resolve_challenge"];
+        leaf public => ["file", "challenge_filing", "ack_observed", "crank_close", "close_epoch", "reap_epoch"];
+    }
     "FutarchyTreasury" {
         leaf treasury => ["fund_budget_line", "spend", "open_stream", "cancel_stream", "issue_vit", "recover_foreign", "set_coretime_authority"];
         leaf public => ["claim_stream", "execute_coretime_renewal", "note_coretime_quote", "prune_coretime_quote"];

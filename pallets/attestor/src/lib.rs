@@ -181,6 +181,9 @@ pub mod pallet {
         QuorumMissing,
         /// The referenced attestation exists but has no open challenge.
         NoOpenChallenge,
+        /// try-state only: a member at or past the ejection threshold is still
+        /// active. No dispatch produces this (06 §7; SQ-262).
+        EjectedMemberActive,
         Overflow,
         NotInitialized,
         TooManyAttestors,
@@ -211,7 +214,12 @@ pub mod pallet {
             let raw: Vec<CoreAccountId> = members.iter().map(Self::to_core).collect();
             let mut registry = Self::load().unwrap_or_else(Self::empty_core);
             registry
-                .set_members(AttestorOrigin::ConstitutionalValues, raw, T::Params::get())
+                .set_members(
+                    AttestorOrigin::ConstitutionalValues,
+                    raw,
+                    Self::now(),
+                    T::Params::get(),
+                )
                 .map_err(Self::map_core_error)?;
             Self::persist(&registry)?;
             Self::drain_events(&mut registry);
@@ -542,6 +550,7 @@ pub mod pallet {
                 CoreError::ChallengeStillOpen => Error::<T>::ChallengeStillOpen.into(),
                 CoreError::QuorumMissing => Error::<T>::QuorumMissing.into(),
                 CoreError::NoOpenChallenge => Error::<T>::NoOpenChallenge.into(),
+                CoreError::EjectedMemberActive => Error::<T>::EjectedMemberActive.into(),
                 CoreError::Overflow => Error::<T>::Overflow.into(),
             }
         }

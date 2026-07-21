@@ -21,9 +21,13 @@
 //! - 09 §1.4 lists `utility.batch`/`force_batch` among recursively inspected
 //!   wrappers, but their best-effort semantics contradict 09 §1.2(12)'s atomic
 //!   dispatch requirement; B1a must reject them and admit only `batch_all`.
-//! - 09 §1.2(5) says attestation presence is rechecked, while I-19 and 06 §7
-//!   imply live quorum after queue admission; this implementation fails closed
-//!   by rechecking both presence and quorum.
+//! - 09 §1.2(5) once read as narrowing the dispatch-time attestation check to
+//!   the committed record alone, against I-19 and 06 §7's live-quorum reading;
+//!   this implementation fails closed by rechecking both presence and quorum.
+//!   No longer a conflict: 06 §7 and 09 §1.2(5)/§2.4 now state that the SQ-97
+//!   relaxation is NOT in force until a cause-carrying removal surface exists
+//!   (02 §7.5 provides none), so the live-registry check this pallet performs
+//!   *is* the normative behaviour. See PLAN.md SQ-97/SQ-312.
 
 extern crate alloc;
 
