@@ -93,6 +93,24 @@ pub mod pallet {
             }
         }
 
+        /// Return `Ok` iff crediting `who` with `amount` would keep that
+        /// account's cumulative Phase-3 inflow within the live per-account cap.
+        ///
+        /// This is the pure, write-free companion to [`Self::note_inflow`] and
+        /// answers exactly the same question against exactly the same meter, so
+        /// the XCM barrier can refuse an over-cap inbound program *before* any
+        /// local mint (`09 §5.2`, SQ-129 resolution). The recording write stays
+        /// at the deposit leg; this read reserves nothing.
+        pub fn inflow_admissible(who: &T::AccountId, amount: u128) -> bool {
+            let cap = T::CapParams::deposit_cap_usdc();
+            if cap == u128::MAX || amount == 0 {
+                return true;
+            }
+            CumulativeDeposits::<T>::get(who)
+                .checked_add(amount)
+                .is_some_and(|next| next <= cap)
+        }
+
         /// Check and record one account's cumulative Phase-3 USDC inflow.
         /// Refusal is a strict no-op; callers compose this write with the
         /// beneficiary credit in one storage transaction (`09 §5.2`, G-1).

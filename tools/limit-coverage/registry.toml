@@ -695,7 +695,7 @@ key = "phase3.dep_cap"
 class = "dispatch-limit"
 genesis = true
 behavior = "USDC inflow cap exceeded"
-reason = "13 §1 / 09 §5.2: the production XCM deposit leg now enforces and records the shared per-account cumulative meter transactionally, with refused minted holdings trapped for self-scoped recovery; SQ-105 additionally gates all four signed conditional-ledger split paths by pure-reading the same live account cap without double-counting."
+reason = "13 §1 / 09 §5.2: both caps bind before any local mint (SQ-129), so an over-cap inbound reserve transfer is refused at the barrier with nothing minted and nothing trapped — a cap refusal can no longer produce the remote-keyed trap its beneficiary could never self-claim. The deposit leg still enforces and records the shared per-account cumulative meter transactionally for trapped-imbalance recovery, which §5.2's mint-step scope (SQ-253) exempts from the prospective gate; SQ-105 additionally gates all four signed conditional-ledger split paths by pure-reading the same live account cap without double-counting."
 
 [[entry]]
 key = "MinTrade"

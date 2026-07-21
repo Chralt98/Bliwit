@@ -605,8 +605,14 @@ fn probe_group_response_router_maps_pass_fail_and_delegates_unknown_ids() {
 
 #[test]
 fn probe_group_wrong_or_missing_querier_is_rejected_by_handler_and_barrier() {
-    type RecordingProbeBarrier =
-        crate::barrier::BleavitBarrier<RecordingProbeRouter, UniversalLocation, MaxPrefixes>;
+    type RecordingProbeBarrier = crate::barrier::BleavitBarrier<
+        RecordingProbeRouter,
+        UniversalLocation,
+        MaxPrefixes,
+        TestCaps,
+        TestLocationToAccountId,
+        AccountId,
+    >;
 
     ROUTER_PENDING.with(|pending| *pending.borrow_mut() = Some(7));
     ROUTER_RESULTS.with(|results| results.borrow_mut().clear());
@@ -1013,25 +1019,177 @@ fn caps_group_over_global_cap_fails_at_mint_with_zero_issuance_and_zero_trap() {
 }
 
 #[test]
-fn caps_group_per_account_rejection_still_gates_deposit_and_traps_minted_holding() {
+fn caps_group_over_account_cap_is_refused_before_any_mint_and_never_traps() {
+    // 09 §5.2 (normative, SQ-129 resolution 2026-07-20): BOTH caps are enforced
+    // before any local mint, and a cap refusal leaves nothing minted and nothing
+    // trapped locally. An inbound trap is keyed under the *sending* chain, so the
+    // beneficiary could never self-claim it — trapping here would strand the funds
+    // permanently (09 §6.1 trapped-assets row).
     new_test_ext().execute_with(|| {
         set_caps(u128::MAX, 1);
+        let issuance_before = ForeignAssets::total_supply(usdc_location());
         let outcome = execute_inbound_usdc(100, ALICE_BYTES, 43);
-        assert!(matches!(
-            outcome,
-            Outcome::Incomplete {
-                error: InstructionError {
-                    index: 3,
-                    error: XcmError::FailedToTransactAsset("USDC inflow cap exceeded"),
-                },
-                ..
-            }
-        ));
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Incomplete {
+                    error: InstructionError {
+                        error: XcmError::Barrier,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected a barrier refusal before mint, got {outcome:?}"
+        );
+        assert_eq!(
+            ForeignAssets::total_supply(usdc_location()),
+            issuance_before,
+            "nothing may be minted on a per-account cap refusal"
+        );
         assert_eq!(ForeignAssets::balance(usdc_location(), alice()), 0);
         assert_eq!(recorded_inflow(&alice()), 0);
-        // The beneficiary is unknowable at mint time. This deposit-leg failure
-        // therefore traps the already-minted holding for 09 §6.1 recovery.
-        assert_eq!(trapped_assets_events(), 1);
+        assert_eq!(
+            trapped_assets_events(),
+            0,
+            "a cap refusal must never produce a remote-keyed trap"
+        );
+    });
+}
+
+#[test]
+fn caps_group_account_cap_admits_exactly_at_the_cap() {
+    // The pre-mint read is a bound check, not an off-by-one refusal: a program
+    // minting exactly the remaining per-account headroom stays admissible.
+    new_test_ext().execute_with(|| {
+        set_caps(u128::MAX, 100);
+        assert!(execute_inbound_usdc(100, ALICE_BYTES, 46)
+            .ensure_complete()
+            .is_ok());
+        assert!(recorded_inflow(&alice()) > 0);
+        assert_eq!(trapped_assets_events(), 0);
+    });
+}
+
+#[test]
+fn caps_group_pre_mint_read_accumulates_across_messages() {
+    // The pre-mint check reads the same cumulative meter the deposit leg writes,
+    // so a second message that would breach the cap is refused before minting.
+    new_test_ext().execute_with(|| {
+        set_caps(u128::MAX, 150);
+        assert!(execute_inbound_usdc(100, ALICE_BYTES, 47)
+            .ensure_complete()
+            .is_ok());
+        let recorded = recorded_inflow(&alice());
+        assert!(recorded > 0);
+        let issuance_before = ForeignAssets::total_supply(usdc_location());
+
+        let outcome = execute_inbound_usdc(100, ALICE_BYTES, 48);
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Incomplete {
+                    error: InstructionError {
+                        error: XcmError::Barrier,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "expected the second message to be refused pre-mint, got {outcome:?}"
+        );
+        assert_eq!(
+            ForeignAssets::total_supply(usdc_location()),
+            issuance_before
+        );
+        assert_eq!(recorded_inflow(&alice()), recorded);
+        assert_eq!(trapped_assets_events(), 0);
+    });
+}
+
+#[test]
+fn caps_group_unconvertible_beneficiary_fails_closed_before_mint() {
+    // Beneficiary conversion failure must fail closed (G-1): an inbound USDC mint
+    // whose deposit leg names a location this chain cannot resolve to a local
+    // account is refused rather than admitted unmetered.
+    new_test_ext().execute_with(|| {
+        set_caps(u128::MAX, 1);
+        let incoming = asset(usdc_location(), 100);
+        let program: Xcm<()> = Xcm(vec![
+            ReserveAssetDeposited(Assets::from(incoming.clone())),
+            ClearOrigin,
+            BuyExecution {
+                fees: incoming,
+                weight_limit: Limited(MAX_WEIGHT),
+            },
+            DepositAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(1)),
+                // A parent (relay) location has no local AccountId conversion.
+                beneficiary: Location::parent(),
+            },
+        ]);
+        let mut message_id = [49_u8; 32];
+        let outcome = BleavitXcmExecutor::prepare_and_execute(
+            asset_hub_location(),
+            program.into::<RuntimeCall>(),
+            &mut message_id,
+            MAX_WEIGHT,
+            MAX_WEIGHT,
+        );
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Incomplete {
+                    error: InstructionError {
+                        error: XcmError::Barrier,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "unconvertible beneficiary must fail closed, got {outcome:?}"
+        );
+        assert_eq!(ForeignAssets::total_supply(usdc_location()), 0);
+        assert_eq!(trapped_assets_events(), 0);
+    });
+}
+
+#[test]
+fn caps_group_local_claim_recovery_is_exempt_from_the_pre_mint_gate() {
+    // 09 §5.2 mint-step scope (normative, SQ-253): pallet-xcm's trapped-imbalance
+    // reconstruction is exempt from the prospective cap. The pre-mint gate keys on
+    // `ReserveAssetDeposited` (the issuance-increasing mint) and must not fire on a
+    // `ClaimAsset` recovery program, whose deposit leg stays metered instead.
+    new_test_ext().execute_with(|| {
+        set_caps(u128::MAX, 1);
+        let claimed = asset(usdc_location(), 100);
+        let program: Xcm<()> = Xcm(vec![
+            ClaimAsset {
+                assets: Assets::from(claimed),
+                ticket: Location::here(),
+            },
+            DepositAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(1)),
+                beneficiary: account_location(ALICE_BYTES),
+            },
+        ]);
+        let mut instructions = program.into::<RuntimeCall>().0;
+        let mut properties = Properties {
+            weight_credit: MAX_WEIGHT,
+            message_id: None,
+        };
+        // The barrier's deny tuple must not reject the recovery program itself;
+        // the per-account cap binds it at the deposit leg, not before the mint.
+        assert!(
+            <TestBarrier as ShouldExecute>::should_execute(
+                &account_location(ALICE_BYTES),
+                &mut instructions,
+                MAX_WEIGHT,
+                &mut properties,
+            )
+            .is_ok(),
+            "ClaimAsset recovery must not be refused by the pre-mint inflow gate"
+        );
     });
 }
 
@@ -1286,4 +1444,206 @@ fn composability_group_executor_satisfies_pallet_xcm_and_executor_bounds() {
     let _: Option<
         CappedInflows<TestAssetTransactors, TestCaps, TestLocationToAccountId, AccountId>,
     > = None;
+}
+
+/// Run an arbitrary inbound program from Asset Hub through the production barrier
+/// + executor, so barrier evasions are visible as mints/traps rather than opinions.
+fn execute_inbound_program(program: Xcm<()>, message_byte: u8) -> Outcome {
+    let mut message_id = [message_byte; 32];
+    BleavitXcmExecutor::prepare_and_execute(
+        asset_hub_location(),
+        program.into::<RuntimeCall>(),
+        &mut message_id,
+        MAX_WEIGHT,
+        MAX_WEIGHT,
+    )
+}
+
+#[test]
+fn caps_group_withdraw_fed_holding_cannot_evade_the_pre_mint_gate() {
+    // Adversarial: `WithdrawAsset` is an admitted instruction that fills holding
+    // from the sender's local sovereign account with **no** `ReserveAssetDeposited`.
+    // If the gate keys only on the mint, an over-cap deposit slips past it and the
+    // deposit leg strands the holding in an Asset-Hub-keyed trap — exactly what
+    // 09 §6.1 forbids ("no cap refusal can produce a remote-keyed trap at all").
+    new_test_ext().execute_with(|| {
+        let converted = TestLocationToAccountId::convert_location(&asset_hub_location());
+        assert!(
+            converted.is_some(),
+            "Asset Hub must have a local sovereign account"
+        );
+        let sovereign = converted.unwrap_or(AccountId::new([0_u8; 32]));
+        assert_ok!(<ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &sovereign,
+            1_000,
+        ));
+        set_caps(u128::MAX, 1);
+        let taken = asset(usdc_location(), 100);
+        let program: Xcm<()> = Xcm(vec![
+            WithdrawAsset(Assets::from(taken.clone())),
+            BuyExecution {
+                fees: taken,
+                weight_limit: Limited(MAX_WEIGHT),
+            },
+            DepositAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(1)),
+                beneficiary: account_location(ALICE_BYTES),
+            },
+        ]);
+        let outcome = execute_inbound_program(program, 60);
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Incomplete {
+                    error: InstructionError {
+                        error: XcmError::Barrier,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "withdraw-fed over-cap deposit must be refused pre-execution: {outcome:?}"
+        );
+        assert_eq!(recorded_inflow(&alice()), 0);
+        assert_eq!(
+            trapped_assets_events(),
+            0,
+            "a cap refusal must never produce a remote-keyed trap"
+        );
+    });
+}
+
+#[test]
+fn caps_group_deposit_reserve_asset_is_a_metered_local_deposit_leg() {
+    // Adversarial: `DepositReserveAsset` deposits into `dest`'s local sovereign
+    // account before sending onward, so it is a second metered deposit leg. With no
+    // `DepositAsset` present the beneficiary list is empty and a naive `all()` is
+    // vacuously true, letting the mint execute and the refusal strand the holding.
+    new_test_ext().execute_with(|| {
+        set_caps(u128::MAX, 1);
+        let incoming = asset(usdc_location(), 100);
+        let program: Xcm<()> = Xcm(vec![
+            ReserveAssetDeposited(Assets::from(incoming.clone())),
+            ClearOrigin,
+            BuyExecution {
+                fees: incoming,
+                weight_limit: Limited(MAX_WEIGHT),
+            },
+            DepositReserveAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(1)),
+                dest: relay_location(),
+                xcm: Xcm(vec![]),
+            },
+        ]);
+        let issuance_before = ForeignAssets::total_supply(usdc_location());
+        let outcome = execute_inbound_program(program, 61);
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Incomplete {
+                    error: InstructionError {
+                        error: XcmError::Barrier,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "an over-cap DepositReserveAsset leg must be refused pre-mint: {outcome:?}"
+        );
+        assert_eq!(
+            ForeignAssets::total_supply(usdc_location()),
+            issuance_before,
+            "nothing may be minted on a per-account cap refusal"
+        );
+        assert_eq!(trapped_assets_events(), 0);
+    });
+}
+
+#[test]
+fn caps_group_mixed_mint_and_withdraw_sources_are_counted_together() {
+    // A program fed from *both* sources must have the per-account bound computed
+    // over the whole holding: counting only the mint under-states what the deposit
+    // leg will move and lets the surplus strand.
+    new_test_ext().execute_with(|| {
+        let converted = TestLocationToAccountId::convert_location(&asset_hub_location());
+        assert!(
+            converted.is_some(),
+            "Asset Hub must have a local sovereign account"
+        );
+        let sovereign = converted.unwrap_or(AccountId::new([0_u8; 32]));
+        assert_ok!(<ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &sovereign,
+            1_000,
+        ));
+        set_caps(u128::MAX, 120);
+        let minted = asset(usdc_location(), 100);
+        let taken = asset(usdc_location(), 100);
+        let program: Xcm<()> = Xcm(vec![
+            ReserveAssetDeposited(Assets::from(minted.clone())),
+            WithdrawAsset(Assets::from(taken)),
+            ClearOrigin,
+            BuyExecution {
+                fees: minted,
+                weight_limit: Limited(MAX_WEIGHT),
+            },
+            DepositAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(2)),
+                beneficiary: account_location(ALICE_BYTES),
+            },
+        ]);
+        let outcome = execute_inbound_program(program, 62);
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Incomplete {
+                    error: InstructionError {
+                        error: XcmError::Barrier,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "the bound must cover mint + withdraw (200 > 120): {outcome:?}"
+        );
+        assert_eq!(trapped_assets_events(), 0);
+    });
+}
+
+#[test]
+fn caps_group_nested_appendix_deposit_leg_is_scanned() {
+    // `SetAppendix` executes locally, so a deposit leg hidden there is as real as a
+    // top-level one and must be bound by the same per-account check.
+    new_test_ext().execute_with(|| {
+        set_caps(u128::MAX, 1);
+        let incoming = asset(usdc_location(), 100);
+        let program: Xcm<()> = Xcm(vec![
+            ReserveAssetDeposited(Assets::from(incoming.clone())),
+            ClearOrigin,
+            SetAppendix(Xcm(vec![DepositAsset {
+                assets: AssetFilter::Wild(WildAsset::AllCounted(1)),
+                beneficiary: account_location(ALICE_BYTES),
+            }])),
+            BuyExecution {
+                fees: incoming,
+                weight_limit: Limited(MAX_WEIGHT),
+            },
+        ]);
+        let outcome = execute_inbound_program(program, 63);
+        assert!(
+            matches!(
+                outcome,
+                Outcome::Incomplete {
+                    error: InstructionError {
+                        error: XcmError::Barrier,
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "an appendix deposit leg must be bound too: {outcome:?}"
+        );
+        assert_eq!(trapped_assets_events(), 0);
+    });
 }

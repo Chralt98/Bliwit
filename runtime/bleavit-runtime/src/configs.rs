@@ -699,8 +699,14 @@ pub(crate) mod xcm_config {
         LocationToAccountId,
         AccountId,
     >;
-    pub type Barrier =
-        bleavit_xcm::barrier::BleavitBarrier<PolkadotXcm, UniversalLocation, MaxPrefixes>;
+    pub type Barrier = bleavit_xcm::barrier::BleavitBarrier<
+        PolkadotXcm,
+        UniversalLocation,
+        MaxPrefixes,
+        PhaseInflowCaps,
+        LocationToAccountId,
+        AccountId,
+    >;
     pub type RelayRouter = cumulus_primitives_utility::ParentAsUmp<
         ParachainSystem,
         PolkadotXcm,
@@ -1314,6 +1320,12 @@ impl bleavit_xcm::caps::InflowCaps<AccountId> for PhaseInflowCaps {
 
     fn note_usdc_inflow(who: &AccountId, amount: u128) -> Result<(), ()> {
         pallet_inflow_caps::Pallet::<Runtime>::note_inflow(who, amount)
+    }
+
+    fn usdc_inflow_admissible(who: &AccountId, amount: u128) -> Result<(), ()> {
+        pallet_inflow_caps::Pallet::<Runtime>::inflow_admissible(who, amount)
+            .then_some(())
+            .ok_or(())
     }
 }
 
@@ -2888,6 +2900,41 @@ fn proposal_calls(
     runtime_batch(proposal.payload_hash, proposal.payload_len)
 }
 
+/// Re-derive every call's guard domains and require each to be admissible for the
+/// proposal's class — byte-for-byte the precondition the execution guard applies
+/// inside `enqueue`.
+///
+/// 09 §1.1 states queue-time preconditions are "enforced by the decision path
+/// **before** `enqueue` succeeds". Screening must therefore be a **superset** of
+/// the guard's: otherwise a payload can pass screening, win Adopt, and then make
+/// `epoch.decide(pid)` fail inside `with_storage_layer`, reverting the entire
+/// decide on every attempt until the T20 stale path force-rejects it — 13 days of
+/// market and a decided Adopt lost (SQ-308). Mirroring the check here makes
+/// `decide` total.
+///
+/// `InternalRootApplyUpgrade` is excluded exactly as the guard excludes it: the
+/// classifier matches `system.authorize_upgrade` only at top level, so nested in a
+/// `utility.batch_all` it projects to the *apply* domain. 09 §2.1's multi-item
+/// upgrade payload is expressible as multiple **top-level** calls, so the nested
+/// form need not be admitted at all.
+fn domains_admissible(
+    class: futarchy_primitives::ProposalClass,
+    calls: &pallet_execution_guard::pallet::RuntimeBatch<Runtime>,
+) -> bool {
+    use pallet_execution_guard::BatchDispatcher;
+    calls.iter().all(|call| {
+        crate::classifier::RuntimeDispatcher::rederive_call(call).is_ok_and(|analysis| {
+            analysis.domains.iter().all(|domain| {
+                pallet_execution_guard::domain_allowed(class, *domain)
+                    && !matches!(
+                        domain,
+                        pallet_execution_guard::CallDomain::InternalRootApplyUpgrade
+                    )
+            })
+        })
+    })
+}
+
 fn runtime_batch(
     payload_hash: futarchy_primitives::H256,
     payload_len: u32,
@@ -2926,6 +2973,13 @@ fn derived_treasury_ask(
                     | pallet_futarchy_treasury::Call::recover_foreign { .. }
                     | pallet_futarchy_treasury::Call::set_coretime_authority { .. },
                 ) => 0,
+                // 05 §1.4 ask derivation (SQ-244/SQ-316): `claim_assets` moves
+                // already-owned assets out of the trap register and creates **no**
+                // treasury outflow, so its derived ask is exactly zero. This is the
+                // one admissible zero-outflow Treasury leaf and MUST NOT be
+                // generalized into "unknown leaves ask zero" — every other unknown
+                // call still fails closed at the `_` arm below.
+                RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets { .. }) => 0,
                 // `claim_stream` is Signed-recipient-only and coretime renewal is
                 // priced from live quote storage. Neither can be committed as a
                 // statically-sized Treasury proposal outflow.
@@ -3247,6 +3301,22 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
             return StaticCheckDisposition::SlashAll(
                 futarchy_primitives::RejectReason::ConstitutionViolation,
             );
+        }
+        // Mirror the guard's own `enqueue` domain preconditions so `decide` is total
+        // (09 §1.1; SQ-308).
+        //
+        // Disposition is **refund**, not slash. 05 §2.1's T4 taxonomy is explicit
+        // that "confiscation requires a verified culpable act" and that "the refund
+        // arm is the default and the two slash arms are the enumerated exceptions".
+        // This failure is in neither exception: the footprint matches, the capability
+        // check passed, and the call re-derived cleanly. The only fault is a
+        // classifier projection artifact — `authorize_upgrade` is matched by
+        // `is_sub_type` at top level only, so nesting it inside the `utility.batch_all`
+        // wrapper that 05 §1.4 explicitly blesses collapses it onto the *apply*
+        // domain. Slashing a proposer 100% for using a permitted wrapper would be
+        // confiscation without a culpable act.
+        if !domains_admissible(proposal.class, &calls) {
+            return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
         }
         if matches!(proposal.class, futarchy_primitives::ProposalClass::Treasury)
             && (derived_treasury_ask(&calls) != Some(proposal.ask)
@@ -4743,6 +4813,13 @@ impl pallet_epoch::ExecutionGuardAccess for RuntimeEpochExecutionGuard {
             .ok_or(DispatchError::Other("epoch payload preimage missing"))?;
         let calls = pallet_execution_guard::Pallet::<Runtime>::decode_batch(&bytes)
             .map_err(|_| DispatchError::Other("epoch payload batch invalid"))?;
+        // The same mirror screening applies (SQ-308). Screening should already have
+        // rejected such a payload; failing here too keeps the adapter honest if a
+        // future path reaches it without screening.
+        frame_support::ensure!(
+            domains_admissible(proposal.class, &calls),
+            DispatchError::Other("epoch payload domain inadmissible for class")
+        );
         let mut declared_domains = pallet_execution_guard::pallet::StoredDomains::default();
         let mut artifact = None;
         for call in &calls {
@@ -4942,6 +5019,18 @@ impl RuntimeCapabilities {
                 | pallet_futarchy_treasury::Call::recover_foreign { .. }
                 | pallet_futarchy_treasury::Call::set_coretime_authority { .. },
             ) => Self::enabled(class, pallet_constitution::Capability::TreasurySpend),
+            // 05 §1.4 class safety (SQ-244/SQ-316): the base call-filter projection
+            // of `claim_assets` stays **Public** — a Signed origin reclaiming its own
+            // self-keyed trap is 09 §6.1's ordinary path and must not need governance.
+            // Belief-execution admission is gated separately and narrowly: the leaf is
+            // payload-admissible only for TREASURY carrying the Treasury-spend
+            // capability (06 §3.2). Without this explicit arm the call would fall to
+            // the generic Public allowance below and let a PARAM/CODE/META payload
+            // carry it — precisely the 06 §1 / I-8 class confusion.
+            RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets { .. }) => {
+                matches!(class, futarchy_primitives::ProposalClass::Treasury)
+                    && Self::enabled(class, pallet_constitution::Capability::TreasurySpend)
+            }
             _ => {
                 let Ok(analysis) =
                     <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<

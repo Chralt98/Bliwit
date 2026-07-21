@@ -118,3 +118,39 @@ fn try_state_rejects_total_issuance_over_a_finite_tvl_cap() {
         assert_ok!(InflowCaps::do_try_state());
     });
 }
+
+#[test]
+fn inflow_admissible_is_a_pure_read_agreeing_with_note_inflow() {
+    // 09 §5.2 (SQ-129): the barrier's pre-mint gate must answer exactly the
+    // question the deposit leg answers, without reserving anything.
+    new_test_ext().execute_with(|| {
+        DepositCap::set(100);
+        assert!(InflowCaps::inflow_admissible(&1, 100));
+        assert!(!InflowCaps::inflow_admissible(&1, 101));
+        // Pure: the read created no meter entry.
+        assert_eq!(CumulativeDeposits::<Test>::iter().count(), 0);
+
+        assert_ok!(InflowCaps::note_inflow(&1, 60));
+        assert_eq!(CumulativeDeposits::<Test>::get(1), 60);
+        assert!(InflowCaps::inflow_admissible(&1, 40));
+        assert!(!InflowCaps::inflow_admissible(&1, 41));
+        assert_eq!(InflowCaps::note_inflow(&1, 41), Err(()));
+        assert_eq!(CumulativeDeposits::<Test>::get(1), 60);
+    });
+}
+
+#[test]
+fn inflow_admissible_honours_the_unbounded_sentinel_and_saturating_edges() {
+    new_test_ext().execute_with(|| {
+        // 13 §1 unbounded sentinel retires the per-account meter entirely.
+        DepositCap::set(u128::MAX);
+        assert!(InflowCaps::inflow_admissible(&1, u128::MAX));
+
+        // A bounded cap rejects an addition that would overflow rather than wrap.
+        DepositCap::set(100);
+        CumulativeDeposits::<Test>::insert(1, 1);
+        assert!(!InflowCaps::inflow_admissible(&1, u128::MAX));
+        // Zero never moves the meter, so it is always admissible.
+        assert!(InflowCaps::inflow_admissible(&1, 0));
+    });
+}

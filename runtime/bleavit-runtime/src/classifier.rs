@@ -150,6 +150,12 @@ fn derive_resource_inner(
             0x09,
             &pallet_futarchy_treasury::BudgetLine::OpsCoretime.encode(),
         ),
+        // 05 §1.4 `0x0A`: XCM trap recovery is a **singleton** family. A key derived
+        // from the versioned `(assets, beneficiary)` pair could let two distinct traps
+        // share a truncated digest through an encoding or XCM-version alias, and an
+        // under-locked trap is a safety cost; serialising all recoveries behind one
+        // lock costs only liveness, which is the G-1 direction.
+        RuntimeCall::PolkadotXcm(pallet_xcm::Call::claim_assets { .. }) => singleton_resource(0x0A),
         RuntimeCall::Utility(pallet_utility::Call::batch_all { calls }) => {
             if !budget.enter() {
                 return Err(FootprintError::Unclassifiable);

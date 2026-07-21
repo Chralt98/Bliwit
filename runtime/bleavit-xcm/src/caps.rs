@@ -27,14 +27,24 @@ pub trait InflowCaps<AccountId> {
     /// Per-account check-and-record at the deposit leg (beneficiary known only here).
     #[allow(clippy::result_unit_err)] // The seam intentionally exposes only admit/refuse to XCM.
     fn note_usdc_inflow(who: &AccountId, amount: u128) -> Result<(), ()>;
+
+    /// Pure, write-free per-account admission read used by the barrier's pre-mint
+    /// gate (09 §5.2, SQ-129). It answers the same question as
+    /// [`Self::note_usdc_inflow`] against the same cumulative meter but reserves
+    /// nothing, so a refused program is refused before any local mint and a
+    /// permitted one is still metered exactly once at the deposit leg.
+    #[allow(clippy::result_unit_err)]
+    fn usdc_inflow_admissible(who: &AccountId, amount: u128) -> Result<(), ()>;
 }
 
 /// `TransactAsset` wrapper gating global USDC mint and per-account deposit (09 §5.2).
 ///
-/// A per-account rejection can still trap the already-minted holding because the
-/// beneficiary is unknowable at mint time. The global mint gate is the primary
-/// fail-politely path; any deposit-leg trap follows 09 §6.1's self-scoped
-/// `claim_assets` recovery rules.
+/// The global mint gate fails politely here, and the per-account cap is additionally
+/// pre-checked by `barrier::DenyOverCapInflows` before the executor is even built, so
+/// a cap refusal never reaches this leg with a mint already applied (09 §5.2, SQ-129).
+/// What remains metered here is the deposit leg of a trapped-imbalance recovery, which
+/// §5.2's mint-step scope (SQ-253) exempts from the prospective gate; a refusal there
+/// returns the assets to the trap they came from.
 pub struct CappedInflows<Inner, Caps, LocationToAccountId, AccountId>(
     PhantomData<(Inner, Caps, LocationToAccountId, AccountId)>,
 );
