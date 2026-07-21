@@ -5,9 +5,14 @@ from pathlib import Path
 
 import yaml
 
+import support  # noqa: F401 - inserts tools/monitoring on sys.path.
+
+import check_alert_coverage
+
 
 ROOT = Path(__file__).resolve().parents[3]
 RULES = ROOT / "deploy" / "monitoring" / "prometheus" / "rules" / "bleavit-alerts.yml"
+DOC_12 = ROOT / "docs" / "architecture" / "12-release-and-operations.md"
 EXPECTED_EXPRESSIONS = {
     "BleavitEpochTickLag": "bleavit_chain_tick_lag_blocks > 600",
     "BleavitProposalQueueAtBound": '(bleavit_chain_storage_map_bound{pallet="Epoch",item="IntakeProposals"} > 0) and (bleavit_chain_storage_map_entries{pallet="Epoch",item="IntakeProposals"} >= bleavit_chain_storage_map_bound{pallet="Epoch",item="IntakeProposals"})',
@@ -53,7 +58,15 @@ class RuleAndStackTests(unittest.TestCase):
             for rule in group["rules"]
             if rule["labels"]["severity"] == "page"
         }
-        self.assertEqual(page_domains, {"Collateralization", "Release integrity"})
+        # Derived from doc 12 §6.3 rather than pinned to a literal set, so the
+        # rules and the spec cannot drift apart in either direction.
+        expected = {
+            row.domain
+            for row in check_alert_coverage.extract_rows(DOC_12.read_text(encoding="utf-8"))
+            if row.page_immediately
+        }
+        self.assertEqual(page_domains, expected)
+        self.assertIn("Upgrades", expected)
 
     def test_all_alert_expressions_are_exactly_pinned(self) -> None:
         document = yaml.safe_load(RULES.read_text(encoding="utf-8"))

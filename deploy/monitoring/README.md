@@ -26,10 +26,13 @@ transport, or decode failure. Its loop checks on every observed finalized
 `ReleaseChannel` change and at the configured interval; validation rejects an
 interval above 3,600 seconds. Between full checks it resolves the configured
 ArNS name through every gateway on each finalized head, so a repoint triggers a
-full check and the 600-block channel-update lag advances continuously. Because
-§6.3 does not identify an authoritative ANT-history block height, that lag
-starts at the first finalized head where a strict gateway majority differs from
-`ReleaseChannel`; the metric and alert use that observed height explicitly.
+full check and the 600-block channel-update lag advances continuously. Because no on-chain
+observable marks the repoint block, 12 §6.3 ("Two observables this table left
+implicit") anchors that lag at the first finalized head where the gateway
+majority and `ReleaseChannel.manifest_txid` disagree — which also starts the
+clock when the gateways reach no strict majority at all, since an
+inconsistently resolvable name is not a healthy state. The metric and alert use
+that observed height explicitly.
 
 Point Prometheus at [prometheus.yml](prometheus/prometheus.yml), mount
 [bleavit-alerts.yml](prometheus/rules/bleavit-alerts.yml) under
@@ -107,18 +110,18 @@ not part of `check_alert_coverage.py`.
 |---|---|---|
 | Epoch progress | chain exporter (`epoch_status`) | live |
 | Proposal state | chain exporter (`proposal_summaries`, `Epoch.IntakeProposals` occupancy/bound) | live |
-| Markets | runtime-side book P&L + `b·ln2` | seam — B10 |
-| TWAP | live unsealed-window coverage projection | seam — B10; `decision_stats` is sealed-window only |
-| Liquidity floors | runtime-side effective POL/floor | seam — B10 |
+| Markets | runtime-side book P&L + `b·ln2` (`TelemetryApi`) | live |
+| TWAP | live unsealed-window coverage projection (`TelemetryApi`) | live; `decision_stats` is sealed-window only |
+| Liquidity floors | runtime-side effective POL/floor (`TelemetryApi`) | live |
 | Oracle | chain exporter (`open_oracle_rounds`) | live |
-| Collateralization | runtime-side escrow/custody reconciliation | seam — B10; page |
+| Collateralization | runtime-side escrow/custody reconciliation (`TelemetryApi`) | live; page |
 | Treasury | chain exporter (`nav`) | live |
 | XCM | chain exporter trap count; node/runtime send/fail detail remains operational context | live alert threshold |
 | Keepers | existing keeper daemon series | live |
 | Guardian | chain exporter finalized events | live |
-| Upgrades | canonical runtime migration-stall detector | seam — B10 |
-| Storage | chain prefix counts + metadata bounds; remaining maps/PoV from runtime | partial live + B10 seam |
-| Numerics | runtime LMSR rejection/dust anomaly detector | seam — B10 |
+| Upgrades | canonical runtime migration-stall detector (`TelemetryApi`) | live; page |
+| Storage | chain prefix counts + metadata bounds; remaining maps/PoV from runtime (`TelemetryApi`) | live |
+| Numerics | runtime LMSR rejection/dust anomaly detector (`TelemetryApi` + finalized `ExtrinsicFailed` stream) | live |
 | Bootnodes | browser-context dial/certificate probes | seam — O3 |
 | Served-state window | per-operator retention probe | seam — O3 |
 | Release integrity | attestation monitor | live; page + status + community |
@@ -137,10 +140,12 @@ runtime-wiring closure milestone and is named on runtime-side telemetry gaps
 where the frozen API and safe metadata-driven reads cannot produce the
 canonical value.
 
-The served-state alert uses the maximum retention reported by the joint fleet:
-all retention windows end at now, so the longest operator window is the joint
-window. O3 owns any stricter per-operator shortfall sub-alerts when it defines
-the probe exporter and operator topology.
+The served-state alert uses the maximum retention reported by the joint fleet,
+per 12 §6.3 ("Two observables this table left implicit"): all retention windows
+end at now, so the longest operator window is the joint window. O3 owns the
+per-operator probe exporter that feeds this series — it is a declared seam
+today, so the rule is specified but cannot fire — and any stricter per-operator
+shortfall sub-alerts.
 
 ## Attestation configuration and provisional release schema
 

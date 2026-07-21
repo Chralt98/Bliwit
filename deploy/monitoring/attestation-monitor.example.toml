@@ -4,9 +4,10 @@ arns_name = "futarchy"
 keyring_file = "keyring.example.toml"
 bind = "127.0.0.1:9618"
 check_interval_seconds = 3600
-# O1/operator policy seam: 12 fixes two attestations, but does not fix the
-# release-key signature threshold. Supply it explicitly for each deployment.
-minimum_release_signatures = 1
+# 12 §1.4 fixes the floor at two valid signatures from distinct active keys of
+# the current keyring generation. A deployment MAY require more and MUST state
+# its minimum explicitly rather than inherit one silently; it MUST NOT go lower.
+minimum_release_signatures = 2
 # Operational resource limits are operator-supplied, not protocol parameters.
 max_file_bytes = 67108864
 max_bundle_bytes = 536870912

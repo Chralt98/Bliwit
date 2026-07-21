@@ -54,14 +54,19 @@ Frontend data obtained through that layer remains provider-labeled.
    operator-diversity, distinct-peer, and port-policy floors from
    [02 §10](../../docs/architecture/02-integration-contract.md#10-wss-bootnode-chain-spec-requirement-d-6-x-4).
 3. Inspect the §6.3 per-endpoint browser-dial probe result and certificate-expiry
-   observation. The repository does not yet define a Prometheus series name for
-   this probe; do not substitute a native node-health check or invent a metric.
+   observation. The alert is written against `bleavit_bootnode_browser_dial_success`
+   and `bleavit_bootnode_wss_certificate_days_remaining`, but **no exporter emits
+   them yet** — they are declared O3 seams, so the alert cannot fire and a quiet
+   panel is not evidence of health. Read the probes out of band until O3 ships the
+   exporter; do not substitute a native node-health check or invent a metric.
 4. Separate an endpoint failure from an operator failure: compare TLS validity,
    WSS listener reachability, DNS resolution, peer identity, and the set of
    independent organizations represented by the still-passing endpoints.
 5. For a served-state alert, inspect each funded operator's retained state and
-   block-body evidence, then calculate the joint fleet window. The repository
-   specifies the commitment and alert surface but no canonical metric name.
+   block-body evidence, then calculate the joint fleet window — the **maximum**
+   per-operator retention, since every window ends at now (12 §6.3). The alert is
+   written against `bleavit_bootnode_served_state_retention_days`, which is likewise
+   an unfed O3 seam today, so this check is manual until that exporter exists.
 6. Check relay connectivity and finalized-head progress before attributing a
    fleet-wide dial failure to endpoint configuration. Node roles and the lack of
    any canonical-frontend RPC dependency are defined in

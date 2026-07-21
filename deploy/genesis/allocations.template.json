@@ -6,6 +6,12 @@
     "community": "fvGJck7fS1t2fpsb9pwPHKH5M7STmm5wAPAdpwcrr6uEeGXz5",
     "incentives": "fvGJck7fS1t2fpsb9pwQuhjP1DQpWe6PyTT4rDGaDE3Lo1J9Z"
   },
+  "futarchy_treasury": {
+    "_comment": "09 §4 Coretime ops seats, patched into the runtime's futarchyTreasury genesis section. Both are outputs of the Phase-2/3 ops ceremony, so neither has a correct value in advance; both are unset-fails-closed in the runtime, which makes a genesis that simply forgets them look identical to one still awaiting the ceremony. They are therefore carried here as explicit unfilled seats, and seating them is a Phase-3 entry gate (12 §6.5). Development and test presets seat stand-ins and are exempt.",
+    "_encoding": "coretime_quote_authority is an SS58 account (patch key coretimeQuoteAuthority); coretime_renewal_account is the Coretime-chain 32-byte account, serialised as a byte array in the genesis patch (patch key coretimeRenewalAccount).",
+    "coretime_quote_authority": "TODO",
+    "coretime_renewal_account": "TODO"
+  },
   "groups": [
     {
       "name": "treasury_reserve",

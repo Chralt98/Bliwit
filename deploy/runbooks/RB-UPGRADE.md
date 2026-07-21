@@ -3,7 +3,7 @@ id: RB-UPGRADE
 title: Stalled migration recovery
 owner_role: Release operations lead
 funding_line: ops.arweave / ops.monitoring
-page_immediately: false
+page_immediately: true
 alerts:
   - domain: Upgrades
     trigger: cursor stalled
@@ -160,8 +160,13 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
 
 ## Escalation
 
-Page the Release operations lead, Infrastructure coordinator, guardian council,
-and the owners of the affected pallet immediately after confirmation. The
+This alert pages on arrival, not after triage: a stalled cursor already holds
+ordinary transactions under the multi-block-migration lockdown, so the on-call
+responder is paged by the alert itself
+([12 §6.3](../../docs/architecture/12-release-and-operations.md);
+[09 §3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md)). Widen
+to the Release operations lead, Infrastructure coordinator, guardian council,
+and the owners of the affected pallet once the halt is confirmed. The
 release team owns the covering descriptors and repair train. Guardians own no
 `PB-MIGRATION` activation at all on stable2606 (step 2): their role here is to
 initiate the expedited-CODE repair lane, which the halt makes admissible. The

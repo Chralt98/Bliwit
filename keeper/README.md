@@ -157,9 +157,11 @@ and on() bleavit_keeper_connected == 1
 ```
 
 Instantiate that expression per required role in production so activity in a cleanup role cannot
-mask an hour without a decision-critical crank. Disabled roles retain a zero timestamp and should
-not be included in that deployment's alert rules; use an Alertmanager `for: 1h` guard so a fresh
-process with no successful crank does not page immediately. Also wire the on-chain
+mask an hour without a decision-critical crank — 12 §6.3 ("Keeper inactivity") makes the per-role,
+daemon-side reading normative. A role that has never succeeded since process start keeps a zero
+timestamp and is indistinguishable from a disabled role, so the shipped rule excludes it
+(`... > 0 and bleavit_keeper_planned_total > 0`) rather than paging on it; that stuck-since-start-up
+case is the declared blind spot and the keeper's own liveness series must cover it. Also wire the on-chain
 `KeeperBudgetLow` (>80%) and `KeeperBudgetExhausted` events to RB-KEEPER, and alert on
 finalized-head lag independently of the keeper process's `connected` gauge.
 

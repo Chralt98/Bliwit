@@ -503,8 +503,11 @@ def load_config(path: Path) -> Config:
         raise MonitoringError("monitor.bind must be HOST:PORT")
     if not isinstance(interval, int) or not 1 <= interval <= 3600:
         raise MonitoringError("monitor.check_interval_seconds must be 1..3600 (hourly floor)")
-    if not isinstance(minimum, int) or minimum < 1:
-        raise MonitoringError("monitor.minimum_release_signatures must be operator-supplied and >= 1")
+    if not isinstance(minimum, int) or minimum < 2:
+        raise MonitoringError(
+            "monitor.minimum_release_signatures must be operator-supplied and >= 2 "
+            "(12 §1.4 release-signature floor)"
+        )
     if not isinstance(max_file, int) or max_file <= 0:
         raise MonitoringError("monitor.max_file_bytes must be operator-supplied and positive")
     if not isinstance(max_bundle, int) or max_bundle < max_file:

@@ -327,6 +327,11 @@ def validate_run_evidence(
         errors.append("runtime_wasm_sha256 does not match this release")
     if evidence.get("recorded_at_commit") != release_commit:
         errors.append("recorded_at_commit does not match this release commit")
+    if evidence.get("tier") != "release":
+        errors.append(
+            "15 §5: tier must be 'release' — evidence is admissible for this gate "
+            "only when stamped with the release tier"
+        )
     suites_run = evidence.get("suites_run")
     if not isinstance(suites_run, list) or not suites_run:
         errors.append("suites_run must be a non-empty array")
@@ -339,10 +344,32 @@ def validate_run_evidence(
                 or row.get("result") != "pass"
             ):
                 errors.append(f"suites_run[{index}] must name a passing suite")
+    skipped = evidence.get("suites_skipped")
+    if not isinstance(skipped, list):
+        errors.append("suites_skipped must be an array")
+    else:
+        for index, row in enumerate(skipped):
+            if (
+                not isinstance(row, dict)
+                or not isinstance(row.get("name"), str)
+                or not row["name"]
+                or not isinstance(row.get("reason"), str)
+                or not row["reason"]
+            ):
+                errors.append(
+                    f"suites_skipped[{index}] must name an excluded suite and its reason"
+                )
     hashes = evidence.get("artifact_hashes")
     if not isinstance(hashes, dict):
         errors.append("artifact_hashes must be an object")
         hashes = {}
+    # 15 §5: an empty inventory would otherwise satisfy the set-equality below
+    # against an empty directory, so a placeholder env dir would pass the gate.
+    elif not hashes:
+        errors.append(
+            "15 §5: artifact_hashes is empty — environment evidence must inventory "
+            "the definitions its suites ran against"
+        )
     packaged: dict[str, Path] = {}
     for path in sorted(directory.rglob("*")):
         if path.is_symlink():

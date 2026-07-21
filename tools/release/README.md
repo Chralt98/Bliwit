@@ -50,7 +50,9 @@ from the self-referential `artifact_hashes` map):
   "runtime_wasm_sha256": "<64 lowercase hex>",
   "artifact_hashes": {"relative/path": "<sha256>"},
   "suites_run": [{"name": "collator-loss", "result": "pass"}],
-  "recorded_at_commit": "<release git commit>"
+  "suites_skipped": [{"name": "dead-man", "reason": "tier"}],
+  "recorded_at_commit": "<release git commit>",
+  "tier": "release"
 }
 ```
 
@@ -66,13 +68,21 @@ Evidence emission is currently blocked fail-closed until the SQ-204 try-state
 leg and the SQ-203 Chopsticks card-depth execution land; the producer still runs
 the suites and writes run reports.
 
-Pending SQ-139 ratification, the producer adds consumer-tolerated fields to the
-minimal contract above: top-level `tier`, `suites_skipped`, `produced_by`,
-`suites_manifest_sha256`, and `pins_env_sha256`, plus `duration_seconds` and
-`checks` on each `suites_run` row. These extras identify the selected policy
-tier and producer inputs, record exclusions, and describe the execution depth;
-the authoritative consumer continues to validate the frozen fields shown in
-the contract block.
+`tier` and `suites_skipped` are frozen fields (15 §5, *Environment run
+evidence* and *Suite tiering*). Evidence is admissible for the release gate only
+when stamped `"release"`, so assembly rejects a `g1`-tier run outright; and every
+excluded suite must be recorded with its reason, so the subset a release actually
+ran is auditable from the artifact alone rather than resting on the producer's
+goodwill. `suites_skipped` is required but MAY be empty when a run excluded
+nothing; each row needs a non-empty `name` and `reason`. `artifact_hashes` must
+be non-empty — an empty inventory would otherwise satisfy the packaged-set
+comparison vacuously against a placeholder directory.
+
+The producer adds consumer-tolerated fields beyond the contract above:
+top-level `produced_by`, `suites_manifest_sha256`, and `pins_env_sha256`, plus
+`duration_seconds` and `checks` on each `suites_run` row. These extras identify
+the producer inputs and describe the execution depth; the authoritative consumer
+validates the frozen fields shown in the contract block and ignores the rest.
 
 The suite must match its directory. Every regular file other than the evidence
 file must be listed, every hash must match, every suite result must be `pass`,

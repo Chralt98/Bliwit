@@ -12,7 +12,7 @@ alerts:
   - domain: Keepers
     trigger: "no crank 1 h"
   - domain: Keeper budget
-    trigger: "> 80% of 12,000 USDC/epoch"
+    trigger: "> 80% of keeper.budget"
 spec_refs:
   - docs/architecture/01-system-overview.md
   - docs/architecture/04-markets-and-pricing.md
@@ -35,7 +35,7 @@ by fabricating observations or forcing a decision.
 | Epoch progress | phase, blocks-to-boundary, tick lag | tick lag > 600 blocks |
 | TWAP | coverage %, stale events, spot-vs-TWAP dispersion | coverage < 96% mid-window |
 | Keepers | rebate claims per role, inactivity | no crank 1 h |
-| Keeper budget | metered-budget utilization | > 80% of 12,000 USDC/epoch |
+| Keeper budget | metered-budget utilization | > 80% of `keeper.budget` |
 
 Tick lag means finalized chain time has passed work which `epoch.tick` should have advanced.
 Low mid-window coverage is decision-critical because gaps can make a book fail grade. Inactivity

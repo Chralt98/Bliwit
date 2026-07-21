@@ -6,7 +6,7 @@ funding_line: ops.monitoring
 page_immediately: false
 alerts:
   - domain: Proposal state
-    trigger: "queue at bound"
+    trigger: "intake queue at bound"
 spec_refs:
   - docs/architecture/05-welfare-and-decision-engine.md
   - docs/architecture/06-governance-and-guardians.md
@@ -25,7 +25,7 @@ without disturbing live trading windows.
 
 | Domain | Key series | Trigger |
 |---|---|---|
-| Proposal state | per-state counts, queue depth | queue at bound |
+| Proposal state | per-state counts, queue depth | intake queue at bound |
 
 The trigger means the pre-qualification `IntakeQueue` has reached its bound. New submissions are
 refused before admission and their bond is not accepted; existing submitted proposals are neither
