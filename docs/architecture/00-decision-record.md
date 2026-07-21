@@ -14,7 +14,7 @@ Conventions: **D-n** = a decision made here. Finding IDs (X-n, B-n, F-n) refer t
 - Under `Voided`: `merge` and `merge_scalar` remain enabled — complete pairs always recover par (100%).
 - New call `redeem_void(pid, kind, amount)`: unpaired **branch-USDC pays `floor(a/2)`**; unpaired **LONG or SHORT pays `floor(a/4)`** (equivalent to branch value 0.5 × neutral s = 0.5). Rounding is against the redeemer; residue swept per the dust rule.
 - Conservation: total payout ≤ E in every path (pairs pay 1 per pair; each pair = 1 USDC escrowed).
-- PT-2 (annulment) restated honestly: *complete-set holders and market buyers recover full principal under VOID* (buyers hold the mirror branch-USDC per D-3, so their split is reconstructible); a deliberately unpaired single-branch speculator recovers 0.5 — this is the correct price of a voided binary claim, not a loss of principal on the protocol path.
+- PT-2 (annulment) restated honestly, **corrected 2026-07-21 (SQ-171)**: *complete-set holders recover par under VOID.* A D-3 wrapper buyer's package — the purchased target scalar leg plus `cost` mirror branch-USDC — recovers its **D-1 neutral value** after pair-first netting, which equals the original debit only at the neutral prior 0.5; net delta is `neutral recovery − cost − fees`, not `−fees`. A deliberately unpaired single-branch holder receives that same neutral valuation (0.5 per branch-USDC, 0.25 per leg). This is the correct price of a voided binary claim, not a loss of principal — but the earlier wording *"market buyers recover full principal under VOID"* over-claimed, because it silently assumed the neutral prior. What D-1 guarantees is that no claim is valued **below** this schedule, not that a market premium is refunded.
 - Frontend: redeem screen gains a VOID state — shows "merge to recover 100%" as the primary action when the user holds pairs, `redeem_void` otherwise. FE precondition table row added.
 
 ### D-2. Integration contract: all 11 §30 patch items ACCEPTED; frozen in one owned document (X-1, X-4, X-10, X-11, X-15)
@@ -31,7 +31,7 @@ Conventions: **D-n** = a decision made here. Finding IDs (X-n, B-n, F-n) refer t
 ### D-3. Trade denomination: branch-USDC books with an auto-split wrapper; buyers keep the mirror (B-7)
 
 - LMSR books are denominated in **branch-USDC**. The user-facing `buy(market, side, amount, max_cost)` accepts **USDC**: the wrapper splits cost `c` USDC into `c` AcceptUsdc + `c` RejectUsdc, pays the target-branch `c` into the book, delivers `q` LONG/SHORT of the target branch, and **credits the mirror-branch `c` branch-USDC to the buyer**. `sell` is the inverse.
-- Consequence: a buyer in the losing branch holds mirror branch-USDC redeemable at par → G-3 (annulment) holds for the dominant user path, and VOID recovery (D-1) is par for buyers.
+- Consequence: on **normal losing-branch annulment** a buyer holds mirror branch-USDC redeemable at par → G-3 holds for the dominant user path, which loses only fees. Under **protocol VOID** the whole buyer package instead receives the D-1 neutral valuation; the difference from its debit is exactly the premium or discount the buyer paid relative to the neutral prior, plus fees (corrected 2026-07-21, SQ-171 — the earlier "VOID recovery (D-1) is par for buyers" conflated the two paths).
 - **Revenue recycling**: book revenue (branch-USDC) is immediately `split_scalar` into complete LONG+SHORT sets held by the book — worth exactly 1 branch-USDC per pair at any settlement `s`, so the book is solvent by construction. `headroom = b·ln 2` per book, stated and sized in `04-markets-and-pricing.md`.
 
 ### D-4. Economic security: decide-time outflow cap (primary) + Ask-scaled liquidity (secondary) (B-8)
@@ -87,6 +87,7 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
 ### D-13. Phase-3 insider risk contained (X-9)
 
 - The dangerous frame-system calls (`set_storage`, `kill_storage`, `kill_prefix`, `set_code_without_checks`, `authorize_upgrade_without_checks`) are filtered **from genesis** for all origins including sudo (not "post-bootstrap").
+- **`sudo.sudo_as` is denied entirely during Phases 0–3** (narrowing added 2026-07-21, SQ-99). Unlike `sudo`/`sudo_unchecked_weight`, which dispatch as Root and are contained by recursing their inner call, `sudo_as` dispatches as a caller-chosen `Signed(who)` — it can forge any signed origin, including a protocol sovereign, defeating the one-path SettleAuthority rule of [06](06-governance-and-guardians.md) §3.1. Root-dispatching `sudo` covers the entire legitimate bootstrap surface, so denial costs nothing.
 - Phase 3 runs under a **real-USDC exposure cap**: global TVL cap + per-account deposit cap (constitution keys, raised only by phase gates).
 - The founding multisig is added to the §22 adversary model with a threat row.
 - The FE renders a persistent **"bootstrap governance (sudo active)"** banner during Phases 0–3 (chain-read from the phase flag), so sudo-era state is never presented as trust-equivalent to post-sudo state.
