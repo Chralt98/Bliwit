@@ -141,7 +141,7 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
    and `frame-executive` then rejects every non-inherent extrinsic, so the
    expedited-CODE lane named above — and `execute(pid)`, guardian calls, and sudo
    with it — **cannot be included in a block** until the cursor is gone. This is
-   an open spec question (PLAN.md SQ-299), not a settled procedure: escalate to
+   an open spec question (PLAN.md SQ-309), not a settled procedure: escalate to
    the guardian council and the release lead immediately rather than attempting
    an on-chain repair that cannot be submitted. A `Stuck` cursor with
    `FailedMigrationHandling::KeepStuck` has no on-chain exit at present.

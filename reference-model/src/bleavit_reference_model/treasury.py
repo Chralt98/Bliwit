@@ -280,8 +280,9 @@ def manip_floor_hat(
 
     `contest_capital` is V_win, the 04 §7a time-averaged marked value of net
     outstanding trader positions over the window (SQ-231 amendment: gross
-    traded notional is not the measure); the sec.flow_cap ceiling bounds
-    wash-trade inflation of it.
+    traded notional is not the measure). Churn and wash flow net out of it by
+    construction, so sec.flow_cap is a secondary ceiling here, not the control
+    that bounds wash-trade inflation.
     """
     delta = _d(delta)
     with localcontext() as ctx:

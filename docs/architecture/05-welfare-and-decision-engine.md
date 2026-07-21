@@ -374,6 +374,8 @@ For epoch e with `n = min(e − 1, 12)` finalized epochs available, the winsoriz
 
 Each epoch day, `S_daily` and `C_daily` (§4.4 — **on-chain components only**) are computed from that day's counters. The flag for gate g is set iff the day value is below θ_g⁻. Storage: `GateBreachFlags: map EpochId → { s_breached: bool, c_breached: bool, day_bitmap: [u32; 2] }`. These flags — and nothing else — settle the gate markets ([doc 04](./04-markets-and-pricing.md)) and arm the guardian `suspend_on_gate` power ([doc 06](./06-governance-and-guardians.md)). Ex post, gates inside `W_e` (which *does* include `C_attested` at settlement time) zero realized welfare on breach. Attested data can therefore lower a cohort's settlement `s`, but can never flip a gate flag or a gate-market settlement (B-9 closed).
 
+**Recording cardinality (normative).** `record_daily_gate` is **repeat-tolerant** by construction: flags are OR-merged, so re-recording an already-recorded `(epoch, day, spec_version)` with identical components is a *state* no-op and MUST NOT be rejected — late and duplicate submissions from independent keepers ([01](./01-system-overview.md) §4.2) are the expected operating mode, and rejecting them would turn a benign race into a failed dispatch the losing keeper must special-case. Rebate eligibility is nevertheless **state-change-gated** ([08](./08-treasury-and-economics.md) §6.3): only a recording that samples a previously unsampled day or sets a new breach flag draws on the general tranche, so duplicates cannot drain the keeper meter. Sample tracking MUST use storage distinct from the breach `day_bitmap` above, which remains a breached-days-only map.
+
 ### 4.8 Dead-man switch (carried forward)
 
 If the relay best advances **≥ 4,800 relay blocks without the parachain anchoring a new block** (~8 h — the §4.3 `relay_parent_gap`, seen as a relay-parent jump on catch-up: a relay-liveness or parachain block-production/inclusion stall) or a snapshot is **> 4 days overdue**: the execution queue freezes, open decision windows extend day-for-day, the epoch clock pauses; recovery runs one proposal-free epoch. The enumerated coretime-renewal call is exempt (D-9, [doc 09](./09-execution-upgrades-and-rollout.md)).
@@ -577,8 +579,10 @@ C_disp = Σ_{book ∈ {acc, rej}} b_book · ln( ((p̄ + δc)·(1 − p̄)) / ((1
          // δc = DELTA[class] (+1 pp if rerun), inputs clamped to the quoting domain (doc 04)
 
 C_hold = min(V_win, sec.flow_cap · (b_acc + b_rej)) · δc
-         // adverse-selection bleed of holding a δc mispricing against measured organic flow;
-         // the sec.flow_cap ceiling bounds wash-trade inflation of V_win (threat row: doc 14)
+         // adverse-selection bleed of holding a δc mispricing against the window's
+         // contest capital: since the SQ-231 amendment V_win *is* that measure
+         // (doc 04 §7a), so churn and wash flow net out by construction rather than
+         // being merely capped; sec.flow_cap remains as the secondary ceiling (doc 14)
 ```
 
 `ManipFloor̂` is part of the Phase 3–4 measurement obligation alongside `F̂` (doc 08 §5.5): if published `ManipFloor̂` persistently reads below `3 · InCapPrize` for adopted proposals, the values layer MUST tighten δ and/or the `dec.v_min`/`pol.b` slopes before caps rise — the diagnostic exists precisely because the flow-model gate is an upper bound. The Phase-0 exit simulation ([15](15-invariants-and-testing.md) §4.9) validates this envelope at the irreducible economic line: it flags a causal wrong-PASS flip as a security failure only when the *realized* attacker cost falls **below the prize** (a profitable capture); an unprofitable flip whose realized cost is ≥ the prize but below `3 · InCapPrize` is deep-pocket griefing (TM-18) that the SF = 3 margin conservatively guards against — recorded as a diagnostic, not a Phase-0 gate failure. Economic derivation, calibration, the worked recomputation at defaults, and the secondary Ask-scaled liquidity mechanism (`pol.b`, `dec.v_min`, δ scaling with `ask`, floors = current defaults) live in [doc 08](./08-treasury-and-economics.md).
