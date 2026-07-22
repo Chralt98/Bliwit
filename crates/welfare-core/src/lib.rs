@@ -375,6 +375,29 @@ pub enum Error {
     DuplicateSnapshot,
     ArithmeticOverflow,
     TryStateViolation,
+    /// A cohort's gate window contains an epoch with **no** recorded daily
+    /// observation at all (05 §4.7, SQ-79). A zero-sample window is an
+    /// unavailable gate input, not evidence of no breach.
+    GateWindowUnsampled,
+}
+
+/// Explicit registration context for [`WelfareState::register_metric_spec`]
+/// (05 §4.4/§4.6; SQ-82).
+///
+/// The `>= current + 2` activation lead exists to protect in-flight cohorts
+/// (I-16), of which there are none at genesis — so a genesis registration may
+/// activate at epoch 1 and keep welfare computable from epoch 1 (the §4.6 cold
+/// start). Which of the two regimes applies is supplied by the caller rather
+/// than inferred from an ambient `current_epoch == 0`: that sentinel cannot
+/// distinguish "this is the genesis build" from "the epoch clock has not been
+/// set yet", so a live registration observed against an unset clock would
+/// silently inherit the genesis relaxation and activate one epoch early.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Registration {
+    /// The genesis build. No cohort can be in flight, so the lead is one epoch.
+    Genesis,
+    /// A live `register_spec` dispatch, carrying the observed epoch clock.
+    Live { current_epoch: EpochId },
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
@@ -403,7 +426,7 @@ impl WelfareState {
 
     pub fn register_metric_spec(
         &mut self,
-        current_epoch: EpochId,
+        registration: Registration,
         version: MetricSpecVersion,
         mut specs: Vec<MetricSpec>,
     ) -> Result<(), Error> {
@@ -420,21 +443,20 @@ impl WelfareState {
             Error::TooManyComponents
         );
         specs.sort_by_key(|s| s.id);
-        // Activation lead time. The two-epoch lead (05 §4.4/§4.6) exists to
-        // protect in-flight cohorts (I-16), of which there are none at genesis,
-        // so a genesis registration (`current_epoch == 0` — the reserved
-        // pre-launch sentinel; live welfare epochs are 1-indexed per 05 §4.6)
-        // activates at epoch 1, keeping welfare computable from epoch 1 (the
-        // cold start, 05 §4.6). Post-genesis version changes keep the
-        // `>= current + 2` lead. `checked_add` (not saturating) so a
-        // registration near `EpochId::MAX` cannot bypass the lead time by
-        // saturating `current + 2` down to `MAX` (G-1; final review 2026-07-16).
-        let min_activation = if current_epoch == 0 {
-            1
-        } else {
-            current_epoch
+        // Activation lead time (05 §4.4/§4.6). The genesis regime is now carried
+        // by an explicit `Registration` rather than inferred from an ambient
+        // `current_epoch == 0` (SQ-82): the sentinel conflated "genesis build"
+        // with "epoch clock not yet set", so a *live* registration observed
+        // against a zero clock inherited the genesis relaxation and could
+        // activate one epoch early, past the I-16 in-flight-cohort guard.
+        // `checked_add` (not saturating) so a registration near `EpochId::MAX`
+        // cannot bypass the lead time by saturating `current + 2` down to
+        // `MAX` (G-1; final review 2026-07-16).
+        let min_activation = match registration {
+            Registration::Genesis => 1,
+            Registration::Live { current_epoch } => current_epoch
                 .checked_add(2)
-                .ok_or(Error::BadActivationEpoch)?
+                .ok_or(Error::BadActivationEpoch)?,
         };
         let mut prev = None;
         for spec in &specs {
@@ -655,11 +677,13 @@ impl WelfareState {
 
     /// Daily gate-breach flags recorded for `epoch` (05 §4.7). Absent epochs read
     /// as unbreached — the deterministic default before any daily counter lands.
-    /// This is the sole source for gate-market settlement (05 §4.7, §6): no
-    /// attested value can flip a gate flag.
+    ///
+    /// This is a **display/view** accessor (it backs the 02 §4 `WelfareView`
+    /// breach flags) and deliberately keeps the permissive default so a
+    /// not-yet-sampled current epoch renders as "no breach so far" rather than
+    /// erroring. Gate-market *settlement* must not use it — see
+    /// [`Self::gate_window_outcomes`], which refuses a zero-sample window.
     pub fn gate_breach(&self, epoch: EpochId) -> GateBreachFlags {
-        // SQ-79: absent daily observations deterministically read as no breach;
-        // whether G-1 requires a pessimistic default is intentionally deferred.
         self.gate_flags
             .iter()
             .find(|(e, _)| *e == epoch)
@@ -669,6 +693,50 @@ impl WelfareState {
                 c_breached: false,
                 day_bitmap: [0; 2],
             })
+    }
+
+    /// Whether `epoch` carries at least one recorded daily gate observation.
+    ///
+    /// `record_daily_gate` pushes a `gate_flags` entry on the first successful
+    /// recording *whether or not that day breached*, so entry presence is
+    /// exactly "this epoch was sampled at least once". The breach `day_bitmap`
+    /// stays a breached-days-only map (05 §4.7) and is not consulted here.
+    pub fn gate_window_sampled(&self, epoch: EpochId) -> bool {
+        self.gate_flags.iter().any(|(e, _)| *e == epoch)
+    }
+
+    /// Resolve the `(s_breached, c_breached)` gate outcomes for cohort
+    /// `cohort_epoch` over its measurement window e+1…e+2 (05 §4.7, §7).
+    ///
+    /// **A zero-sample epoch in the window is an unavailable gate input and is
+    /// refused (05 §4.7; SQ-79 ruling).** The permissive default of
+    /// [`Self::gate_breach`] would otherwise settle gate markets at "no breach"
+    /// on a window with no observations at all — an adopt-favourable claim paid
+    /// out of absent data, which is the opposite of G-1. Refusing leaves
+    /// settlement at the status quo; the affected cohort takes doc 07 §10's
+    /// fail-static VOID ("if the failed component is a gate input, affected
+    /// cohorts VOID") through the existing VoidAuthority path.
+    ///
+    /// *Partial* coverage is deliberately **not** classified here: 05 §4.7
+    /// declares no expected-day count, so any completeness threshold would be a
+    /// values call rather than a spec reading (SQ-79 leaves it open).
+    pub fn gate_window_outcomes(&self, cohort_epoch: EpochId) -> Result<(bool, bool), Error> {
+        let first_epoch = cohort_epoch
+            .checked_add(1)
+            .ok_or(Error::ArithmeticOverflow)?;
+        let second_epoch = cohort_epoch
+            .checked_add(2)
+            .ok_or(Error::ArithmeticOverflow)?;
+        ensure!(
+            self.gate_window_sampled(first_epoch) && self.gate_window_sampled(second_epoch),
+            Error::GateWindowUnsampled
+        );
+        let first = self.gate_breach(first_epoch);
+        let second = self.gate_breach(second_epoch);
+        Ok((
+            first.s_breached || second.s_breached,
+            first.c_breached || second.c_breached,
+        ))
     }
 
     /// Remove finalized rolling-window data older than `cutoff_epoch`.
@@ -1093,16 +1161,19 @@ mod tests {
         let mut specs = default_specs(1);
         specs[0].activation_epoch = 0;
         assert_eq!(
-            w.register_metric_spec(0, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs),
             Err(Error::BadActivationEpoch)
         );
         let mut specs = default_specs(1);
         specs[0].has_gaming_vectors = false;
         assert_eq!(
-            w.register_metric_spec(0, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs),
             Err(Error::MissingMetricDiscipline)
         );
-        assert_eq!(w.register_metric_spec(0, 1, default_specs(1)), Ok(()));
+        assert_eq!(
+            w.register_metric_spec(Registration::Genesis, 1, default_specs(1)),
+            Ok(())
+        );
     }
 
     #[test]
@@ -1116,7 +1187,10 @@ mod tests {
         for spec in &mut specs {
             spec.activation_epoch = 1;
         }
-        assert_eq!(w.register_metric_spec(0, 1, specs), Ok(()));
+        assert_eq!(
+            w.register_metric_spec(Registration::Genesis, 1, specs),
+            Ok(())
+        );
         assert_eq!(
             w.record_snapshot(
                 1,
@@ -1134,7 +1208,7 @@ mod tests {
             spec.activation_epoch = 2;
         }
         assert_eq!(
-            w.register_metric_spec(1, 2, specs),
+            w.register_metric_spec(Registration::Live { current_epoch: 1 }, 2, specs),
             Err(Error::BadActivationEpoch)
         );
         // ...but activating at epoch 3 (current + 2) is accepted.
@@ -1142,7 +1216,10 @@ mod tests {
         for spec in &mut specs {
             spec.activation_epoch = 3;
         }
-        assert_eq!(w.register_metric_spec(1, 2, specs), Ok(()));
+        assert_eq!(
+            w.register_metric_spec(Registration::Live { current_epoch: 1 }, 2, specs),
+            Ok(())
+        );
     }
 
     #[test]
@@ -1152,11 +1229,23 @@ mod tests {
         // (G-1; final review 2026-07-16).
         let mut w = WelfareState::new();
         assert_eq!(
-            w.register_metric_spec(EpochId::MAX - 1, 1, default_specs(1)),
+            w.register_metric_spec(
+                Registration::Live {
+                    current_epoch: EpochId::MAX - 1
+                },
+                1,
+                default_specs(1)
+            ),
             Err(Error::BadActivationEpoch)
         );
         assert_eq!(
-            w.register_metric_spec(EpochId::MAX, 1, default_specs(1)),
+            w.register_metric_spec(
+                Registration::Live {
+                    current_epoch: EpochId::MAX
+                },
+                1,
+                default_specs(1)
+            ),
             Err(Error::BadActivationEpoch)
         );
     }
@@ -1176,14 +1265,14 @@ mod tests {
         let mut specs = default_specs(1);
         specs[0].epsilon_floor = FixedU64(EPSILON_PILLAR.0 - 1);
         assert_eq!(
-            w.register_metric_spec(0, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs),
             Err(Error::BadEpsilonFloor)
         );
 
         let mut specs = default_specs(1);
         specs[3].source = SourceClass::Onchain;
         assert_eq!(
-            w.register_metric_spec(0, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs),
             Err(Error::BadSourceClass)
         );
     }
@@ -1191,7 +1280,8 @@ mod tests {
     #[test]
     fn cranks_reject_a_metric_version_before_activation() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(0, 1, default_specs(1)).unwrap();
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+            .unwrap();
         assert_eq!(
             w.record_snapshot(
                 1,
@@ -1213,7 +1303,8 @@ mod tests {
     #[test]
     fn prune_rolls_the_bounded_epoch_windows() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(0, 1, default_specs(1)).unwrap();
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+            .unwrap();
         w.events.clear();
         for epoch in 2..MAX_SNAPSHOTS as u32 + 2 {
             w.record_snapshot(
@@ -1251,7 +1342,8 @@ mod tests {
     #[test]
     fn daily_gate_uses_only_s_and_onchain_c_components() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(0, 1, default_specs(1)).unwrap();
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+            .unwrap();
         let (flags, changed) = w
             .record_daily_gate(
                 2,
@@ -1279,7 +1371,8 @@ mod tests {
     #[test]
     fn daily_gate_signals_only_new_breach_flags_and_not_samples_or_duplicates() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(0, 1, default_specs(1)).unwrap();
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+            .unwrap();
 
         let (_, first_changed) = w
             .record_daily_gate(2, 0, 1, healthy_components(), &WelfareParams::DEFAULT)
@@ -1311,7 +1404,8 @@ mod tests {
     #[test]
     fn daily_gate_bitmap_contains_breached_days_only() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(0, 1, default_specs(1)).unwrap();
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+            .unwrap();
 
         let (healthy, changed) = w
             .record_daily_gate(2, 3, 1, healthy_components(), &WelfareParams::DEFAULT)
@@ -1343,7 +1437,7 @@ mod tests {
         specs.push(spec(5, Pillar::CAttested, ONE, 1));
         specs.sort_by_key(|s| s.id);
         assert_eq!(
-            w.register_metric_spec(0, 1, specs),
+            w.register_metric_spec(Registration::Genesis, 1, specs),
             Err(Error::BadWeightSum)
         );
         // A split joint vector (0.8 on-chain + 0.2 attested) registers.
@@ -1351,7 +1445,10 @@ mod tests {
         specs[1].weight = FixedU64(800_000_000);
         specs.push(spec(5, Pillar::CAttested, 200_000_000, 1));
         specs.sort_by_key(|s| s.id);
-        assert_eq!(w.register_metric_spec(0, 1, specs), Ok(()));
+        assert_eq!(
+            w.register_metric_spec(Registration::Genesis, 1, specs),
+            Ok(())
+        );
     }
 
     #[test]
@@ -1365,7 +1462,8 @@ mod tests {
         specs[1].weight = FixedU64(800_000_000);
         specs.push(spec(5, Pillar::CAttested, 200_000_000, 1));
         specs.sort_by_key(|s| s.id);
-        w.register_metric_spec(0, 1, specs).unwrap();
+        w.register_metric_spec(Registration::Genesis, 1, specs)
+            .unwrap();
         let (flags, changed) = w
             .record_daily_gate(
                 2,
@@ -1486,7 +1584,8 @@ mod tests {
     #[test]
     fn snapshot_rejects_duplicate_epoch_spec_and_bad_incident_multiplier() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(0, 1, default_specs(1)).unwrap();
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+            .unwrap();
         let comps = vec![
             ComponentValue {
                 id: 1,
@@ -1526,8 +1625,10 @@ mod tests {
     #[test]
     fn snapshots_and_settlement_bind_creation_time_spec_version() {
         let mut w = WelfareState::new();
-        w.register_metric_spec(0, 1, default_specs(1)).unwrap();
-        w.register_metric_spec(0, 2, default_specs(2)).unwrap();
+        w.register_metric_spec(Registration::Genesis, 1, default_specs(1))
+            .unwrap();
+        w.register_metric_spec(Registration::Genesis, 2, default_specs(2))
+            .unwrap();
         let comps = vec![
             ComponentValue {
                 id: 1,

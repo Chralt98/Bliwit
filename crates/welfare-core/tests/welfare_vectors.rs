@@ -12,8 +12,8 @@ use std::{fs, path::PathBuf};
 use futarchy_primitives::{FixedU64, MetricId};
 use serde_json::Value;
 use welfare_core::{
-    settlement_score, ComponentValue, MetricSpec, Pillar, SourceClass, WelfareParams, WelfareState,
-    EPSILON_PILLAR, ONE,
+    settlement_score, ComponentValue, MetricSpec, Pillar, Registration, SourceClass, WelfareParams,
+    WelfareState, EPSILON_PILLAR, ONE,
 };
 
 fn fixture() -> Value {
@@ -271,7 +271,7 @@ fn daily_c_equals(inputs: &PipelineInputs, expected: u64) {
         );
         let mut state = WelfareState::new();
         state
-            .register_metric_spec(0, 1, faithful_specs(inputs))
+            .register_metric_spec(Registration::Genesis, 1, faithful_specs(inputs))
             .expect("register faithful spec");
         let mut components = vec![
             ComponentValue {
@@ -356,7 +356,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                 // production snapshot.
                 let mut state = WelfareState::new();
                 state
-                    .register_metric_spec(0, 1, faithful_specs(&parsed))
+                    .register_metric_spec(Registration::Genesis, 1, faithful_specs(&parsed))
                     .expect("register faithful spec");
                 let welfare = state
                     .record_snapshot(
@@ -419,7 +419,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                 }
                 let mut c_state = WelfareState::new();
                 c_state
-                    .register_metric_spec(0, 1, c_specs)
+                    .register_metric_spec(Registration::Genesis, 1, c_specs)
                     .expect("register joint-C spec");
                 c_state
                     .record_snapshot(
@@ -455,7 +455,7 @@ fn welfare_vectors_match_python_reference_model_grid_exactly() {
                 );
                 let mut daily_state = WelfareState::new();
                 daily_state
-                    .register_metric_spec(0, 1, faithful_specs(&parsed))
+                    .register_metric_spec(Registration::Genesis, 1, faithful_specs(&parsed))
                     .expect("register daily spec");
                 let mut daily_components = snapshot_components(&parsed);
                 daily_components.retain(|component| {

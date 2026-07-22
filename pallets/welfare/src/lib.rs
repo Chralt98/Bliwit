@@ -45,10 +45,10 @@ use futarchy_primitives::{
 
 pub use welfare_core::{
     ComponentValue, Error as CoreError, Event as CoreEvent, GateBreachFlags as CoreGateBreachFlags,
-    MetricSpec, Pillar, Snapshot as CoreSnapshot, SourceClass, WelfareParams as CoreWelfareParams,
-    WelfareState, EPSILON, EPSILON_PILLAR, HISTORY_PRIORS, MAX_COMPONENTS_PER_SPEC,
-    MAX_DAILY_GATE_SAMPLES, MAX_GATE_FLAGS, MAX_METRIC_SPECS, MAX_SNAPSHOTS, ONE, THETA_C_HI,
-    THETA_C_LO, THETA_S_HI, THETA_S_LO, W_A, W_P,
+    MetricSpec, Pillar, Registration, Snapshot as CoreSnapshot, SourceClass,
+    WelfareParams as CoreWelfareParams, WelfareState, EPSILON, EPSILON_PILLAR, HISTORY_PRIORS,
+    MAX_COMPONENTS_PER_SPEC, MAX_DAILY_GATE_SAMPLES, MAX_GATE_FLAGS, MAX_METRIC_SPECS,
+    MAX_SNAPSHOTS, ONE, THETA_C_HI, THETA_C_LO, THETA_S_HI, THETA_S_LO, W_A, W_P,
 };
 
 /// Core bounds in the `u32` form required by FRAME's `ConstU32`.
@@ -64,6 +64,14 @@ pub const MAX_XCM_TRAFFIC_EPOCHS_BOUND: u32 = MAX_SNAPSHOTS_BOUND + 1;
 /// while a pathological historical backlog is spread across successive keeper
 /// ticks. Keeping the catch-up cursor-bounded is required by I-20.
 pub const XCM_TRAFFIC_PRUNE_MAX_EPOCHS: usize = 2;
+
+/// Maximum retired welfare epochs removed by one epoch-roll prune (05 §3.3).
+///
+/// Steady state retires at most one epoch per clock roll, so this cap binds
+/// only while a pathological historical backlog is spread across successive
+/// keeper ticks — the same discipline (and the same value) as
+/// [`XCM_TRAFFIC_PRUNE_MAX_EPOCHS`], and required by I-20.
+pub const EPOCH_ROLL_PRUNE_MAX_EPOCHS: usize = 2;
 
 /// Live 13 §1 welfare tunables. B1a implements this provider over
 /// `pallet-constitution::Params`; tests use overridable parameter statics.
@@ -422,6 +430,11 @@ pub mod pallet {
         /// (`epoch >= CurrentEpoch`). 05 §4.6 winsorizes over *finalized* epoch
         /// values, so a keeper may only record an epoch the clock has passed.
         EpochNotFinalized,
+        /// Gate-market settlement was asked to resolve a cohort whose e+1…e+2
+        /// window contains an epoch with no recorded daily observation at all
+        /// (05 §4.7; SQ-79). The gate input is unavailable, so settlement holds
+        /// at the status quo and the cohort takes 07 §10's VOID.
+        GateWindowUnsampled,
     }
 
     #[pallet::hooks]
@@ -445,7 +458,16 @@ pub mod pallet {
         ) -> DispatchResult {
             T::MetricGovernanceOrigin::ensure_origin(origin)?;
             Self::mutate(|state| {
-                state.register_metric_spec(T::CurrentEpoch::get(), version, specs.into_inner())
+                // SQ-82: a live dispatch is always `Live`, even when the clock
+                // reads 0. The genesis relaxation belongs to the genesis build
+                // alone and must not be reachable from an unset/booting clock.
+                state.register_metric_spec(
+                    Registration::Live {
+                        current_epoch: T::CurrentEpoch::get(),
+                    },
+                    version,
+                    specs.into_inner(),
+                )
             })?;
             let _ = Self::snapshot_progress();
             Ok(())
@@ -575,7 +597,7 @@ pub mod pallet {
             for (version, specs) in &self.specs {
                 assert!(
                     state
-                        .register_metric_spec(0, *version, specs.clone())
+                        .register_metric_spec(Registration::Genesis, *version, specs.clone())
                         .is_ok(),
                     "welfare genesis metric specs violate core validation"
                 );
@@ -771,6 +793,50 @@ pub mod pallet {
             Ok(())
         }
 
+        /// Bounded epoch-roll retirement of welfare state left unreferenced by
+        /// every live cohort (05 §3.3; SQ-201).
+        ///
+        /// `prune` above is reachable only from cohort reap, so an epoch that
+        /// never forms a cohort is unreachable by cohort-keyed cleanup: after
+        /// `MAX_SNAPSHOTS` consecutive cohortless epochs `record_snapshot`
+        /// jams at its hard bound, snapshot recording stops and the 05 §4.8
+        /// snapshot-overdue trigger fires — a deterministic chain wedge rather
+        /// than idle storage. This path runs on every clock roll instead.
+        ///
+        /// It applies the **same** 05 §3.3 cutoff as the reap-triggered prune,
+        /// so it can never retire state that prune would have retained; only
+        /// *when* the retirement happens changes, never *what* is retired. At
+        /// most [`EPOCH_ROLL_PRUNE_MAX_EPOCHS`] epochs are removed per call,
+        /// oldest first (I-20), and the epoch named by the snapshot-deadline
+        /// progress is protected so the try-state binding between the two
+        /// cannot be broken by maintenance.
+        pub fn prune_epoch_roll(cutoff_epoch: EpochId) -> DispatchResult {
+            let protected = SnapshotDeadline::<T>::get().and_then(|p| p.last_snapshot_epoch);
+            // Key-only scans: the three maps are each bounded at MAX_SNAPSHOTS /
+            // MAX_GATE_FLAGS by `checked_storage` and `do_try_state`, so this is
+            // a bounded read even before the retirement batch is capped.
+            let snapshot_keys = Snapshots::<T>::iter_keys().collect::<Vec<_>>();
+            let mut retired = snapshot_keys
+                .iter()
+                .map(|(epoch, _)| *epoch)
+                .chain(GateBreachFlags::<T>::iter_keys())
+                .chain(SampledGateDays::<T>::iter_keys())
+                .filter(|epoch| *epoch < cutoff_epoch && Some(*epoch) != protected)
+                .collect::<Vec<_>>();
+            retired.sort_unstable();
+            retired.dedup();
+            retired.truncate(EPOCH_ROLL_PRUNE_MAX_EPOCHS);
+
+            for epoch in retired {
+                for key in snapshot_keys.iter().filter(|(e, _)| *e == epoch) {
+                    Snapshots::<T>::remove(key);
+                }
+                GateBreachFlags::<T>::remove(epoch);
+                SampledGateDays::<T>::remove(epoch);
+            }
+            Ok(())
+        }
+
         /// Reap only retired XCM traffic prefixes.
         ///
         /// Epoch calls this after every successful tick, including when no
@@ -877,22 +943,12 @@ pub mod pallet {
             Ok(params)
         }
 
+        /// SQ-79: the core refuses a zero-sample e+1…e+2 window rather than
+        /// settling gate books at "no breach" on absent observations.
         fn gate_outcomes(cohort_epoch: EpochId) -> Result<(bool, bool), DispatchError> {
-            let state = Self::load();
-            let first_epoch = cohort_epoch
-                .checked_add(1)
-                .ok_or_else(|| Self::map_core_error(CoreError::ArithmeticOverflow))?;
-            let second_epoch = cohort_epoch
-                .checked_add(2)
-                .ok_or_else(|| Self::map_core_error(CoreError::ArithmeticOverflow))?;
-            // SQ-79: absent daily observations deterministically read as no
-            // breach; whether G-1 requires a pessimistic default is deferred.
-            let first = state.gate_breach(first_epoch);
-            let second = state.gate_breach(second_epoch);
-            Ok((
-                first.s_breached || second.s_breached,
-                first.c_breached || second.c_breached,
-            ))
+            Self::load()
+                .gate_window_outcomes(cohort_epoch)
+                .map_err(Self::map_core_error)
         }
 
         fn load() -> WelfareState {
@@ -1155,6 +1211,7 @@ pub mod pallet {
                 CoreError::DuplicateSnapshot => Error::<T>::DuplicateSnapshot.into(),
                 CoreError::ArithmeticOverflow => Error::<T>::ArithmeticOverflow.into(),
                 CoreError::TryStateViolation => Error::<T>::TryStateViolation.into(),
+                CoreError::GateWindowUnsampled => Error::<T>::GateWindowUnsampled.into(),
             }
         }
     }

@@ -3468,7 +3468,15 @@ impl pallet_epoch::WelfareSettlement for RuntimeEpochWelfare {
 
     fn prune_xcm_traffic(current_epoch: EpochId) -> frame_support::dispatch::DispatchResult {
         let cutoff = current_epoch.saturating_sub(pallet_welfare::MAX_SNAPSHOTS_BOUND);
-        pallet_welfare::Pallet::<Runtime>::prune_xcm_traffic(cutoff)
+        pallet_welfare::Pallet::<Runtime>::prune_xcm_traffic(cutoff)?;
+        // SQ-201 / 05 §3.3: cohort reap is not the only prune trigger. Tick
+        // invokes this seam on every successful roll — including rolls that
+        // settle no cohort — so it is the epoch-roll hook the snapshot/gate
+        // window needs. The cutoff is the same `current - 19` used by `prune`
+        // above, so this retires strictly nothing that reap would have kept.
+        let history_cutoff =
+            current_epoch.saturating_sub(pallet_welfare::MAX_SNAPSHOTS_BOUND.saturating_sub(1));
+        pallet_welfare::Pallet::<Runtime>::prune_epoch_roll(history_cutoff)
     }
 }
 

@@ -1180,6 +1180,17 @@ fn ledger_failure_is_atomic_and_emits_no_settlement_event() {
             12,
             1,
         ));
+        // SQ-79: the gate window must carry at least one observation per
+        // measurement epoch before gate books may settle at all, so sample both
+        // — this test is about ledger atomicity, not about the window rule.
+        for epoch in [11, 12] {
+            assert_ok!(Welfare::record_daily_gate(
+                RuntimeOrigin::signed(keeper()),
+                epoch,
+                0,
+                1,
+            ));
+        }
         let before_state = Welfare::welfare_state();
         let before_events = System::events();
         LedgerCalls::set(Vec::new());
@@ -1344,7 +1355,7 @@ fn assert_last_matches_core(event: CoreEvent) {
 fn shell_matches_core_over_400_step_fixed_seed_sequence() {
     new_test_ext().execute_with(|| {
         let mut core = WelfareState::new();
-        core.register_metric_spec(0, 1, genesis_specs(1))
+        core.register_metric_spec(Registration::Genesis, 1, genesis_specs(1))
             .expect("seed spec is valid");
         core.events.clear();
         let params = CoreWelfareParams::DEFAULT;
@@ -1369,7 +1380,11 @@ fn shell_matches_core_over_400_step_fixed_seed_sequence() {
                     // the genesis version (active from epoch 1) drives success.
                     let now = CurrentEpochValue::get();
                     let specs = specs_activating(version, now + 2);
-                    let core_result = core.register_metric_spec(now, version, specs.clone());
+                    let core_result = core.register_metric_spec(
+                        Registration::Live { current_epoch: now },
+                        version,
+                        specs.clone(),
+                    );
                     let pallet_result = Welfare::register_spec(
                         RuntimeOrigin::signed(governance_acc()),
                         version,
@@ -1426,22 +1441,23 @@ fn shell_matches_core_over_400_step_fixed_seed_sequence() {
                 _ => {
                     let cohort = 99 + ((seed >> 28) % 25) as u32;
                     let pid = 42_u64 + u64::from((seed >> 40) as u8);
-                    let core_result = core.compute_settlement(cohort, version);
-                    if let Ok(score) = core_result {
-                        let first = core.gate_breach(cohort + 1);
-                        let second = core.gate_breach(cohort + 2);
+                    // SQ-79: the gate leg now consults the core's window rule,
+                    // so the oracle must too — a zero-sample window makes the
+                    // whole proposal settlement fail, scalar leg included. The
+                    // window is checked first so a refusal leaves the core's
+                    // event log untouched, exactly as the shell's discarded
+                    // working state does.
+                    let core_result = match core.gate_window_outcomes(cohort) {
+                        Ok(gates) => core
+                            .compute_settlement(cohort, version)
+                            .map(|score| (score, gates)),
+                        Err(error) => Err(error),
+                    };
+                    if let Ok((score, (s_breached, c_breached))) = core_result {
                         expected_ledger_calls.extend([
                             LedgerCall::Scalar(pid, score),
-                            LedgerCall::Gate(
-                                pid,
-                                GateKind::Survival,
-                                first.s_breached || second.s_breached,
-                            ),
-                            LedgerCall::Gate(
-                                pid,
-                                GateKind::Security,
-                                first.c_breached || second.c_breached,
-                            ),
+                            LedgerCall::Gate(pid, GateKind::Survival, s_breached),
+                            LedgerCall::Gate(pid, GateKind::Security, c_breached),
                         ]);
                     }
                     let pallet_result = Welfare::compute_settlement(
@@ -1523,5 +1539,324 @@ fn rolling_window_with_the_runtime_prune_cutoff_never_jams() {
         }
         // The window is at steady state: 19 retained + the slot just used.
         assert!(Snapshots::<Test>::iter().count() <= MAX_SNAPSHOTS);
+    });
+}
+
+// ---------------------------------------------------------------- SQ-79
+//
+// 05 §4.7 owns the daily gate-breach flags; doc 07 §10 owns the fail-static
+// disposition of an unavailable gate input ("if the failed component is a gate
+// input, affected cohorts VOID"). A cohort whose whole e+1…e+2 measurement
+// window carries **no** recorded daily observation has no gate input at all,
+// and the pre-fix code settled its gate books at "no breach" — an
+// adopt-favourable claim paid out of absent data (against G-1/R-7). The ruled
+// disposition is to refuse: settlement holds at the status quo and the cohort
+// takes the existing VoidAuthority path.
+//
+// *Partial* coverage is deliberately unclassified (05 §4.7 declares no
+// expected-day count), so one sampled day per measurement epoch is enough —
+// `sq79_one_sampled_day_per_epoch_is_enough` pins that boundary so a later
+// completeness rule cannot be introduced by accident.
+
+#[test]
+fn sq79_a_wholly_unsampled_gate_window_refuses_settlement_instead_of_reading_no_breach() {
+    new_test_ext().execute_with(|| {
+        for epoch in [11, 12] {
+            assert_ok!(Welfare::record_snapshot(
+                RuntimeOrigin::signed(keeper()),
+                epoch,
+                1,
+            ));
+        }
+        // No `record_daily_gate` for either measurement epoch at all.
+        assert!(!GateBreachFlags::<Test>::contains_key(11));
+        assert!(!GateBreachFlags::<Test>::contains_key(12));
+
+        LedgerCalls::set(Vec::new());
+        assert_noop!(
+            Welfare::compute_settlement(
+                10,
+                1,
+                SettleTarget::Proposal {
+                    pid: 42,
+                    has_gate_books: true,
+                },
+            ),
+            Error::<Test>::GateWindowUnsampled
+        );
+        // Status quo: nothing settled, no scalar leg leaked out either.
+        assert!(LedgerCalls::get().is_empty());
+        assert!(!System::events().iter().any(|record| matches!(
+            record.event,
+            RuntimeEvent::Welfare(Event::SettlementComputed { .. })
+        )));
+    });
+}
+
+#[test]
+fn sq79_a_half_sampled_window_is_still_an_unavailable_gate_input() {
+    new_test_ext().execute_with(|| {
+        for epoch in [11, 12] {
+            assert_ok!(Welfare::record_snapshot(
+                RuntimeOrigin::signed(keeper()),
+                epoch,
+                1,
+            ));
+        }
+        // Only e+1 is observed; e+2 is a blank window.
+        assert_ok!(Welfare::record_daily_gate(
+            RuntimeOrigin::signed(keeper()),
+            11,
+            0,
+            1,
+        ));
+        assert_noop!(
+            Welfare::compute_settlement(
+                10,
+                1,
+                SettleTarget::Proposal {
+                    pid: 42,
+                    has_gate_books: true,
+                },
+            ),
+            Error::<Test>::GateWindowUnsampled
+        );
+    });
+}
+
+#[test]
+fn sq79_one_sampled_day_per_epoch_is_enough() {
+    // The ruling stops at zero-sample. Any completeness measure over the days
+    // *within* an epoch would need a normative expected-day count, which 05 §4.7
+    // does not declare — so a single healthy day per measurement epoch settles.
+    new_test_ext().execute_with(|| {
+        for epoch in [11, 12] {
+            assert_ok!(Welfare::record_snapshot(
+                RuntimeOrigin::signed(keeper()),
+                epoch,
+                1,
+            ));
+            assert_ok!(Welfare::record_daily_gate(
+                RuntimeOrigin::signed(keeper()),
+                epoch,
+                0,
+                1,
+            ));
+        }
+        LedgerCalls::set(Vec::new());
+        assert_ok!(Welfare::compute_settlement(
+            10,
+            1,
+            SettleTarget::Proposal {
+                pid: 42,
+                has_gate_books: true,
+            },
+        ));
+        assert_eq!(
+            LedgerCalls::get(),
+            vec![
+                LedgerCall::Scalar(42, FixedU64(ONE)),
+                LedgerCall::Gate(42, GateKind::Survival, false),
+                LedgerCall::Gate(42, GateKind::Security, false),
+            ]
+        );
+    });
+}
+
+#[test]
+fn sq79_refusal_is_scoped_to_gate_books_only() {
+    // A gateless proposal and the Baseline book consume the scalar score, never
+    // the §4.7 flags, so an unsampled window must not block them (G-1: refusing
+    // more than the missing input would itself be a liveness failure).
+    new_test_ext().execute_with(|| {
+        for epoch in [11, 12] {
+            assert_ok!(Welfare::record_snapshot(
+                RuntimeOrigin::signed(keeper()),
+                epoch,
+                1,
+            ));
+        }
+        LedgerCalls::set(Vec::new());
+        assert_ok!(Welfare::compute_settlement(
+            10,
+            1,
+            SettleTarget::Proposal {
+                pid: 43,
+                has_gate_books: false,
+            },
+        ));
+        assert_ok!(Welfare::compute_settlement(10, 1, SettleTarget::Baseline));
+        assert_eq!(
+            LedgerCalls::get(),
+            vec![
+                LedgerCall::Scalar(43, FixedU64(ONE)),
+                LedgerCall::Baseline(10, FixedU64(ONE)),
+            ]
+        );
+    });
+}
+
+#[test]
+fn sq79_view_path_keeps_the_frozen_permissive_default() {
+    // 02 §4 `WelfareView.{s_breached, c_breached}` is a frozen display surface:
+    // an unsampled current epoch must still render as "no breach so far" rather
+    // than erroring. Only the settlement path changed.
+    new_test_ext().execute_with(|| {
+        let state = Welfare::welfare_state();
+        let flags = state.gate_breach(11);
+        assert!(!flags.s_breached && !flags.c_breached);
+        assert!(!state.gate_window_sampled(11));
+    });
+}
+
+// ---------------------------------------------------------------- SQ-82
+//
+// 05 §4.4/§4.6: the `>= current + 2` activation lead protects in-flight cohorts
+// (I-16); genesis has none, so a genesis registration activates at epoch 1. The
+// pre-fix core inferred "this is genesis" from the ambient `current_epoch == 0`,
+// which cannot distinguish the genesis build from an unset/booting clock — so a
+// *live* `register_spec` observed against a zero clock inherited the relaxation
+// and could activate one epoch early. The context is now explicit.
+
+#[test]
+fn sq82_a_live_register_spec_at_a_zero_clock_does_not_inherit_the_genesis_relaxation() {
+    new_test_ext().execute_with(|| {
+        CurrentEpochValue::set(0);
+        // The genesis relaxation would have admitted activation at epoch 1.
+        assert_noop!(
+            Welfare::register_spec(
+                RuntimeOrigin::signed(governance_acc()),
+                2,
+                bounded(specs_activating(2, 1)),
+            ),
+            Error::<Test>::BadActivationEpoch
+        );
+        // The live `current + 2` lead is what actually binds.
+        assert_ok!(Welfare::register_spec(
+            RuntimeOrigin::signed(governance_acc()),
+            2,
+            bounded(specs_activating(2, 2)),
+        ));
+    });
+}
+
+#[test]
+fn sq82_genesis_registration_still_activates_at_epoch_one() {
+    // The relaxation itself is unchanged — 05 §4.6's cold start requires welfare
+    // to be computable from epoch 1 — it is now reachable only from the genesis
+    // build. The mock genesis registers `genesis_specs` (activation 1).
+    new_test_ext().execute_with(|| {
+        assert_eq!(Welfare::welfare_state().specs, vec![(1, genesis_specs(1))]);
+    });
+}
+
+// --------------------------------------------------------------- SQ-201
+//
+// 05 §3.3 tied the full welfare prune to cohort reap, and `settle_cohort` is its
+// only caller. An epoch that never forms a cohort is therefore unreachable by
+// cohort-keyed cleanup: after MAX_SNAPSHOTS consecutive cohortless epochs
+// `record_snapshot` jams at its hard bound and the §4.8 snapshot-overdue trigger
+// fires — a deterministic chain wedge, not idle storage. The epoch-roll prune
+// runs on every clock roll and applies the *same* §3.3 cutoff, so it retires
+// nothing reap would have retained.
+
+#[test]
+fn sq201_cohortless_epochs_wedge_snapshot_recording_without_the_epoch_roll_prune() {
+    // The pre-fix failure mode, pinned: with cohort reap never firing, the
+    // 20-deep window fills and the 21st epoch cannot record.
+    new_test_ext().execute_with(|| {
+        for epoch in 2..MAX_SNAPSHOTS as u32 + 2 {
+            assert_ok!(Welfare::record_snapshot(
+                RuntimeOrigin::signed(keeper()),
+                epoch,
+                1,
+            ));
+        }
+        assert_noop!(
+            Welfare::record_snapshot(RuntimeOrigin::signed(keeper()), MAX_SNAPSHOTS as u32 + 2, 1,),
+            Error::<Test>::TooManySnapshots
+        );
+        // The epoch-roll prune clears the jam with no cohort in sight.
+        assert_ok!(Welfare::prune_epoch_roll(3));
+        assert_ok!(Welfare::record_snapshot(
+            RuntimeOrigin::signed(keeper()),
+            MAX_SNAPSHOTS as u32 + 2,
+            1,
+        ));
+    });
+}
+
+#[test]
+fn sq201_epoch_roll_prune_is_bounded_and_retires_oldest_first() {
+    new_test_ext().execute_with(|| {
+        for epoch in 2..MAX_SNAPSHOTS as u32 + 2 {
+            assert_ok!(Welfare::record_snapshot(
+                RuntimeOrigin::signed(keeper()),
+                epoch,
+                1,
+            ));
+            assert_ok!(Welfare::record_daily_gate(
+                RuntimeOrigin::signed(keeper()),
+                epoch,
+                0,
+                1,
+            ));
+        }
+        // A cutoff far above the window: only EPOCH_ROLL_PRUNE_MAX_EPOCHS go per
+        // call, oldest first, so a backlog is spread across ticks (I-20).
+        assert_ok!(Welfare::prune_epoch_roll(MAX_SNAPSHOTS as u32 + 2));
+        assert_eq!(
+            Snapshots::<Test>::iter().count(),
+            MAX_SNAPSHOTS - EPOCH_ROLL_PRUNE_MAX_EPOCHS
+        );
+        for epoch in 2..2 + EPOCH_ROLL_PRUNE_MAX_EPOCHS as u32 {
+            assert!(!Snapshots::<Test>::contains_key((epoch, 1)));
+            assert!(!GateBreachFlags::<Test>::contains_key(epoch));
+            assert!(!SampledGateDays::<Test>::contains_key(epoch));
+        }
+        assert!(Snapshots::<Test>::contains_key((
+            2 + EPOCH_ROLL_PRUNE_MAX_EPOCHS as u32,
+            1
+        )));
+    });
+}
+
+#[test]
+fn sq201_epoch_roll_prune_never_retires_inside_the_retained_window() {
+    // It must be impossible for the roll prune to remove state the reap-driven
+    // prune would have kept: both take the same 05 §3.3 cutoff.
+    new_test_ext().execute_with(|| {
+        for epoch in 2..MAX_SNAPSHOTS as u32 + 2 {
+            assert_ok!(Welfare::record_snapshot(
+                RuntimeOrigin::signed(keeper()),
+                epoch,
+                1,
+            ));
+        }
+        let before = Snapshots::<Test>::iter().count();
+        assert_ok!(Welfare::prune_epoch_roll(2));
+        assert_eq!(Snapshots::<Test>::iter().count(), before);
+    });
+}
+
+#[test]
+fn sq201_epoch_roll_prune_protects_the_snapshot_deadline_binding() {
+    // do_try_state binds SnapshotDeadline.last_snapshot_epoch to a live
+    // snapshot; maintenance must not be able to break that binding even if a
+    // caller supplies an absurd cutoff.
+    new_test_ext().execute_with(|| {
+        for epoch in 1..4 {
+            assert_ok!(Welfare::record_snapshot(
+                RuntimeOrigin::signed(keeper()),
+                epoch,
+                1,
+            ));
+        }
+        let last = SnapshotDeadline::<Test>::get()
+            .and_then(|progress| progress.last_snapshot_epoch)
+            .expect("snapshot progress advanced");
+        assert_ok!(Welfare::prune_epoch_roll(u32::MAX));
+        assert!(Snapshots::<Test>::contains_key((last, 1)));
+        assert_ok!(Welfare::do_try_state());
     });
 }

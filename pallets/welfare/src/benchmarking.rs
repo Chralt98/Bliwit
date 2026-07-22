@@ -92,7 +92,7 @@ fn fill_gate_flags(state: &mut WelfareState, count: usize) -> Result<(), Benchma
 fn fill_specs(state: &mut WelfareState, first_version: u16) -> Result<(), BenchmarkError> {
     for version in first_version..=MAX_METRIC_SPECS as u16 {
         state
-            .register_metric_spec(0, version, full_specs(version))
+            .register_metric_spec(Registration::Genesis, version, full_specs(version))
             .map_err(|_| BenchmarkError::Stop("benchmark spec setup failed"))?;
     }
     Ok(())
@@ -107,7 +107,7 @@ mod benches {
         let mut state = WelfareState::new();
         for version in 1..MAX_METRIC_SPECS as u16 {
             state
-                .register_metric_spec(0, version, full_specs(version))
+                .register_metric_spec(Registration::Genesis, version, full_specs(version))
                 .map_err(|_| BenchmarkError::Stop("benchmark setup failed"))?;
         }
         fill_snapshots(&mut state, MAX_SNAPSHOTS)?;
@@ -140,7 +140,7 @@ mod benches {
     fn record_snapshot() -> Result<(), BenchmarkError> {
         let mut state = WelfareState::new();
         state
-            .register_metric_spec(0, 1, full_specs(1))
+            .register_metric_spec(Registration::Genesis, 1, full_specs(1))
             .map_err(|_| BenchmarkError::Stop("benchmark setup failed"))?;
         fill_specs(&mut state, 2)?;
         fill_snapshots(&mut state, MAX_SNAPSHOTS - 1)?;
@@ -165,7 +165,7 @@ mod benches {
     fn record_daily_gate() -> Result<(), BenchmarkError> {
         let mut state = WelfareState::new();
         state
-            .register_metric_spec(0, 1, full_specs(1))
+            .register_metric_spec(Registration::Genesis, 1, full_specs(1))
             .map_err(|_| BenchmarkError::Stop("benchmark setup failed"))?;
         fill_specs(&mut state, 2)?;
         fill_snapshots(&mut state, MAX_SNAPSHOTS)?;
