@@ -47,6 +47,7 @@ pub fn coretime_quote_authority() -> AccountId32 {
 
 parameter_types! {
     pub static CurrentEpochValue: u32 = 0;
+    pub static TreasuryArmedValue: bool = false;
     // 13 §1 treasury tunables — defaulting to the core defaults so shell ≡ core,
     // overridable per-test to prove the pallet reads `Params` (rule 4), never a
     // hardcode. The runtime (B1a) reads these from `pallet-constitution::Params`.
@@ -63,11 +64,35 @@ parameter_types! {
     // Test-only injected coretime parameters. They are deliberately simple
     // non-default values so tests prove the pallet consumes the seam.
     pub static CoretimeDotRate: u128 = 10_000_000_000;
+    pub static ReserveProbeDotRate: u128 = 10_000_000_000;
+    pub static ReserveProbeFeeDot: u128 = 100;
+    pub static ReserveProbeFailThreshold: u8 = 2;
+    pub static ReserveProbeRecoverThreshold: u8 = 3;
     pub static CoretimeFeeDot: u128 = 100;
     pub static CoretimeQuoteTtl: u32 = 100;
     // Configurable stand-ins for the real KEEPER__/ORACLE__ USDC custody pots.
     pub static KeeperRebatePotBalance: u128 = 0;
     pub static OracleRebatePotBalance: u128 = 0;
+}
+
+pub struct TestTreasuryPhase;
+impl pallet_futarchy_treasury::TreasuryPhase for TestTreasuryPhase {
+    fn treasury_armed() -> bool {
+        TreasuryArmedValue::get()
+    }
+}
+
+pub struct TestBootstrapOpsFundingPolicy;
+impl pallet_futarchy_treasury::BootstrapOpsFundingPolicy for TestBootstrapOpsFundingPolicy {
+    fn reserve_probe_ceiling() -> Option<u128> {
+        futarchy_treasury_core::reserve_probe_runway_debit(
+            ReserveProbeFeeDot::get(),
+            ReserveProbeDotRate::get(),
+            ReserveProbeFailThreshold::get(),
+            ReserveProbeRecoverThreshold::get(),
+        )
+        .ok()
+    }
 }
 
 pub struct TestParams;
@@ -95,6 +120,9 @@ impl TreasuryParams for TestParams {
     }
     fn coretime_dot_rate() -> u128 {
         CoretimeDotRate::get()
+    }
+    fn reserve_probe_dot_rate() -> u128 {
+        ReserveProbeDotRate::get()
     }
     fn coretime_fee_dot() -> u128 {
         CoretimeFeeDot::get()
@@ -251,6 +279,8 @@ impl pallet_futarchy_treasury::Config for Test {
     type TreasuryOrigin = TestTreasuryOrigin;
     type Params = TestParams;
     type CurrentEpoch = CurrentEpochValue;
+    type TreasuryPhase = TestTreasuryPhase;
+    type BootstrapOpsFundingPolicy = TestBootstrapOpsFundingPolicy;
     type RenewalDispatch = ();
     type RebatePayout = RecordingRebatePayout;
     type PotFunding = MockPotFunding;
@@ -298,8 +328,13 @@ pub fn new_test_ext_with(
         KeeperBudgetEpoch::set(futarchy_treasury_core::KEEPER_BUDGET_EPOCH);
         KeeperRebate::set(0);
         CoretimeDotRate::set(10_000_000_000);
+        ReserveProbeDotRate::set(10_000_000_000);
+        ReserveProbeFeeDot::set(100);
+        ReserveProbeFailThreshold::set(2);
+        ReserveProbeRecoverThreshold::set(3);
         CoretimeFeeDot::set(100);
         CoretimeQuoteTtl::set(100);
+        TreasuryArmedValue::set(false);
         reset_rebate_payout();
         reset_pot_funding();
         reset_insurance_sweeps();

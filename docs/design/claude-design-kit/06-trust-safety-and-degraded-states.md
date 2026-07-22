@@ -1,6 +1,7 @@
 # Trust, safety & degraded-state UX obligations
 
-> **DERIVED, NON-NORMATIVE.** Distilled 2026-07-12 (commit `9f250be`) from the frozen spec —
+> **DERIVED, NON-NORMATIVE.** Distilled 2026-07-12 (commit `9f250be`) and refreshed
+> 2026-07-22 for the reserve-probe/I-24 amendments from the frozen spec —
 > doc 00 (decision record), doc 14 (threat model), doc 15 (invariants & testing) — for upload
 > to Claude Design. Where this file and the spec disagree, the spec wins. IDs (D-n, TH-n, I-n,
 > INV-FE-n, E-n) are canonical and must be kept verbatim in any design annotations.
@@ -64,8 +65,21 @@ trading judgment — mitigation is mandatory, non-suppressible provenance labell
 firewall, never a verification claim. TH-50: snapshots are content-hash-pinned and sampled;
 the chain-served 32-cohort layer is the always-verified core. TH-14: when the USDC
 reserve-health flag is set, the NAV renders with a haircut and banner — never full backing.
+Only a timely authenticated reserve-probe success may raise `R`; ordinary XCM outcomes do
+not enter decisions, and missing/failed/late/ambiguous probe outcomes stay pessimistic.
+Operator readiness treats the USDC accounting line and the separately provisioned Asset Hub
+sovereign USDC/DOT inventory as distinct funding legs: local credit covers the full
+fail-plus-recovery runway, while the remote account holds the probe USDC, the same number of
+DOT envelopes and a refill margin. An unarmed zero-health record is not healthy launch
+evidence, and Phase 3 needs at least one timely authenticated production pass.
 TH-29: Phases 0–3 show the persistent sudo banner; Phase 3 is honestly "a capped-exposure
-trust phase".
+trust phase". The stored operations key can top up only `OpsReserveProbe` and only to its live
+runway ceiling. TREASURY arming does not close that bounded liveness bridge; the first
+successful positive TREASURY-class funding of the reserve line closes it irreversibly, and
+that handover is mandatory before Phase-4 sudo removal. A lost/compromised key gains no
+Signed or Root rotation path: use the NAV-gated bootstrap arming path if needed, then a
+TREASURY-class positive reserve funding plus rotation, or correct genesis/redeploy before
+persistent launch.
 
 **Privacy.** TH-60/61: no telemetry ever; per-provider disclosure ("this operator sees the
 addresses you look up") and per-use consent for address-history queries.

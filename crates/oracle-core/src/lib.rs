@@ -31,6 +31,9 @@ pub const ORC_EXT_WINDOW_BLOCKS: BlockNumber =
 pub const REPORT_WINDOW_BLOCKS: BlockNumber = 28_800;
 pub const RES_PROBE_INTERVAL: BlockNumber = 14_400;
 pub const RES_PROBE_TIMEOUT: BlockNumber = 600;
+/// Probe ids reserve the high bit for the XCM wire namespace. The oracle must
+/// never create an id that aliases that flag when the dispatcher encodes it.
+pub const MAX_RESERVE_PROBE_QUERY_ID: u64 = (1_u64 << 63) - 1;
 pub const ORC_ROUNDS: u8 = 3;
 pub const ORC_ROUND_CAP_MIN: u8 = futarchy_primitives::kernel::ORC_ROUNDS_MIN;
 pub const ORC_ROUND_CAP_MAX: u8 = futarchy_primitives::kernel::ORC_ROUNDS_MAX;
@@ -86,6 +89,17 @@ impl OracleParams {
         recover_threshold: RES_RECOVER_THRESHOLD,
         probe_amount: RES_PROBE_AMOUNT,
     };
+
+    /// The reserve probe cannot establish useful evidence unless every cadence,
+    /// timeout, transfer and health-latch input is non-zero. Registry bounds may
+    /// become stricter later; this is only the structural safety floor.
+    pub const fn reserve_probe_config_valid(&self) -> bool {
+        self.probe_interval > 0
+            && self.probe_timeout > 0
+            && self.probe_amount > 0
+            && self.fail_threshold > 0
+            && self.recover_threshold > 0
+    }
 }
 
 impl Default for OracleParams {
@@ -903,11 +917,17 @@ impl Oracle {
         params: &OracleParams,
     ) -> Result<u64, Error> {
         ensure!(
-            now >= self
-                .reserve_health
-                .last_probe_at
-                .saturating_add(params.probe_interval),
+            self.reserve_health.last_query_id == 0
+                || now
+                    >= self
+                        .reserve_health
+                        .last_probe_at
+                        .saturating_add(params.probe_interval),
             Error::ProbeTooEarly
+        );
+        ensure!(
+            self.reserve_health.last_query_id < MAX_RESERVE_PROBE_QUERY_ID,
+            Error::Overflow
         );
         self.reserve_health.last_query_id = self
             .reserve_health
@@ -942,7 +962,12 @@ impl Oracle {
         // A response that lands at or after the `res.probe_timeout` deadline is
         // counted as a **fail** regardless of the reported outcome — a late or
         // absent answer is never healthy (07 §8; Codex F2).
-        let effective = passed && now < since.saturating_add(params.probe_timeout);
+        // A governance amendment that makes the live probe configuration
+        // structurally invalid must never turn an outstanding response into
+        // positive reserve evidence. Treat it as a fail-static result instead.
+        let effective = passed
+            && params.reserve_probe_config_valid()
+            && now < since.saturating_add(params.probe_timeout);
         self.apply_probe_result(query_id, effective, params);
         Ok(())
     }
@@ -965,7 +990,33 @@ impl Oracle {
         Ok(())
     }
 
+    /// Score daily probe slots for which no keeper opened an attempt. This is
+    /// deliberately O(1): only the consecutive threshold state is material,
+    /// so a long outage is folded as one bounded counter update.
+    /// Absence is never interpreted as healthy (07 §8; SQ-385 literal ruling).
+    pub fn note_missed_reserve_probes_with_params(&mut self, missed: u32, params: &OracleParams) {
+        if missed == 0 {
+            return;
+        }
+        let scored = missed.min(u32::from(u8::MAX));
+        self.reserve_health.consecutive_fails = self
+            .reserve_health
+            .consecutive_fails
+            .saturating_add(scored as u8);
+        self.reserve_health.consecutive_passes = 0;
+        if !self.reserve_health.unhealthy
+            && self.reserve_health.consecutive_fails >= params.fail_threshold
+        {
+            self.reserve_health.unhealthy = true;
+            self.events.push(Event::ReserveUnhealthy);
+        }
+    }
+
     pub fn try_state(&self) -> Result<(), Error> {
+        ensure!(
+            self.reserve_health.last_query_id <= MAX_RESERVE_PROBE_QUERY_ID,
+            Error::Overflow
+        );
         ensure!(
             self.reporters.len() <= MAX_REPORTERS,
             Error::TooManyReporters
@@ -1764,6 +1815,26 @@ mod tests {
     }
 
     #[test]
+    fn first_reserve_probe_opens_immediately_then_anchors_interval() {
+        let mut o = Oracle::default();
+        assert_eq!(
+            o.crank_reserve_probe_with_params(1, &OracleParams::DEFAULT),
+            Ok(1)
+        );
+        assert_eq!(o.reserve_health.last_probe_at, 1);
+        o.reserve_probe_result_with_params(1, 1, true, &OracleParams::DEFAULT)
+            .unwrap();
+        assert_eq!(
+            o.crank_reserve_probe_with_params(RES_PROBE_INTERVAL, &OracleParams::DEFAULT),
+            Err(Error::ProbeTooEarly)
+        );
+        assert_eq!(
+            o.crank_reserve_probe_with_params(1 + RES_PROBE_INTERVAL, &OracleParams::DEFAULT,),
+            Ok(2)
+        );
+    }
+
+    #[test]
     fn recompute_proof_is_mechanical_and_fail_closed() {
         let mut o = Oracle::default();
         o.recomputable_components.push((7, 3));
@@ -1937,6 +2008,28 @@ mod tests {
             Err(Error::UnknownQuery)
         );
         assert_eq!(o.reserve_health.consecutive_passes, 0);
+    }
+
+    #[test]
+    fn reserve_probe_query_ids_stop_before_the_xcm_namespace_bit() {
+        let mut o = Oracle::default();
+        o.reserve_health.last_query_id = MAX_RESERVE_PROBE_QUERY_ID - 1;
+        assert_eq!(
+            o.crank_reserve_probe(RES_PROBE_INTERVAL),
+            Ok(MAX_RESERVE_PROBE_QUERY_ID)
+        );
+        o.reserve_probe_result(RES_PROBE_INTERVAL, MAX_RESERVE_PROBE_QUERY_ID, true)
+            .unwrap();
+        let before = o.clone();
+        assert_eq!(
+            o.crank_reserve_probe(RES_PROBE_INTERVAL * 2),
+            Err(Error::Overflow)
+        );
+        assert_eq!(o, before);
+        o.try_state().unwrap();
+
+        o.reserve_health.last_query_id = MAX_RESERVE_PROBE_QUERY_ID + 1;
+        assert_eq!(o.try_state(), Err(Error::Overflow));
     }
 
     #[test]

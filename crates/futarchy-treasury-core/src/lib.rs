@@ -117,6 +117,8 @@ pub enum BudgetLine {
     OpsMonitoring,
     OpsArweave,
     OpsCoretime,
+    /// Reserve-transferability probe execution + response-delivery fees (07 §8).
+    OpsReserveProbe,
 }
 
 impl BudgetLine {
@@ -135,7 +137,8 @@ impl BudgetLine {
             | Self::OpsWatchtowers
             | Self::OpsMonitoring
             | Self::OpsArweave
-            | Self::OpsCoretime => TreasuryAccount::Ops,
+            | Self::OpsCoretime
+            | Self::OpsReserveProbe => TreasuryAccount::Ops,
         }
     }
     pub const fn vit_issuance_allowed(self) -> bool {
@@ -151,6 +154,7 @@ impl BudgetLine {
                 | Self::OpsMonitoring
                 | Self::OpsArweave
                 | Self::OpsCoretime
+                | Self::OpsReserveProbe
         )
     }
 }
@@ -345,6 +349,10 @@ pub enum Event {
         amount: Balance,
     },
     CoretimeRenewalCalled {
+        line: BudgetLine,
+        amount: Balance,
+    },
+    ReserveProbeFeeCharged {
         line: BudgetLine,
         amount: Balance,
     },
@@ -995,13 +1003,7 @@ impl Treasury {
             .ok_or(Error::QuoteTimestampInFuture)?;
         ensure!(age <= ttl, Error::QuoteExpired);
         let total_dot = quote.price.checked_add(fee_budget).ok_or(Error::Overflow)?;
-        let numerator = total_dot.checked_mul(dot_rate).ok_or(Error::Overflow)?;
-        let quotient = numerator / DOT_PLANCKS_PER_DOT;
-        let converted_debit = if numerator % DOT_PLANCKS_PER_DOT == 0 {
-            quotient
-        } else {
-            quotient.checked_add(1).ok_or(Error::Overflow)?
-        };
+        let converted_debit = dot_to_usdc_ceil(total_dot, dot_rate)?;
         self.debit_line(BudgetLine::OpsCoretime, converted_debit)?;
         self.coretime_quotes.remove(quote_index);
         if self.funded_coretime_periods.len() >= MAX_FUNDED_CORETIME_PERIODS {
@@ -1013,6 +1015,27 @@ impl Treasury {
             amount: converted_debit,
         });
         Ok(quote.price)
+    }
+
+    /// Reserve the maximum DOT fee envelope for one 07 §8 probe against the
+    /// dedicated USDC-denominated `ops.reserve_probe` line (SQ-114).
+    ///
+    /// The conversion uses the dedicated governed reserve-probe DOT rate and
+    /// rounds up against the spender. The XCM dispatcher invokes
+    /// this inside the same storage layer as local send validation, so a send
+    /// rejected before delivery rolls the debit and event back together.
+    pub fn charge_reserve_probe_fee(
+        &mut self,
+        dot_fee: Balance,
+        dot_rate: Balance,
+    ) -> Result<Balance, Error> {
+        let converted_debit = reserve_probe_fee_debit(dot_fee, dot_rate)?;
+        self.debit_line(BudgetLine::OpsReserveProbe, converted_debit)?;
+        self.events.push(Event::ReserveProbeFeeCharged {
+            line: BudgetLine::OpsReserveProbe,
+            amount: converted_debit,
+        });
+        Ok(converted_debit)
     }
     pub fn set_reserve_impaired(&mut self, epoch: EpochId, flag: bool) {
         if self.reserve_impaired != flag {
@@ -1253,6 +1276,43 @@ impl Treasury {
     }
 }
 
+/// Exact ceil-rounded local line debit for one reserve-probe DOT envelope.
+pub fn reserve_probe_fee_debit(dot_fee: Balance, dot_rate: Balance) -> Result<Balance, Error> {
+    ensure!(dot_rate > 0, Error::RateUnset);
+    ensure!(dot_fee > 0, Error::FeeBudgetUnset);
+    dot_to_usdc_ceil(dot_fee, dot_rate)
+}
+
+/// Local arming runway: enough exact one-envelope debits to cross both the
+/// fail and recovery latches. Zero total attempts is invalid rather than an
+/// accidental zero-cost arm.
+pub fn reserve_probe_runway_debit(
+    dot_fee: Balance,
+    dot_rate: Balance,
+    fail_threshold: u8,
+    recover_threshold: u8,
+) -> Result<Balance, Error> {
+    let attempts = Balance::from(fail_threshold)
+        .checked_add(Balance::from(recover_threshold))
+        .ok_or(Error::Overflow)?;
+    ensure!(attempts > 0, Error::FeeBudgetUnset);
+    reserve_probe_fee_debit(dot_fee, dot_rate)?
+        .checked_mul(attempts)
+        .ok_or(Error::Overflow)
+}
+
+/// Convert a DOT-planck outflow into µUSDC budget debit, rounding up against
+/// the spender (08 §1.1; shared by the two operations DOT envelopes).
+fn dot_to_usdc_ceil(dot_amount: Balance, dot_rate: Balance) -> Result<Balance, Error> {
+    let numerator = dot_amount.checked_mul(dot_rate).ok_or(Error::Overflow)?;
+    let quotient = numerator / DOT_PLANCKS_PER_DOT;
+    if numerator % DOT_PLANCKS_PER_DOT == 0 {
+        Ok(quotient)
+    } else {
+        quotient.checked_add(1).ok_or(Error::Overflow)
+    }
+}
+
 pub fn bps(amount: Balance, bps: u32) -> Result<Balance, Error> {
     amount
         .checked_mul(bps as Balance)
@@ -1328,6 +1388,97 @@ mod tests {
             t.lines.push((BudgetLine::Oracle, oracle));
         }
         t
+    }
+
+    fn probe_funded(balance: Balance) -> Treasury {
+        let mut t = Treasury::default();
+        t.lines.push((BudgetLine::OpsReserveProbe, balance));
+        t.lines.push((BudgetLine::OpsCoretime, 777));
+        t.lines.push((BudgetLine::Oracle, 888));
+        t
+    }
+
+    #[test]
+    fn reserve_probe_fee_charge_is_ceil_rounded_and_touches_only_its_line() {
+        let mut exact = probe_funded(10_000_000);
+        let main = exact.main_usdc;
+        assert_eq!(
+            exact
+                .charge_reserve_probe_fee(DOT_PLANCKS_PER_DOT, 5_000_000)
+                .unwrap(),
+            5_000_000
+        );
+        assert_eq!(exact.line_balance(BudgetLine::OpsReserveProbe), 5_000_000);
+        assert_eq!(exact.line_balance(BudgetLine::OpsCoretime), 777);
+        assert_eq!(exact.line_balance(BudgetLine::Oracle), 888);
+        assert_eq!(exact.main_usdc, main);
+        assert_eq!(
+            exact.events,
+            vec![Event::ReserveProbeFeeCharged {
+                line: BudgetLine::OpsReserveProbe,
+                amount: 5_000_000,
+            }]
+        );
+
+        let mut ceil = probe_funded(2);
+        assert_eq!(ceil.charge_reserve_probe_fee(1, 1).unwrap(), 1);
+        assert_eq!(ceil.line_balance(BudgetLine::OpsReserveProbe), 1);
+    }
+
+    #[test]
+    fn reserve_probe_arm_runway_multiplies_the_exact_ceil_debit() {
+        assert_eq!(
+            reserve_probe_runway_debit(DOT_PLANCKS_PER_DOT, 5_000_000, 2, 3),
+            Ok(25_000_000)
+        );
+        // Ceil happens per attempted envelope, then the exact number of
+        // fail+recover attempts is reserved: ceil(1 planck × 1 / 1e10) × 5.
+        assert_eq!(reserve_probe_runway_debit(1, 1, 2, 3), Ok(5));
+        assert_eq!(
+            reserve_probe_runway_debit(1, 1, 0, 0),
+            Err(Error::FeeBudgetUnset)
+        );
+    }
+
+    #[test]
+    fn reserve_probe_fee_rejections_leave_the_full_state_byte_identical() {
+        for (fee, rate, expected) in [
+            (0, 1, Error::FeeBudgetUnset),
+            (1, 0, Error::RateUnset),
+            (u128::MAX, 2, Error::Overflow),
+            (DOT_PLANCKS_PER_DOT, 2, Error::InsufficientFunds),
+        ] {
+            let mut t = probe_funded(1);
+            let before = t.clone();
+            assert_eq!(t.charge_reserve_probe_fee(fee, rate), Err(expected));
+            assert_eq!(t, before);
+        }
+    }
+
+    #[test]
+    fn reserve_probe_budget_line_is_append_only_in_scale_encoding() {
+        let legacy = [
+            BudgetLine::Pol,
+            BudgetLine::PolBaseline,
+            BudgetLine::Keeper,
+            BudgetLine::Oracle,
+            BudgetLine::Rewards,
+            BudgetLine::OpsBootnodes,
+            BudgetLine::OpsRpcArchive,
+            BudgetLine::OpsCollators,
+            BudgetLine::OpsKeepers,
+            BudgetLine::OpsOracleEvidence,
+            BudgetLine::OpsWatchtowers,
+            BudgetLine::OpsMonitoring,
+            BudgetLine::OpsArweave,
+            BudgetLine::OpsCoretime,
+        ];
+        for (index, expected) in legacy.into_iter().enumerate() {
+            assert_eq!(expected.encode(), vec![index as u8]);
+            assert_eq!(BudgetLine::decode(&mut &[index as u8][..]), Ok(expected));
+        }
+        assert_eq!(BudgetLine::OpsCoretime.encode(), vec![13]);
+        assert_eq!(BudgetLine::OpsReserveProbe.encode(), vec![14]);
     }
 
     #[test]

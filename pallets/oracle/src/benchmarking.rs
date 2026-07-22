@@ -420,23 +420,24 @@ mod benches {
 
     #[benchmark]
     fn crank_reserve_probe() {
-        fill_reporters::<T>(1, MAX_REPORTERS_BOUND as u8);
-        fill_hydration::<T>(1, 16, 16, 0, false);
-        // Reachable predecessor state: probe 1 was sent at the prior daily
-        // interval and received no response. Measuring the next daily crank
-        // therefore includes the fail-static timeout fold, its synchronous
-        // `ProbeTimeoutSink` notification, and dispatch of probe 2.
+        // Conservative synthetic upper envelope: combine the recurring path's
+        // timeout/missed-slot/sink work with the first-arm readiness check. No
+        // single reachable branch performs more work than this union.
         ReserveHealth::<T>::put(ReserveHealthValue {
-            consecutive_fails: 0,
+            consecutive_fails: oracle_core::RES_FAIL_THRESHOLD.saturating_sub(1),
             consecutive_passes: 0,
             unhealthy: false,
             last_query_id: 1,
             last_probe_at: RES_PROBE_INTERVAL,
             pending_since: Some(RES_PROBE_INTERVAL),
         });
-        let now = RES_PROBE_INTERVAL.saturating_mul(2);
+        ReserveProbeArmed::<T>::put(true);
+        // Two cadence slots elapsed: fold the pending timeout, score the one
+        // unopened middle slot, then dispatch the current attempt.
+        let now = RES_PROBE_INTERVAL.saturating_mul(3);
         frame_system::Pallet::<T>::set_block_number(now.into());
         let keeper = account::<T>(1);
+        T::BenchmarkHelper::prime_reserve_probe();
         T::BenchmarkHelper::prime_keeper_rebate();
 
         #[extrinsic_call]
@@ -448,7 +449,36 @@ mod benches {
         let health = ReserveHealth::<T>::get();
         assert_eq!(health.last_query_id, 2);
         assert_eq!(health.pending_since, Some(now));
-        assert_eq!(health.consecutive_fails, 1);
+        assert_eq!(
+            health.consecutive_fails,
+            oracle_core::RES_FAIL_THRESHOLD.saturating_add(1)
+        );
+    }
+
+    /// Worst-case authenticated response: the failure crosses the unhealthy
+    /// edge and therefore measures the production constitution+treasury sink as
+    /// well as the O(1) oracle record/event update.
+    #[benchmark]
+    fn reserve_probe_result() {
+        let now = RES_PROBE_INTERVAL;
+        ReserveHealth::<T>::put(ReserveHealthValue {
+            consecutive_fails: oracle_core::RES_FAIL_THRESHOLD.saturating_sub(1),
+            consecutive_passes: 0,
+            unhealthy: false,
+            last_query_id: 1,
+            last_probe_at: now,
+            pending_since: Some(now),
+        });
+        frame_system::Pallet::<T>::set_block_number(now.into());
+
+        #[block]
+        {
+            Pallet::<T>::reserve_probe_result(1, false).expect("probe callback");
+        }
+
+        let health = ReserveHealth::<T>::get();
+        assert!(health.unhealthy);
+        assert!(health.pending_since.is_none());
     }
 
     #[benchmark]

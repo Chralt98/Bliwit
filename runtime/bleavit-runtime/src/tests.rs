@@ -4727,6 +4727,7 @@ fn xcm_traffic_recorder_clamps_large_live_epoch_day_to_u8_max() {
 #[test]
 fn oracle_probe_timeout_sink_records_welfare_xcm_traffic() {
     development_ext().execute_with(|| {
+        crate::tests_treasury_health::fund_reserve_probe_line();
         pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = 0);
         pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
             schedule.epoch_start_block = 0;

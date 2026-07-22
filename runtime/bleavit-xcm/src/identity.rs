@@ -59,6 +59,11 @@ pub fn usdc_on_asset_hub_location() -> Location {
     )
 }
 
+/// Relay-native DOT as seen by a program executing on Asset Hub (07 §8).
+pub fn dot_on_asset_hub_location() -> Location {
+    Location::parent()
+}
+
 /// Bleavit's chain location as seen from Asset Hub (07 §8).
 ///
 /// The location serves two related roles in the probe: it is the `ReportError`

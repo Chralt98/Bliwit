@@ -11,7 +11,7 @@ use crate::{
     RELEASE_CHANNEL_LEN, RELEASE_CHANNEL_STORAGE_KEY,
 };
 use frame_support::dispatch::DispatchResult;
-use frame_support::{assert_noop, assert_ok};
+use frame_support::{assert_noop, assert_ok, traits::StorageVersion};
 use sp_runtime::DispatchError;
 
 use futarchy_primitives::{ParamKey, ProposalClass};
@@ -1057,6 +1057,45 @@ fn try_state_rejects_reserved_flags_overspent_meters_and_overflown_registry() {
     });
 }
 
+#[test]
+fn try_state_requires_v1_and_both_probe_pricing_rows() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Constitution>();
+        assert!(Constitution::do_try_state().is_err());
+        StorageVersion::new(1).put::<Constitution>();
+
+        for name in [b"ops.probe_fee".as_slice(), b"ops.probe_rate".as_slice()] {
+            let key = key16(name);
+            let record = Params::<Test>::get(key).expect("probe pricing row");
+            Params::<Test>::remove(key);
+            assert!(
+                Constitution::do_try_state().is_err(),
+                "missing {name:?} was not rejected",
+            );
+            Params::<Test>::insert(key, record);
+            assert_ok!(Constitution::do_try_state());
+        }
+    });
+}
+
+#[test]
+fn try_state_accepts_a_lawfully_amended_probe_pricing_row() {
+    new_test_ext().execute_with(|| {
+        let key = key16(b"ops.probe_rate");
+        let mut record = Params::<Test>::get(key).expect("probe rate row");
+        let amended = record
+            .value
+            .as_u128()
+            .checked_add(1)
+            .expect("fixture value has room");
+        assert!(amended <= record.max.as_u128());
+        record.value = ParamValue::Balance(amended);
+        Params::<Test>::insert(key, record);
+
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
 // ------------------------------------------------------------ differential --
 
 #[test]
@@ -1192,10 +1231,10 @@ fn extrinsic_value_types_do_not_admit_wrong_kinds_via_scale() {
 fn genesis_registry_matches_13_1_row_encodings() {
     new_test_ext().execute_with(|| {
         // Every 13 §1 row with a scalar concrete default and no open
-        // [VERIFY] tag is seeded (100 total, incl. per-class suffix keys and
-        // rule-6 short keys; +2 for keeper.rebate/dis.merit_min genesis seeds,
-        // SQ-117/SQ-158); spot-pin the unit encodings per kind.
-        assert_eq!(Params::<Test>::count(), 100);
+        // [VERIFY] tag is seeded (102 total, incl. per-class suffix keys and
+        // rule-6 short keys; +2 for keeper.rebate/dis.merit_min and +2 for the
+        // reserve-probe pricing rows); spot-pin the unit encodings per kind.
+        assert_eq!(Params::<Test>::count(), 102);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
         // Phase-0-calibrated (V-12): dec.delta.meta 0.090 on the 1e9 grid.

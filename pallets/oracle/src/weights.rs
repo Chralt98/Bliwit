@@ -32,6 +32,8 @@ pub trait WeightInfo {
     fn crank_round_close(batch: u32) -> Weight;
     /// Weight of `crank_reserve_probe` (`ReserveHealth` r:1 w:1).
     fn crank_reserve_probe() -> Weight;
+    /// Worst-case authenticated reserve-probe `QueryResponse` callback.
+    fn reserve_probe_result() -> Weight;
     /// Weight of `adjudicate` (`Rounds`/`ComponentValues`/`Reporters` r:all w:1).
     fn adjudicate() -> Weight;
 }
@@ -89,6 +91,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
         Weight::from_parts(20_000_000, 1_600)
             .saturating_add(T::DbWeight::get().reads(1))
             .saturating_add(T::DbWeight::get().writes(1))
+    }
+    fn reserve_probe_result() -> Weight {
+        Weight::from_parts(40_000_000, 8_000)
+            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().writes(4))
     }
     fn adjudicate() -> Weight {
         Weight::from_parts(40_000_000, 8_000)
@@ -148,6 +155,11 @@ impl WeightInfo for () {
         Weight::from_parts(20_000_000, 1_600)
             .saturating_add(RocksDbWeight::get().reads(1))
             .saturating_add(RocksDbWeight::get().writes(1))
+    }
+    fn reserve_probe_result() -> Weight {
+        Weight::from_parts(40_000_000, 8_000)
+            .saturating_add(RocksDbWeight::get().reads(3))
+            .saturating_add(RocksDbWeight::get().writes(4))
     }
     fn adjudicate() -> Weight {
         Weight::from_parts(40_000_000, 8_000)

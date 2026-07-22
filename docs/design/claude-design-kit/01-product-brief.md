@@ -1,7 +1,8 @@
 # Bleavit — Product brief for frontend design
 
-> **DERIVED, NON-NORMATIVE.** Synthesized 2026-07-12 (commit `9f250be`) from the frozen
-> specification in `docs/architecture/` (mainly 00, 01, 10, 11) for upload to Claude Design.
+> **DERIVED, NON-NORMATIVE.** Synthesized 2026-07-12 (commit `9f250be`) and reviewed
+> through the reserve-probe/I-24 amendments of 2026-07-22 against the frozen specification
+> in `docs/architecture/` (mainly 00, 01, 10, 11) for upload to Claude Design.
 > Where this brief and the spec disagree, the spec wins. Citations like "(01 §4)" point into
 > the architecture set.
 

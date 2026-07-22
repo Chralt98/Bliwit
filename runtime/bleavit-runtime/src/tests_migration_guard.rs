@@ -14,7 +14,7 @@ use frame_support::{
 use futarchy_primitives::kernel;
 use parity_scale_codec::MaxEncodedLen;
 
-use crate::{tests, ExecutionGuard, Runtime, RuntimeEvent, System};
+use crate::{tests, Constitution, ExecutionGuard, Oracle, Runtime, RuntimeEvent, System};
 
 /// SQ-132(d): "stalled" is a pure function of the SDK cursor's own `started_at`,
 /// never of the cursor bytes failing to change. The retired byte-equality
@@ -153,6 +153,351 @@ fn first_migration_retires_both_keys_bumps_version_and_is_idempotent() {
         assert!(
             unhashed::exists(&bm),
             "a version-gated re-run is a no-op and clears nothing",
+        );
+    });
+}
+
+#[test]
+fn oracle_v1_migration_retires_legacy_query_and_reconciles_both_health_mirrors() {
+    for unhealthy in [false, true] {
+        tests::development_ext().execute_with(|| {
+            StorageVersion::new(0).put::<Oracle>();
+            let legacy = pallet_oracle::ReserveHealthValue {
+                consecutive_fails: 17,
+                consecutive_passes: 19,
+                unhealthy,
+                last_query_id: 77,
+                last_probe_at: 91,
+                pending_since: Some(83),
+            };
+            pallet_oracle::ReserveHealth::<Runtime>::put(legacy);
+            pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+            pallet_constitution::PhaseFlags::<Runtime>::mutate(|bits| {
+                if unhealthy {
+                    *bits &= !pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG;
+                } else {
+                    *bits |= pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG;
+                }
+            });
+            pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+                state.reserve_impaired = !unhealthy;
+            });
+
+            let _ = <crate::migrations::MigrateOracleReserveProbeV1 as OnRuntimeUpgrade>::on_runtime_upgrade();
+
+            assert_eq!(StorageVersion::get::<Oracle>(), StorageVersion::new(1));
+            assert_eq!(
+                pallet_oracle::ReserveHealth::<Runtime>::get(),
+                pallet_oracle::ReserveHealthValue {
+                    last_query_id: 0,
+                    last_probe_at: 0,
+                    pending_since: None,
+                    ..legacy
+                }
+            );
+            assert!(!pallet_oracle::ReserveProbeArmed::<Runtime>::get());
+            assert_eq!(
+                pallet_constitution::PhaseFlags::<Runtime>::get()
+                    & pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG
+                    != 0,
+                unhealthy
+            );
+            assert_eq!(
+                pallet_futarchy_treasury::State::<Runtime>::get().reserve_impaired,
+                unhealthy
+            );
+
+            let snapshot = (
+                pallet_oracle::ReserveHealth::<Runtime>::get(),
+                pallet_oracle::ReserveProbeArmed::<Runtime>::get(),
+                pallet_constitution::PhaseFlags::<Runtime>::get(),
+                pallet_futarchy_treasury::State::<Runtime>::get(),
+            );
+            let _ = <crate::migrations::MigrateOracleReserveProbeV1 as OnRuntimeUpgrade>::on_runtime_upgrade();
+            assert_eq!(
+                snapshot,
+                (
+                    pallet_oracle::ReserveHealth::<Runtime>::get(),
+                    pallet_oracle::ReserveProbeArmed::<Runtime>::get(),
+                    pallet_constitution::PhaseFlags::<Runtime>::get(),
+                    pallet_futarchy_treasury::State::<Runtime>::get(),
+                )
+            );
+        });
+    }
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn oracle_v1_try_runtime_proves_the_full_legacy_transition() {
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Oracle>();
+        let legacy = pallet_oracle::ReserveHealthValue {
+            consecutive_fails: 7,
+            consecutive_passes: 11,
+            unhealthy: true,
+            last_query_id: 99,
+            last_probe_at: 123,
+            pending_since: Some(117),
+        };
+        pallet_oracle::ReserveHealth::<Runtime>::put(legacy);
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+        pallet_constitution::PhaseFlags::<Runtime>::mutate(|bits| {
+            *bits &= !pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG;
+        });
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.reserve_impaired = false;
+        });
+
+        let state =
+            <crate::migrations::MigrateOracleReserveProbeV1 as OnRuntimeUpgrade>::pre_upgrade()
+                .expect("oracle pre-upgrade snapshot");
+        let _ = <crate::migrations::MigrateOracleReserveProbeV1 as OnRuntimeUpgrade>::on_runtime_upgrade();
+        <crate::migrations::MigrateOracleReserveProbeV1 as OnRuntimeUpgrade>::post_upgrade(state)
+            .expect("oracle post-upgrade checks");
+
+        assert_eq!(StorageVersion::get::<Oracle>(), StorageVersion::new(1));
+        assert_eq!(
+            pallet_oracle::ReserveHealth::<Runtime>::get(),
+            pallet_oracle::ReserveHealthValue {
+                last_query_id: 0,
+                last_probe_at: 0,
+                pending_since: None,
+                ..legacy
+            }
+        );
+        assert!(!pallet_oracle::ReserveProbeArmed::<Runtime>::get());
+    });
+}
+
+fn unrelated_constitution_params() -> Vec<(
+    futarchy_primitives::ParamKey,
+    pallet_constitution::ParamRecord,
+)> {
+    let fee = pallet_constitution::key16(b"ops.probe_fee");
+    let rate = pallet_constitution::key16(b"ops.probe_rate");
+    pallet_constitution::Params::<Runtime>::iter()
+        .filter(|(key, _)| *key != fee && *key != rate)
+        .collect()
+}
+
+#[test]
+fn constitution_v1_migration_inserts_only_missing_exact_probe_rows() {
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Constitution>();
+        let (fee, rate) = crate::migrations::reserve_probe_param_records()
+            .expect("probe rows exist in the registry template");
+        pallet_constitution::Params::<Runtime>::remove(fee.key);
+        pallet_constitution::Params::<Runtime>::remove(rate.key);
+        let unrelated_before = unrelated_constitution_params();
+
+        let _ = <crate::migrations::MigrateConstitutionProbeParamsV1 as OnRuntimeUpgrade>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(1));
+        assert_eq!(pallet_constitution::Params::<Runtime>::get(fee.key), Some(fee));
+        assert_eq!(pallet_constitution::Params::<Runtime>::get(rate.key), Some(rate));
+        assert_eq!(unrelated_constitution_params(), unrelated_before);
+    });
+}
+
+#[test]
+fn constitution_v1_migration_preserves_exact_existing_rows_and_advances_version() {
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Constitution>();
+        let (fee, rate) = crate::migrations::reserve_probe_param_records()
+            .expect("probe rows exist in the registry template");
+
+        let _ = <crate::migrations::MigrateConstitutionProbeParamsV1 as OnRuntimeUpgrade>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(1));
+        assert_eq!(pallet_constitution::Params::<Runtime>::get(fee.key), Some(fee));
+        assert_eq!(pallet_constitution::Params::<Runtime>::get(rate.key), Some(rate));
+    });
+}
+
+#[test]
+fn constitution_v1_migration_is_atomic_on_one_mismatched_existing_row() {
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Constitution>();
+        let (fee, mut rate) = crate::migrations::reserve_probe_param_records()
+            .expect("probe rows exist in the registry template");
+        pallet_constitution::Params::<Runtime>::remove(fee.key);
+        rate.last_change_block = 123;
+        pallet_constitution::Params::<Runtime>::insert(rate.key, rate);
+        let unrelated_before = unrelated_constitution_params();
+
+        let _ = <crate::migrations::MigrateConstitutionProbeParamsV1 as OnRuntimeUpgrade>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<Constitution>(), StorageVersion::new(0));
+        assert!(pallet_constitution::Params::<Runtime>::get(fee.key).is_none());
+        assert_eq!(pallet_constitution::Params::<Runtime>::get(rate.key), Some(rate));
+        assert_eq!(unrelated_constitution_params(), unrelated_before);
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn constitution_v1_try_runtime_rejects_a_mismatched_existing_v0_row() {
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Constitution>();
+        let (_, mut rate) = crate::migrations::reserve_probe_param_records()
+            .expect("probe rows exist in the registry template");
+        rate.last_change_block = rate.last_change_block.saturating_add(1);
+        pallet_constitution::Params::<Runtime>::insert(rate.key, rate);
+
+        assert!(
+            <crate::migrations::MigrateConstitutionProbeParamsV1 as OnRuntimeUpgrade>::pre_upgrade(
+            )
+            .is_err(),
+            "try-runtime must block a release over a mismatched v0 probe row",
+        );
+        assert_eq!(
+            StorageVersion::get::<Constitution>(),
+            StorageVersion::new(0)
+        );
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn constitution_v1_try_runtime_noop_preserves_lawfully_amended_values() {
+    tests::development_ext().execute_with(|| {
+        let (fee, mut rate) = crate::migrations::reserve_probe_param_records()
+            .expect("probe rows exist in the registry template");
+        rate.value = pallet_constitution::ParamValue::Balance(
+            rate.value.as_u128().saturating_add(1),
+        );
+        pallet_constitution::Params::<Runtime>::insert(rate.key, rate);
+        let state = <crate::migrations::MigrateConstitutionProbeParamsV1 as OnRuntimeUpgrade>::pre_upgrade()
+            .expect("current-version pre-upgrade is a lawful no-op");
+        let _ = <crate::migrations::MigrateConstitutionProbeParamsV1 as OnRuntimeUpgrade>::on_runtime_upgrade();
+        <crate::migrations::MigrateConstitutionProbeParamsV1 as OnRuntimeUpgrade>::post_upgrade(state)
+            .expect("lawfully amended rows survive the no-op");
+        assert_eq!(pallet_constitution::Params::<Runtime>::get(fee.key), Some(fee));
+        assert_eq!(pallet_constitution::Params::<Runtime>::get(rate.key), Some(rate));
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn constitution_v1_try_runtime_inserts_absent_rows() {
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Constitution>();
+        let (fee, rate) = crate::migrations::reserve_probe_param_records()
+            .expect("probe rows exist in the registry template");
+        pallet_constitution::Params::<Runtime>::remove(fee.key);
+        pallet_constitution::Params::<Runtime>::remove(rate.key);
+
+        let state = <crate::migrations::MigrateConstitutionProbeParamsV1 as OnRuntimeUpgrade>::pre_upgrade()
+            .expect("absent v0 rows are migratable");
+        let _ = <crate::migrations::MigrateConstitutionProbeParamsV1 as OnRuntimeUpgrade>::on_runtime_upgrade();
+        <crate::migrations::MigrateConstitutionProbeParamsV1 as OnRuntimeUpgrade>::post_upgrade(state)
+            .expect("inserted v1 rows satisfy post-upgrade checks");
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn composed_runtime_upgrade_migrates_all_reserve_probe_v0_state_and_passes_try_state() {
+    use frame_support::traits::TryState;
+    use parity_scale_codec::{Decode, Encode};
+
+    tests::development_ext().execute_with(|| {
+        StorageVersion::new(0).put::<ExecutionGuard>();
+        let blocked_meters = crate::migrations::retired::blocked_meters_key();
+        let progress_marker = crate::migrations::retired::progress_marker_key();
+        unhashed::put_raw(&blocked_meters, &[1u8]);
+        unhashed::put_raw(&progress_marker, &[2u8]);
+
+        StorageVersion::new(0).put::<Constitution>();
+        let (fee, rate) = crate::migrations::reserve_probe_param_records()
+            .expect("probe rows exist in the registry template");
+        pallet_constitution::Params::<Runtime>::remove(fee.key);
+        pallet_constitution::Params::<Runtime>::remove(rate.key);
+        pallet_constitution::PhaseFlags::<Runtime>::mutate(|bits| {
+            *bits &= !pallet_constitution::PhaseFlagsValue::TREASURY_ARMED;
+            *bits &= !pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG;
+        });
+
+        StorageVersion::new(0).put::<Oracle>();
+        let legacy = pallet_oracle::ReserveHealthValue {
+            consecutive_fails: 5,
+            consecutive_passes: 3,
+            unhealthy: true,
+            last_query_id: 71,
+            last_probe_at: 81,
+            pending_since: Some(79),
+        };
+        pallet_oracle::ReserveHealth::<Runtime>::put(legacy);
+        pallet_oracle::ReserveProbeArmed::<Runtime>::put(true);
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.reserve_impaired = false;
+        });
+
+        StorageVersion::new(0).put::<crate::FutarchyTreasury>();
+        pallet_futarchy_treasury::BootstrapOpsFundingClosed::<Runtime>::put(true);
+
+        // This is the real Executive path: System executes the production
+        // SingleBlockMigrations tuple, pallet hooks execute the treasury v1
+        // migration, and try-runtime runs every registered pre/post check.
+        let input = frame_try_runtime::UpgradeCheckSelect::All.encode();
+        let output = crate::apis::api::dispatch("TryRuntime_on_runtime_upgrade", &input)
+            .expect("TryRuntime runtime API method");
+        let (used, maximum) = <(
+            frame_support::weights::Weight,
+            frame_support::weights::Weight,
+        ) as Decode>::decode(&mut &output[..])
+        .expect("TryRuntime result");
+        assert!(used.all_lte(maximum));
+
+        assert_eq!(
+            StorageVersion::get::<ExecutionGuard>(),
+            StorageVersion::new(1)
+        );
+        assert!(!unhashed::exists(&blocked_meters));
+        assert!(!unhashed::exists(&progress_marker));
+        assert_eq!(
+            StorageVersion::get::<Constitution>(),
+            StorageVersion::new(1)
+        );
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::get(fee.key),
+            Some(fee)
+        );
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::get(rate.key),
+            Some(rate)
+        );
+        assert_eq!(StorageVersion::get::<Oracle>(), StorageVersion::new(1));
+        assert_eq!(
+            pallet_oracle::ReserveHealth::<Runtime>::get(),
+            pallet_oracle::ReserveHealthValue {
+                last_query_id: 0,
+                last_probe_at: 0,
+                pending_since: None,
+                ..legacy
+            }
+        );
+        assert!(!pallet_oracle::ReserveProbeArmed::<Runtime>::get());
+        assert_ne!(
+            pallet_constitution::PhaseFlags::<Runtime>::get()
+                & pallet_constitution::PhaseFlagsValue::RESERVE_HEALTH_FLAG,
+            0,
+        );
+        assert!(pallet_futarchy_treasury::State::<Runtime>::get().reserve_impaired);
+        assert_eq!(
+            StorageVersion::get::<crate::FutarchyTreasury>(),
+            StorageVersion::new(1),
+        );
+        assert!(!pallet_futarchy_treasury::BootstrapOpsFundingClosed::<
+            Runtime,
+        >::get());
+        assert!(
+            <crate::AllPalletsWithSystem as TryState<crate::BlockNumber>>::try_state(
+                System::block_number(),
+                frame_try_runtime::TryStateSelect::All,
+            )
+            .is_ok()
         );
     });
 }

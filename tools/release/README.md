@@ -199,14 +199,21 @@ Strict mode is expected to fail today:
 - B7 owns the per-release `run-evidence.json` for the committed `zombienet/`
   and `chopsticks/` environment definitions;
 - the residual adoption-input gaps from B1b's compliance review (SQ-173…SQ-175,
-  SQ-177, SQ-180…SQ-182: values/prize backing, oracle VaR snapshot, MetricSpec
+  SQ-181…SQ-182: values/prize backing, oracle VaR snapshot, MetricSpec
   targets, P_ref simulation, POL budget, telemetry sources — tracked in
   `PLAN.md`; SQ-172/176/178 themselves were resolved by the B1b completion)
   remain release-blocking — enforced by
   the manifest's `release_blockers` row `b1b.compliance`;
-- SQ-205 (owner B1a): the oracle's authoritative reserve health never reaches
-  `treasury::set_reserve_impaired`, so 08 §1.2's fail-static NAV is not
-  enforced — enforced by the `treasury.reserve_health_unwired` row.
+- The reserve-health sink, production dispatcher and authenticated response
+  route are wired (SQ-205/SQ-380). SQ-195's day-resolved welfare input remains
+  open under the A12-owned `welfare.reserve_daily_unbound` blocker. Separately,
+  live Asset Hub fee/barrier/response and bidirectional-HRMP calibration remain
+  open under `treasury.reserve_probe_unverified`. That blocker also requires an
+  armed probe with a timely authenticated pass, the local F+R line runway, the
+  separate remote sovereign USDC plus F+R DOT envelopes/refill margin, and the
+  positive TREASURY reserve-line funding handover before Phase 4. SQ-484 keeps
+  the missing runway/remote-inventory monitoring and alerts explicit; SQ-485
+  keeps the five structurally unsafe zero parameter floors explicit.
 
 Two previously-listed blockers are cleared: **B2** implemented all 11
 `FutarchyApi` methods and the remaining metadata constants (contract v4), and

@@ -10,12 +10,15 @@ use crate::{
         relay_location, usdc_location, XCM_VERSION_PINNED,
     },
     mock::*,
-    probe::{reserve_probe_program, ProbeAwareResponseHandler, ProbeSink, PROBE_QUERY_ID_FLAG},
+    probe::{
+        reserve_probe_program, ProbeAwareResponseHandler, ProbeAwareWeightBounds, ProbeSink,
+        PROBE_QUERY_ID_FLAG,
+    },
     trader::GovernedWeightTrader,
 };
 use frame_support::{
     assert_ok,
-    traits::{fungibles::Mutate, Contains, ContainsPair},
+    traits::{fungibles::Mutate, Contains, ContainsPair, Get},
     weights::Weight,
 };
 use futarchy_primitives::chain_identity::{
@@ -23,6 +26,7 @@ use futarchy_primitives::chain_identity::{
 };
 use oracle_core::{RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT};
 use pallet_futarchy_treasury::{BudgetLine, RenewalDispatch};
+use pallet_oracle::ProbeDispatch as _;
 use parity_scale_codec::Encode;
 use staging_xcm::{
     latest::{prelude::*, validate_send},
@@ -33,11 +37,14 @@ use staging_xcm_executor::{
     test_helpers::mock_asset_to_holding,
     traits::{
         ConvertLocation, DenyExecution, MatchesFungibles, OnResponse, Properties, ShouldExecute,
-        WeightTrader,
+        WeightBounds, WeightTrader,
     },
     AssetsInHolding,
 };
-use std::{cell::RefCell, vec};
+use std::{
+    cell::{Cell, RefCell},
+    vec,
+};
 
 const MAX_WEIGHT: Weight = Weight::from_parts(100, 100);
 
@@ -92,6 +99,23 @@ fn contains_transact(message: &Xcm<()>) -> bool {
             remote_xcm: xcm, ..
         } => contains_transact(xcm),
         ExecuteWithOrigin { xcm, .. } => contains_transact(xcm),
+        _ => false,
+    })
+}
+
+fn contains_jit<Call>(message: &Xcm<Call>) -> bool {
+    message.0.iter().any(|instruction| match instruction {
+        SetFeesMode { jit_withdraw: true } => true,
+        SetAppendix(nested) | SetErrorHandler(nested) => contains_jit(nested),
+        TransferReserveAsset { xcm, .. }
+        | DepositReserveAsset { xcm, .. }
+        | InitiateReserveWithdraw { xcm, .. }
+        | InitiateTeleport { xcm, .. }
+        | ExportMessage { xcm, .. }
+        | InitiateTransfer {
+            remote_xcm: xcm, ..
+        } => contains_jit(xcm),
+        ExecuteWithOrigin { xcm, .. } => contains_jit(xcm),
         _ => false,
     })
 }
@@ -433,6 +457,7 @@ fn trader_group_repeat_buys_accumulate_and_other_asset_cannot_change_the_refund_
 
 thread_local! {
     static ROUTER_PENDING: RefCell<Option<u64>> = const { RefCell::new(None) };
+    static ROUTER_PENDING_READS: Cell<u32> = const { Cell::new(0) };
     static ROUTER_RESULTS: RefCell<Vec<(u64, bool)>> = const { RefCell::new(Vec::new()) };
     static INNER_RESPONSES: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
 }
@@ -440,12 +465,44 @@ thread_local! {
 struct RecordingProbeSink;
 impl ProbeSink for RecordingProbeSink {
     fn pending_query_id() -> Option<u64> {
+        ROUTER_PENDING_READS.with(|reads| reads.set(reads.get().saturating_add(1)));
         ROUTER_PENDING.with(|pending| *pending.borrow())
     }
 
-    fn probe_result(query_id: u64, passed: bool) {
+    fn probe_result(query_id: u64, passed: bool) -> Weight {
         ROUTER_RESULTS.with(|results| results.borrow_mut().push((query_id, passed)));
+        MAX_WEIGHT
     }
+}
+
+#[test]
+fn probe_group_full_authenticated_route_performs_two_pending_id_reads() {
+    type RecordingProbeBarrier = crate::barrier::BleavitBarrier<
+        RecordingProbeRouter,
+        UniversalLocation,
+        MaxPrefixes,
+        TestCaps,
+        TestLocationToAccountId,
+        AccountId,
+    >;
+
+    ROUTER_PENDING.with(|pending| *pending.borrow_mut() = Some(7));
+    ROUTER_PENDING_READS.with(|reads| reads.set(0));
+    let wire_id = 7 | PROBE_QUERY_ID_FLAG;
+    let response = Xcm(vec![QueryResponse {
+        query_id: wire_id,
+        response: Response::ExecutionResult(None),
+        max_weight: MAX_WEIGHT,
+        querier: Some(Location::here()),
+    }]);
+    assert!(barrier_result::<RecordingProbeBarrier>(
+        asset_hub_location(),
+        response,
+    ));
+    assert_eq!(ROUTER_PENDING_READS.with(Cell::get), 1);
+
+    route_probe(7, Response::ExecutionResult(None));
+    assert_eq!(ROUTER_PENDING_READS.with(Cell::get), 2);
 }
 
 struct RecordingInner;
@@ -484,21 +541,34 @@ fn route_probe(query_id: u64, response: Response) -> Weight {
 #[test]
 fn probe_group_program_is_golden_and_contains_no_transact_at_any_depth() {
     let amount = 10;
-    let program = reserve_probe_program(42, amount, MAX_WEIGHT, MAX_WEIGHT, FIXTURE_PARA_ID);
+    let fee_amount = 100;
+    let program = reserve_probe_program(
+        42,
+        amount,
+        fee_amount,
+        MAX_WEIGHT,
+        MAX_WEIGHT,
+        FIXTURE_PARA_ID,
+    );
     assert_eq!(program.0.len(), 3);
     assert!(
-        matches!(&program.0[0], WithdrawAsset(assets) if assets == &vec![asset(crate::identity::usdc_on_asset_hub_location(), amount)].into())
+        matches!(&program.0[0], WithdrawAsset(assets) if assets == &vec![
+            asset(crate::identity::usdc_on_asset_hub_location(), amount),
+            asset(crate::identity::dot_on_asset_hub_location(), fee_amount),
+        ].into())
     );
     assert!(
-        matches!(&program.0[1], BuyExecution { fees, weight_limit: Limited(weight) } if fees == &asset(crate::identity::usdc_on_asset_hub_location(), amount) && weight == &MAX_WEIGHT)
+        matches!(&program.0[1], BuyExecution { fees, weight_limit: Limited(weight) } if fees == &asset(crate::identity::dot_on_asset_hub_location(), fee_amount) && weight == &MAX_WEIGHT)
     );
     assert!(
         matches!(&program.0[2], SetAppendix(Xcm(items)) if matches!(items.as_slice(), [
-            SetFeesMode { jit_withdraw: true },
             RefundSurplus,
-            DepositAsset { assets: AssetFilter::Wild(WildAsset::AllCounted(1)), beneficiary },
+            DepositAsset { assets: AssetFilter::Definite(probe), beneficiary },
             ReportError(info),
+            DepositAsset { assets: AssetFilter::Wild(WildAsset::AllCounted(1)), beneficiary: refund_beneficiary },
         ] if beneficiary == &bleavit_as_seen_from_asset_hub(FIXTURE_PARA_ID)
+            && probe == &Assets::from(asset(crate::identity::usdc_on_asset_hub_location(), amount))
+            && refund_beneficiary == &bleavit_as_seen_from_asset_hub(FIXTURE_PARA_ID)
             && info.query_id == (42 | PROBE_QUERY_ID_FLAG)
             && info.max_weight == MAX_WEIGHT
             && info.destination == bleavit_as_seen_from_asset_hub(FIXTURE_PARA_ID)))
@@ -507,16 +577,23 @@ fn probe_group_program_is_golden_and_contains_no_transact_at_any_depth() {
 }
 
 #[test]
-fn probe_group_paid_report_uses_jit_so_nonzero_delivery_fee_is_sendable() {
+fn probe_group_response_delivery_is_bounded_by_holding_and_never_uses_jit() {
     new_test_ext().execute_with(|| {
         let origin = asset_hub_location();
         let converted = TestLocationToAccountId::convert_location(&origin);
         assert!(converted.is_some());
         let sovereign = converted.unwrap_or_else(alice);
+        let probe_amount = 10;
+        let fee_envelope = 100;
+        assert_ok!(<ForeignAssets as Mutate<AccountId>>::mint_into(
+            usdc_location(),
+            &sovereign,
+            probe_amount,
+        ));
         assert_ok!(<ForeignAssets as Mutate<AccountId>>::mint_into(
             dot_location(),
             &sovereign,
-            2,
+            fee_envelope + 50,
         ));
         set_send_fee(Assets::from(asset(dot_location(), 1)));
         let info = QueryResponseInfo {
@@ -524,20 +601,85 @@ fn probe_group_paid_report_uses_jit_so_nonzero_delivery_fee_is_sendable() {
             query_id: 42,
             max_weight: MAX_WEIGHT,
         };
+        let bounded_program = Xcm(vec![
+            WithdrawAsset(
+                vec![
+                    asset(usdc_location(), probe_amount),
+                    asset(dot_location(), fee_envelope),
+                ]
+                .into(),
+            ),
+            BuyExecution {
+                fees: asset(dot_location(), fee_envelope),
+                weight_limit: Limited(MAX_WEIGHT),
+            },
+            SetAppendix(Xcm(vec![
+                RefundSurplus,
+                DepositAsset {
+                    assets: AssetFilter::Definite(Assets::from(asset(
+                        usdc_location(),
+                        probe_amount,
+                    ))),
+                    beneficiary: origin.clone(),
+                },
+                ReportError(info.clone()),
+                DepositAsset {
+                    assets: Wild(WildAsset::AllCounted(1)),
+                    beneficiary: origin.clone(),
+                },
+            ])),
+        ]);
+        assert!(!contains_jit(&bounded_program));
         let mut id = [11; 32];
         let outcome = BleavitXcmExecutor::prepare_and_execute(
-            origin,
-            Xcm(vec![SetAppendix(Xcm(vec![
-                SetFeesMode { jit_withdraw: true },
-                ReportError(info),
-            ]))]),
+            origin.clone(),
+            bounded_program,
             &mut id,
             MAX_WEIGHT,
             MAX_WEIGHT,
         );
         assert!(outcome.ensure_complete().is_ok());
         assert_eq!(sent_messages().len(), 1);
-        assert_eq!(ForeignAssets::balance(dot_location(), sovereign), 1);
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &sovereign),
+            probe_amount
+        );
+        let remaining = ForeignAssets::balance(dot_location(), &sovereign);
+        assert!(remaining >= 50);
+        assert!(remaining < fee_envelope + 50);
+
+        // A response fee above the entire envelope cannot draw the sovereign's
+        // extra DOT: no response is emitted even though 50 planck remains
+        // outside holding. This is the mutation-killing no-JIT assertion.
+        reset_test_state();
+        set_send_fee(Assets::from(asset(dot_location(), fee_envelope + 1)));
+        let mut id = [12; 32];
+        let outcome = BleavitXcmExecutor::prepare_and_execute(
+            origin,
+            Xcm(vec![
+                WithdrawAsset(
+                    vec![
+                        asset(usdc_location(), probe_amount),
+                        asset(dot_location(), fee_envelope),
+                    ]
+                    .into(),
+                ),
+                BuyExecution {
+                    fees: asset(dot_location(), fee_envelope),
+                    weight_limit: Limited(MAX_WEIGHT),
+                },
+                SetAppendix(Xcm(vec![RefundSurplus, ReportError(info)])),
+            ]),
+            &mut id,
+            MAX_WEIGHT,
+            MAX_WEIGHT,
+        );
+        assert!(outcome.ensure_complete().is_err());
+        assert!(sent_messages().is_empty());
+        assert_eq!(
+            ForeignAssets::balance(dot_location(), sovereign),
+            remaining.saturating_sub(fee_envelope)
+        );
     });
 }
 
@@ -600,6 +742,29 @@ fn probe_group_response_router_maps_pass_fail_and_delegates_unknown_ids() {
     assert_eq!(
         INNER_RESPONSES.with(|responses| responses.borrow().clone()),
         vec![999, 7]
+    );
+}
+
+#[test]
+fn probe_group_response_return_weight_clamps_to_the_instruction_maximum() {
+    ROUTER_PENDING.with(|pending| *pending.borrow_mut() = Some(7));
+    ROUTER_RESULTS.with(|results| results.borrow_mut().clear());
+    let querier = Location::here();
+    let maximum = Weight::from_parts(7, 3);
+
+    let used = RecordingProbeRouter::on_response(
+        &asset_hub_location(),
+        7 | PROBE_QUERY_ID_FLAG,
+        Some(&querier),
+        Response::ExecutionResult(None),
+        maximum,
+        &XcmContext::with_message_id([32; 32]),
+    );
+
+    assert_eq!(used, maximum);
+    assert_eq!(
+        ROUTER_RESULTS.with(|results| results.borrow().clone()),
+        vec![(7, true)]
     );
 }
 
@@ -708,13 +873,98 @@ fn probe_group_partition_routes_flagged_and_unflagged_ids_to_disjoint_consumers(
 }
 
 #[test]
+fn probe_group_flagged_query_response_is_weighed_at_or_above_callback_bound() {
+    let callback = ProbeMaxResponseWeight::get();
+    let mut message = Xcm(vec![QueryResponse {
+        query_id: 7 | PROBE_QUERY_ID_FLAG,
+        response: Response::ExecutionResult(None),
+        max_weight: callback,
+        querier: Some(Location::here()),
+    }]);
+    assert_eq!(
+        TestWeigher::weight(&mut message, Weight::MAX),
+        Ok(UnitWeightCost::get().saturating_add(callback))
+    );
+}
+
+fn flagged_response() -> Instruction<RuntimeCall> {
+    QueryResponse {
+        query_id: 7 | PROBE_QUERY_ID_FLAG,
+        response: Response::ExecutionResult(None),
+        max_weight: ProbeMaxResponseWeight::get(),
+        querier: Some(Location::here()),
+    }
+}
+
+#[test]
+fn probe_group_callback_surcharge_never_clamps_to_an_insufficient_limit() {
+    let mut message = Xcm(vec![flagged_response()]);
+    let limit = Weight::from_parts(99, 99);
+    assert!(matches!(
+        TestWeigher::weight(&mut message, limit),
+        Err(InstructionError {
+            index: 0,
+            error: XcmError::WeightLimitReached(weight),
+        }) if weight == Weight::from_parts(101, 101)
+    ));
+}
+
+#[test]
+fn probe_group_callback_surcharge_follows_locally_executed_nesting() {
+    let mut one_level = Xcm(vec![SetAppendix(Xcm(vec![flagged_response()]))]);
+    assert_eq!(
+        TestWeigher::weight(&mut one_level, Weight::MAX),
+        Ok(Weight::from_parts(102, 102)),
+    );
+
+    let mut two_levels = Xcm(vec![SetErrorHandler(Xcm(vec![SetAppendix(Xcm(vec![
+        flagged_response(),
+    ]))]))]);
+    assert_eq!(
+        TestWeigher::weight(&mut two_levels, Weight::MAX),
+        Ok(Weight::from_parts(103, 103)),
+    );
+}
+
+struct OverflowProbeWeight;
+impl Get<Weight> for OverflowProbeWeight {
+    fn get() -> Weight {
+        Weight::MAX
+    }
+}
+type OverflowProbeWeigher = ProbeAwareWeightBounds<TestBaseWeigher, OverflowProbeWeight>;
+
+#[test]
+fn probe_group_callback_surcharge_rejects_weight_overflow() {
+    let mut message = Xcm(vec![flagged_response(), flagged_response()]);
+    assert!(matches!(
+        OverflowProbeWeigher::weight(&mut message, Weight::MAX),
+        Err(InstructionError {
+            index: 0,
+            error: XcmError::Overflow,
+        })
+    ));
+}
+
+#[test]
 fn probe_group_real_oracle_pass_fail_and_timeout_remain_fail_static() {
     new_test_ext().execute_with(|| {
         System::set_block_number(RES_PROBE_INTERVAL.into());
         assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(alice())));
         assert_eq!(OracleProbeSink::pending_query_id(), Some(1));
-        let program = reserve_probe_program(1, 10, MAX_WEIGHT, MAX_WEIGHT, FIXTURE_PARA_ID);
-        assert_eq!(sent_messages(), vec![(asset_hub_location(), program)]);
+        let program = reserve_probe_program(
+            1,
+            10,
+            ProbeFeeBudget::get(),
+            MAX_WEIGHT,
+            MAX_WEIGHT,
+            FIXTURE_PARA_ID,
+        );
+        let sent = sent_messages();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, asset_hub_location());
+        assert_eq!(&sent[0].1 .0[..program.0.len()], program.0.as_slice());
+        assert!(matches!(sent[0].1 .0.last(), Some(SetTopic(_))));
         let here = Location::here();
         TestResponseHandler::on_response(
             &asset_hub_location(),
@@ -762,6 +1012,103 @@ fn probe_group_real_oracle_pass_fail_and_timeout_remain_fail_static() {
     });
 }
 
+fn reserve_probe_fee_event_count() -> usize {
+    System::events()
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::Treasury(pallet_futarchy_treasury::Event::ReserveProbeFeeCharged {
+                    line: BudgetLine::OpsReserveProbe,
+                    ..
+                })
+            )
+        })
+        .count()
+}
+
+#[test]
+fn probe_group_success_commits_exact_budget_debit_event_queue_and_health_count() {
+    new_test_ext().execute_with(|| {
+        let before = Treasury::line_balance(BudgetLine::OpsReserveProbe);
+        System::reset_events();
+        System::set_block_number(RES_PROBE_INTERVAL.into());
+
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(alice())));
+
+        assert_eq!(
+            before - Treasury::line_balance(BudgetLine::OpsReserveProbe),
+            ProbeFeeBudget::get()
+        );
+        assert_eq!(reserve_probe_fee_event_count(), 1);
+        assert_eq!(health_counts(), (1, 0));
+        assert_eq!(sent_messages().len(), 1);
+    });
+}
+
+#[test]
+fn probe_group_budget_refusal_never_reaches_router_or_counts_xcm_failure() {
+    new_test_ext().execute_with(|| {
+        set_probe_line_balance(0);
+        System::reset_events();
+        System::set_block_number(RES_PROBE_INTERVAL.into());
+
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(alice())));
+
+        assert_eq!(Treasury::line_balance(BudgetLine::OpsReserveProbe), 0);
+        assert_eq!(reserve_probe_fee_event_count(), 0);
+        assert_eq!(health_counts(), (0, 0));
+        assert!(sent_messages().is_empty());
+        assert_eq!(OracleProbeSink::pending_query_id(), Some(1));
+    });
+}
+
+#[test]
+fn probe_group_zero_amount_refuses_before_budget_or_router() {
+    new_test_ext().execute_with(|| {
+        let before = Treasury::line_balance(BudgetLine::OpsReserveProbe);
+        let treasury_before = pallet_futarchy_treasury::State::<Test>::get().encode();
+        System::reset_events();
+
+        TestProbeDispatcher::probe_due(1, 0);
+
+        assert_eq!(Treasury::line_balance(BudgetLine::OpsReserveProbe), before);
+        assert_eq!(
+            pallet_futarchy_treasury::State::<Test>::get().encode(),
+            treasury_before,
+        );
+        assert_eq!(reserve_probe_fee_event_count(), 0);
+        assert_eq!(health_counts(), (0, 0));
+        assert!(sent_messages().is_empty());
+    });
+}
+
+#[test]
+fn probe_group_validate_and_delivery_failures_rollback_budget_but_count_once() {
+    for mode in [SendMode::ValidateFailure, SendMode::DeliverFailure] {
+        new_test_ext().execute_with(|| {
+            let before = Treasury::line_balance(BudgetLine::OpsReserveProbe);
+            let treasury_before = pallet_futarchy_treasury::State::<Test>::get().encode();
+            System::reset_events();
+            set_send_mode(mode);
+            System::set_block_number(RES_PROBE_INTERVAL.into());
+
+            assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(alice())));
+
+            assert_eq!(Treasury::line_balance(BudgetLine::OpsReserveProbe), before);
+            assert_eq!(
+                pallet_futarchy_treasury::State::<Test>::get().encode(),
+                treasury_before,
+            );
+            assert_eq!(reserve_probe_fee_event_count(), 0);
+            assert_eq!(health_counts(), (0, 1));
+            assert!(sent_messages().is_empty());
+            assert!(!partial_send_marker_exists());
+            assert_eq!(OracleProbeSink::pending_query_id(), Some(1));
+        });
+    }
+}
+
 #[test]
 fn probe_group_dispatch_send_failure_is_swallowed_then_times_out_fail_static() {
     new_test_ext().execute_with(|| {
@@ -770,6 +1117,7 @@ fn probe_group_dispatch_send_failure_is_swallowed_then_times_out_fail_static() {
         assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(alice())));
         assert_eq!(OracleProbeSink::pending_query_id(), Some(1));
         assert!(sent_messages().is_empty());
+        assert_eq!(health_counts(), (0, 1));
 
         // Before the next daily interval, the pending probe reaches its one-hour
         // timeout. The timeout-only crank records a failure and sends nothing.

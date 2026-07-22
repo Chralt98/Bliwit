@@ -11,10 +11,11 @@
 
 use crate::mock::*;
 use crate::pallet::{
-    Recomputable, Reporters, ReserveHealth, RoundSchedules, Rounds, WatchtowerActive, Watchtowers,
+    Recomputable, Reporters, ReserveHealth, ReserveProbeArmed, RoundSchedules, Rounds,
+    WatchtowerActive, Watchtowers,
 };
 use crate::{Error, Event};
-use frame_support::traits::ConstU32;
+use frame_support::traits::{ConstU32, StorageVersion};
 use frame_support::{assert_noop, assert_ok, pallet_prelude::DispatchResult, BoundedVec};
 use futarchy_primitives::{Balance, EpochId, FixedU64, MetricId, MetricSpecVersion, H256};
 use oracle_core::{
@@ -1631,6 +1632,10 @@ mod probe_dispatch_seam {
     pub struct RecordingProbeDispatch;
 
     impl pallet_oracle::ProbeDispatch for RecordingProbeDispatch {
+        fn live(_: &oracle_core::OracleParams) -> bool {
+            true
+        }
+
         fn probe_due(query_id: u64, amount: Balance) {
             DISPATCHED.with(|ids| ids.borrow_mut().push((query_id, amount)));
         }
@@ -1987,25 +1992,19 @@ mod probe_dispatch_seam {
         }
 
         #[test]
-        fn unit_probe_dispatcher_creates_health_work_but_never_rebates() {
+        fn unavailable_dispatcher_refuses_before_creating_health_work() {
             new_ext().execute_with(|| {
                 let keeper = AccountId32::new([9; 32]);
                 System::set_block_number(u64::from(RES_PROBE_INTERVAL));
-                assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(
-                    keeper.clone()
-                )));
+                assert_noop!(
+                    Oracle::crank_reserve_probe(RuntimeOrigin::signed(keeper)),
+                    Error::<NoDispatchTest>::ProbeUnavailable
+                );
                 assert_eq!(
                     pallet_oracle::ReserveHealth::<NoDispatchTest>::get().last_query_id,
-                    1
+                    0
                 );
-                REBATES.with(|rebates| assert!(rebates.borrow().is_empty()));
-
-                System::set_block_number(u64::from(RES_PROBE_INTERVAL + RES_PROBE_TIMEOUT));
-                assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(keeper)));
-                assert_eq!(
-                    pallet_oracle::ReserveHealth::<NoDispatchTest>::get().consecutive_fails,
-                    1
-                );
+                assert!(!Oracle::reserve_probe_armed());
                 REBATES.with(|rebates| assert!(rebates.borrow().is_empty()));
             });
         }
@@ -2013,25 +2012,26 @@ mod probe_dispatch_seam {
 }
 
 #[test]
-fn reserve_probe_before_interval_is_too_early() {
+fn reserve_probe_first_ready_call_arms_immediately_and_anchors_cadence() {
     // limit-coverage: res.probe_int
     new_test_ext().execute_with(|| {
-        // Block 1 < `res.probe_interval` (14,400): no probe may be sent yet.
-        assert_noop!(
-            Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))),
-            Error::<Test>::ProbeTooEarly
-        );
-        assert_eq!(ProbeTimeoutCount::get(), 0);
-
-        // Keep the default at-bound assertion, then amend the interval and
-        // observe the next boundary move from the last successful send.
-        set_block(RES_PROBE_INTERVAL);
+        // The first readiness-qualified call does not wait for one interval:
+        // it opens query 1 now and makes this block the cadence anchor.
+        set_block(1);
         assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        assert!(Oracle::reserve_probe_armed());
+        assert_eq!(ReserveHealth::<Test>::get().last_query_id, 1);
+        assert_eq!(ReserveHealth::<Test>::get().pending_since, Some(1));
+        assert_eq!(ReserveHealth::<Test>::get().consecutive_fails, 0);
+        assert_eq!(ProbeTimeoutCount::get(), 0);
         assert_ok!(Oracle::reserve_probe_result(1, true));
+
+        // Amend the interval and observe the next boundary move from the first
+        // successful send's block, not from genesis block zero.
         let mut amended = ParamsValue::get();
         amended.probe_interval = RES_PROBE_INTERVAL + 100;
         ParamsValue::set(amended);
-        let next_due = RES_PROBE_INTERVAL.saturating_add(amended.probe_interval);
+        let next_due = 1u32.saturating_add(amended.probe_interval);
         set_block(next_due - 1);
         assert_noop!(
             Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))),
@@ -2039,6 +2039,271 @@ fn reserve_probe_before_interval_is_too_early() {
         );
         set_block(next_due);
         assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+    });
+}
+
+#[test]
+fn reserve_probe_first_late_arm_opens_current_attempt_without_scoring_prearm_slots() {
+    new_test_ext().execute_with(|| {
+        ProbeDispatchLive::set(true);
+        set_block(RES_PROBE_INTERVAL.saturating_mul(300));
+
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+
+        let health = ReserveHealth::<Test>::get();
+        assert_eq!(health.consecutive_fails, 0);
+        assert!(!health.unhealthy);
+        assert_eq!(health.last_query_id, 1);
+        assert_eq!(
+            health.pending_since,
+            Some(RES_PROBE_INTERVAL.saturating_mul(300))
+        );
+        assert!(Oracle::reserve_probe_armed());
+        assert_eq!(ProbeDispatches::get().len(), 1);
+        assert_eq!(ProbeTimeoutCount::get(), 0);
+        assert!(ReserveHealthSinkCalls::get().is_empty());
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn reserve_probe_late_keeper_scores_every_post_arm_missed_slot_in_one_bounded_fold() {
+    new_test_ext().execute_with(|| {
+        ProbeDispatchLive::set(true);
+        set_block(RES_PROBE_INTERVAL);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        assert_ok!(Oracle::reserve_probe_result(1, true));
+        ReserveHealthSinkCalls::set(Vec::new());
+        set_block(RES_PROBE_INTERVAL.saturating_mul(4));
+
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+
+        let health = ReserveHealth::<Test>::get();
+        assert_eq!(health.consecutive_fails, 2);
+        assert!(health.unhealthy);
+        assert_eq!(health.last_query_id, 2);
+        assert_eq!(
+            health.pending_since,
+            Some(RES_PROBE_INTERVAL.saturating_mul(4))
+        );
+        assert_eq!(ReserveHealthSinkCalls::get(), vec![true]);
+        assert_eq!(ProbeDispatches::get().len(), 2);
+        assert_eq!(ProbeTimeoutCount::get(), 0);
+    });
+}
+
+#[test]
+fn reserve_probe_long_post_arm_outage_saturates_in_one_bounded_fold() {
+    new_test_ext().execute_with(|| {
+        set_block(RES_PROBE_INTERVAL);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        assert_ok!(Oracle::reserve_probe_result(1, true));
+        ReserveHealthSinkCalls::set(Vec::new());
+        set_block(RES_PROBE_INTERVAL.saturating_mul(301));
+
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+
+        let health = ReserveHealth::<Test>::get();
+        assert_eq!(health.consecutive_fails, u8::MAX);
+        assert!(health.unhealthy);
+        assert_eq!(ReserveHealthSinkCalls::get(), vec![true]);
+        assert_eq!(ProbeDispatches::get().len(), 2);
+    });
+}
+
+#[test]
+fn reserve_probe_exhausted_query_namespace_scores_every_unopenable_slot() {
+    new_test_ext().execute_with(|| {
+        ReserveProbeArmed::<Test>::put(true);
+        ReserveHealth::<Test>::put(oracle_core::ReserveHealth {
+            consecutive_fails: 0,
+            consecutive_passes: 0,
+            unhealthy: false,
+            last_query_id: oracle_core::MAX_RESERVE_PROBE_QUERY_ID,
+            last_probe_at: RES_PROBE_INTERVAL,
+            pending_since: None,
+        });
+        set_block(RES_PROBE_INTERVAL.saturating_mul(3));
+        System::reset_events();
+
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        assert!(Oracle::reserve_probe_armed());
+
+        let health = ReserveHealth::<Test>::get();
+        assert_eq!(
+            health.last_query_id,
+            oracle_core::MAX_RESERVE_PROBE_QUERY_ID
+        );
+        assert_eq!(health.last_probe_at, RES_PROBE_INTERVAL.saturating_mul(3));
+        assert_eq!(health.pending_since, None);
+        assert_eq!(health.consecutive_fails, 2);
+        assert!(health.unhealthy);
+        assert!(ProbeDispatches::get().is_empty());
+        assert_eq!(ProbeTimeoutCount::get(), 0);
+        assert_eq!(ReserveHealthSinkCalls::get(), vec![true]);
+        assert!(!System::events().iter().any(|record| matches!(
+            &record.event,
+            RuntimeEvent::Oracle(Event::ReserveProbeSent { .. })
+        )));
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn reserve_probe_exhaustion_commits_expired_pending_and_all_due_slots() {
+    new_test_ext().execute_with(|| {
+        ReserveProbeArmed::<Test>::put(true);
+        ReserveHealth::<Test>::put(oracle_core::ReserveHealth {
+            consecutive_fails: 0,
+            consecutive_passes: 0,
+            unhealthy: false,
+            last_query_id: oracle_core::MAX_RESERVE_PROBE_QUERY_ID,
+            last_probe_at: RES_PROBE_INTERVAL,
+            pending_since: Some(RES_PROBE_INTERVAL),
+        });
+        set_block(RES_PROBE_INTERVAL.saturating_mul(3));
+        System::reset_events();
+
+        // The expired prior attempt scores once, and both completed cadence
+        // slots score as unopenable misses. Query-id exhaustion must not roll
+        // either class of failure back or leave the stale attempt pending.
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+
+        let health = ReserveHealth::<Test>::get();
+        assert_eq!(
+            health.last_query_id,
+            oracle_core::MAX_RESERVE_PROBE_QUERY_ID
+        );
+        assert_eq!(health.last_probe_at, RES_PROBE_INTERVAL.saturating_mul(3));
+        assert_eq!(health.pending_since, None);
+        assert_eq!(health.consecutive_fails, 3);
+        assert!(health.unhealthy);
+        assert_eq!(ProbeTimeoutCount::get(), 1);
+        assert_eq!(ReserveHealthSinkCalls::get(), vec![true]);
+        assert!(ProbeDispatches::get().is_empty());
+        assert!(!System::events().iter().any(|record| matches!(
+            &record.event,
+            RuntimeEvent::Oracle(Event::ReserveProbeSent { .. })
+        )));
+
+        // The cadence anchor advanced, so retrying the same block is bounded
+        // and cannot rescore the old outage. A newly elapsed slot scores once.
+        assert_noop!(
+            Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))),
+            Error::<Test>::ProbeTooEarly
+        );
+        set_block(RES_PROBE_INTERVAL.saturating_mul(4));
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        let later = ReserveHealth::<Test>::get();
+        assert_eq!(later.consecutive_fails, 4);
+        assert_eq!(later.last_probe_at, RES_PROBE_INTERVAL.saturating_mul(4));
+        assert_eq!(ProbeTimeoutCount::get(), 1);
+        assert!(ProbeDispatches::get().is_empty());
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn reserve_probe_timeout_longer_than_interval_never_overwrites_pending() {
+    new_test_ext().execute_with(|| {
+        let mut amended = ParamsValue::get();
+        amended.probe_timeout = amended.probe_interval.saturating_mul(2);
+        ParamsValue::set(amended);
+        set_block(amended.probe_interval);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        let pending = ReserveHealth::<Test>::get();
+
+        set_block(amended.probe_interval.saturating_mul(2));
+        assert_noop!(
+            Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))),
+            Error::<Test>::ProbeTooEarly
+        );
+        assert_eq!(ReserveHealth::<Test>::get(), pending);
+
+        set_block(amended.probe_interval.saturating_mul(3));
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        let folded = ReserveHealth::<Test>::get();
+        assert_eq!(folded.last_query_id, 2);
+        // One failure for the timed-out first attempt and one for the cadence
+        // slot at 2×interval that could not open while it remained pending.
+        assert_eq!(folded.consecutive_fails, 2);
+        assert_eq!(ProbeTimeoutCount::get(), 1);
+    });
+}
+
+#[test]
+fn reserve_probe_zero_interval_and_timeout_remain_bounded_and_fail_static() {
+    new_test_ext().execute_with(|| {
+        set_block(1);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        assert_ok!(Oracle::reserve_probe_result(1, true));
+
+        let mut amended = ParamsValue::get();
+        amended.probe_interval = 0;
+        amended.probe_timeout = 0;
+        ParamsValue::set(amended);
+        set_block(2);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        assert_eq!(ReserveHealth::<Test>::get().last_query_id, 2);
+
+        set_block(3);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        let health = ReserveHealth::<Test>::get();
+        assert_eq!(health.last_query_id, 3);
+        assert_eq!(health.consecutive_fails, 1);
+        assert_eq!(ProbeTimeoutCount::get(), 1);
+    });
+}
+
+#[test]
+fn reserve_probe_first_arm_rejects_each_structurally_zero_field() {
+    let mut cases = Vec::new();
+    let defaults = OracleParams::DEFAULT;
+    let mut params = defaults;
+    params.probe_interval = 0;
+    cases.push(params);
+    params = defaults;
+    params.probe_timeout = 0;
+    cases.push(params);
+    params = defaults;
+    params.probe_amount = 0;
+    cases.push(params);
+    params = defaults;
+    params.fail_threshold = 0;
+    cases.push(params);
+    params = defaults;
+    params.recover_threshold = 0;
+    cases.push(params);
+
+    for params in cases {
+        new_test_ext().execute_with(|| {
+            ParamsValue::set(params);
+            set_block(1);
+            assert_noop!(
+                Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))),
+                Error::<Test>::ProbeUnavailable
+            );
+            assert!(!Oracle::reserve_probe_armed());
+            assert_eq!(ReserveHealth::<Test>::get(), Default::default());
+            assert!(ProbeDispatches::get().is_empty());
+        });
+    }
+}
+
+#[test]
+fn reserve_probe_invalid_live_threshold_cannot_turn_pending_response_into_health() {
+    new_test_ext().execute_with(|| {
+        set_block(1);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        let mut amended = ParamsValue::get();
+        amended.recover_threshold = 0;
+        ParamsValue::set(amended);
+
+        assert_ok!(Oracle::reserve_probe_result(1, true));
+        let health = ReserveHealth::<Test>::get();
+        assert_eq!(health.consecutive_passes, 0);
+        assert_eq!(health.consecutive_fails, 1);
+        assert!(!health.unhealthy);
     });
 }
 
@@ -2066,6 +2331,28 @@ fn reserve_probe_dispatch_uses_live_probe_amount() {
 
         assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
         assert_eq!(ProbeDispatches::get(), vec![(1, amended.probe_amount)]);
+    });
+}
+
+#[test]
+fn reserve_probe_arm_latch_never_disables_fail_static_dispatch() {
+    new_test_ext().execute_with(|| {
+        set_block(RES_PROBE_INTERVAL);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        assert!(Oracle::reserve_probe_armed());
+        assert_ok!(Oracle::reserve_probe_result(1, true));
+
+        // `live()` is only the first-arm readiness gate. Once armed, a later
+        // loss of budget/readiness must still open an attempt which can timeout.
+        ProbeDispatchLive::set(false);
+        set_block(RES_PROBE_INTERVAL * 2);
+        assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
+        assert_eq!(
+            ReserveHealth::<Test>::get().pending_since,
+            Some(RES_PROBE_INTERVAL * 2)
+        );
+        assert_eq!(ProbeDispatches::get().len(), 2);
+        assert!(Oracle::reserve_probe_armed());
     });
 }
 
@@ -2390,6 +2677,34 @@ fn try_state_holds_across_the_representative_lifecycle() {
         assert_ok!(Oracle::crank_reserve_probe(RuntimeOrigin::signed(acc(9))));
         assert_ok!(Oracle::reserve_probe_result(1, true));
         assert_ok!(Oracle::do_try_state()); // post-probe
+    });
+}
+
+#[test]
+fn try_state_requires_v1_but_does_not_infer_arming_from_a_legacy_query_id() {
+    new_test_ext().execute_with(|| {
+        ReserveHealth::<Test>::mutate(|health| health.last_query_id = 7);
+        assert!(!Oracle::reserve_probe_armed());
+        assert_ok!(Oracle::do_try_state());
+
+        StorageVersion::new(0).put::<Oracle>();
+        assert!(Oracle::do_try_state().is_err());
+        StorageVersion::new(1).put::<Oracle>();
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+#[test]
+fn try_state_rejects_armed_probe_without_an_opened_v1_query_id() {
+    new_test_ext().execute_with(|| {
+        ReserveProbeArmed::<Test>::put(true);
+        assert_eq!(ReserveHealth::<Test>::get().last_query_id, 0);
+        assert_eq!(
+            Oracle::do_try_state(),
+            Err(sp_runtime::TryRuntimeError::Other(
+                "ReserveProbeArmed requires an opened v1 probe id"
+            ))
+        );
     });
 }
 
@@ -3100,6 +3415,10 @@ fn reserve_health_sink_fires_once_per_transition_not_per_probe() {
         assert_ok!(Oracle::reserve_probe_result(1, false));
         assert!(Oracle::reserve_unhealthy());
         assert_eq!(ReserveHealthSinkCalls::get(), vec![true]);
+        assert_eq!(
+            sp_io::storage::get(RESERVE_HEALTH_SINK_MARKER).as_deref(),
+            Some(&[1][..])
+        );
 
         // A second failing probe keeps the flag set — no new edge, no new call.
         set_block(RES_PROBE_INTERVAL * 2);
@@ -3138,6 +3457,7 @@ fn failing_reserve_health_sink_rolls_back_the_oracle_transition() {
 
         // The sink really ran (the thread-local witness survives the rollback)…
         assert_eq!(ReserveHealthSinkCalls::get(), vec![true]);
+        assert_eq!(sp_io::storage::get(RESERVE_HEALTH_SINK_MARKER), None);
         // …but nothing about the oracle transition committed: the flag is still
         // clear and the whole `ReserveHealth` record is byte-identical.
         assert!(!Oracle::reserve_unhealthy());
@@ -3149,6 +3469,10 @@ fn failing_reserve_health_sink_rolls_back_the_oracle_transition() {
         ReserveHealthSinkFails::set(false);
         assert_ok!(Oracle::reserve_probe_result(1, false));
         assert!(Oracle::reserve_unhealthy());
+        assert_eq!(
+            sp_io::storage::get(RESERVE_HEALTH_SINK_MARKER).as_deref(),
+            Some(&[1][..])
+        );
         assert_ok!(Oracle::do_try_state());
     });
 }
@@ -3172,6 +3496,7 @@ fn failing_reserve_health_sink_rolls_back_a_timeout_fold_crank() {
             DispatchError::Other("reserve health sink refused")
         );
         assert_eq!(ReserveHealthSinkCalls::get(), vec![true]);
+        assert_eq!(sp_io::storage::get(RESERVE_HEALTH_SINK_MARKER), None);
         assert!(!Oracle::reserve_unhealthy());
         assert_eq!(ReserveHealth::<Test>::get(), before);
         assert_ok!(Oracle::do_try_state());

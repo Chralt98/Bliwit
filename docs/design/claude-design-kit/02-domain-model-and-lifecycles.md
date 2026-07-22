@@ -1,7 +1,7 @@
 # Domain model & lifecycles — what every screen's objects are
 
 > **DERIVED, NON-NORMATIVE.** Distilled 2026-07-12 (commit `9f250be`) and refreshed
-> 2026-07-22 for SQ-320 from the frozen spec —
+> 2026-07-22 for SQ-320 and the reserve-probe/I-24 amendments from the frozen spec —
 > docs 03 (conditional ledger), 04 (markets & pricing), 05 (welfare & decision engine),
 > 06 (governance & guardians), 07 (oracle & disputes), 08 (treasury & economics),
 > 09 (execution & upgrades) — for upload to Claude Design. Where this file and the spec
@@ -136,9 +136,11 @@ Outcome: `Adopt` / `Extend` (once) / `Reject(reason)` — all 17 `RejectReason`s
 
 `W = g(S; 0.90, 0.98) · g(C; 0.85, 0.95) · P^0.60 · A^0.40`, all in [0,1]:
 - **S** (survival/liveness): min of block production, relay finality, collator concentration.
-- **C** (security-continuity): on-chain part (XCM health, reserve health, economic security,
-  weight headroom, runtime integrity, collator adequacy) × attested part (incident score —
-  one S1 incident zeroes it).
+- **C** (security-continuity): deterministic committed part (XCM health, reserve health,
+  economic security, weight headroom, runtime integrity, collator adequacy) × attested
+  class-4 part (incident score — one S1 incident zeroes it). Daily gate flags use only the
+  committed part: no class-4 reporter/dispute discretion enters them. Reserve health `R` is
+  the sole authenticated asynchronous class-3 input.
 - **P** (usage): fees burned/paid, qualified users, settled value. **A** (progress): shipped
   audited upgrades, runtime performance, integrations.
 - `g` = smoothstep gates with floors/ceilings; **daily gate-breach flags** (`s_breached`,
@@ -207,15 +209,28 @@ resolves deterministic disputes mechanically. Evidence is content-addressed
   fails loudly with `NavFloorUnmet`).
 - Sub-accounts / budget lines: `MAIN`, `POL` (≤ 0.75% NAV/epoch), `POL_BASELINE`, `KEEPER`
   (12k USDC/epoch), `ORACLE`, `REWARDS`, `INSURANCE`, `ops.*` (bootnodes, RPC/archive,
-  keepers, evidence hosting, monitoring, Arweave, collators, coretime).
+  keepers, evidence hosting, monitoring, Arweave, collators, coretime, reserve probe).
+  While the one-way bootstrap latch is open, the stored ops multisig may top up only
+  `OpsReserveProbe`, and only to the live fail-plus-recovery runway ceiling; it cannot fund
+  another `ops.*` line. TREASURY arming does not close that liveness bridge. The first
+  successful positive TREASURY-class funding of `OpsReserveProbe` closes it atomically and
+  irreversibly; the handover must finish before Phase-4 sudo removal.
 - **Streams**: linear vesting grants, recipient-claimable (`claim_stream`); mandatory for
   grants > 1% NAV; cancellable by a later TREASURY decision.
 - **Meters** (gauges in the UI): per-proposal ≤ 5% NAV; 30-day ≤ 10%; 180-day ≤ 30%; VIT
   issuance ≤ 2%/yr. `SlotsShrunk` (slate reduced to fit the POL budget) must appear on the
   epoch dashboard.
-- **Reserve health**: daily XCM probe of USDC transferability; 2 consecutive fails ⇒
+- **Reserve health**: daily bounded no-JIT XCM probe of sovereign USDC transferability;
+  the first readiness-qualified arm opens the first attempt and establishes cadence without
+  scoring pre-arm time as failures; the latch cannot later disarm. Phase-3 evidence includes
+  at least one timely authenticated production pass;
+  only the exact timely response authenticated from canonical Asset Hub may raise `R`.
+  Missing/failed/late/ambiguous responses are pessimistic. Two consecutive fails ⇒
   `ReserveUnhealthy`: split inflows halt (PB-RESERVE), NAV shows haircut,
-  `spendable_nav = 0`; 3 passes ⇒ `ReserveRecovered`.
+  `spendable_nav = 0`; 3 passes ⇒ `ReserveRecovered`. The USDC-denominated
+  `ops.reserve_probe` line authorizes each DOT envelope but does not supply it: operators
+  keep at least five full debits locally at genesis and separately provision the probe USDC,
+  five DOT envelopes and a refill margin in Bleavit's sovereign account on Asset Hub.
 
 ## 10. Execution & upgrades (09)
 

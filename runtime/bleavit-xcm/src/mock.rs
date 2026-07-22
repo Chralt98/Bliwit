@@ -9,7 +9,10 @@ use crate::{
     caps::{CappedInflows, InflowCaps},
     coretime::XcmRenewalDispatcher,
     health::{HealthTrackingRouter, LocalXcmHealthSink},
-    probe::{ProbeAwareResponseHandler, ProbeSink, XcmProbeDispatcher},
+    probe::{
+        ProbeAwareResponseHandler, ProbeAwareWeightBounds, ProbeBudget, ProbeSink,
+        XcmProbeDispatcher,
+    },
     trader::{GovernedWeightTrader, TraderRates, WeightRate},
 };
 use frame_support::{
@@ -27,7 +30,7 @@ use staging_xcm::latest::{prelude::*, SendError, SendResult, XcmHash};
 use staging_xcm::prelude::XcmVersion;
 use staging_xcm_builder::{
     EnsureXcmOrigin, FixedWeightBounds, FrameTransactionalProcessor, SignedAccountId32AsNative,
-    SignedToAccountId32, SovereignSignedViaLocation,
+    SignedToAccountId32, SovereignSignedViaLocation, WithUniqueTopic,
 };
 use staging_xcm_executor::{traits::OnResponse, XcmExecutor};
 use std::{cell::RefCell, collections::BTreeMap};
@@ -184,6 +187,10 @@ impl pallet_futarchy_treasury::TreasuryParams for TestTreasuryParams {
         10_000_000_000
     }
 
+    fn reserve_probe_dot_rate() -> u128 {
+        10_000_000_000
+    }
+
     fn coretime_fee_dot() -> u128 {
         CoretimeFeeBudget::get()
     }
@@ -197,6 +204,8 @@ impl pallet_futarchy_treasury::Config for Test {
     type TreasuryOrigin = EnsureSigned<AccountId>;
     type Params = TestTreasuryParams;
     type CurrentEpoch = CurrentEpoch;
+    type TreasuryPhase = ();
+    type BootstrapOpsFundingPolicy = ();
     type RenewalDispatch = TestRenewalDispatcher;
     type PotFunding = ();
     type InsuranceSweep = ();
@@ -227,12 +236,14 @@ thread_local! {
     static SEND_MODE: RefCell<SendMode> = const { RefCell::new(SendMode::Success) };
     static SEND_FEE: RefCell<Assets> = RefCell::new(Assets::new());
     static SENT_COUNT: RefCell<u32> = const { RefCell::new(0) };
-    static SEND_FAILURE_COUNT: RefCell<u32> = const { RefCell::new(0) };
     static PROBE_TIMEOUT_COUNT: RefCell<u32> = const { RefCell::new(0) };
     static TVL_CAP: RefCell<u128> = const { RefCell::new(u128::MAX) };
     static ACCOUNT_CAP: RefCell<u128> = const { RefCell::new(u128::MAX) };
     static ACCOUNT_INFLOWS: RefCell<BTreeMap<AccountId, u128>> = const { RefCell::new(BTreeMap::new()) };
 }
+
+const SEND_FAILURE_COUNT_KEY: &[u8] = b"bleavit-xcm/mock/send-failure-count";
+const PARTIAL_SEND_KEY: &[u8] = b"bleavit-xcm/mock/partial-send";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SendMode {
@@ -255,8 +266,33 @@ pub fn sent_messages() -> Vec<(Location, Xcm<()>)> {
 
 pub fn health_counts() -> (u32, u32) {
     let sent = SENT_COUNT.with(|count| *count.borrow());
-    let failed = SEND_FAILURE_COUNT.with(|count| *count.borrow());
+    let failed = frame_support::storage::unhashed::get(SEND_FAILURE_COUNT_KEY).unwrap_or(0);
     (sent, failed)
+}
+
+pub fn partial_send_marker_exists() -> bool {
+    frame_support::storage::unhashed::exists(PARTIAL_SEND_KEY)
+}
+
+pub fn set_probe_line_balance(amount: u128) {
+    use futarchy_treasury_core::BudgetLine;
+    pallet_futarchy_treasury::State::<Test>::mutate(|state| {
+        if let Some((_, balance)) = state
+            .lines
+            .iter_mut()
+            .find(|(line, _)| *line == BudgetLine::OpsReserveProbe)
+        {
+            *balance = amount;
+        } else {
+            assert!(
+                state
+                    .lines
+                    .try_push((BudgetLine::OpsReserveProbe, amount))
+                    .is_ok(),
+                "treasury line bound"
+            );
+        }
+    });
 }
 
 pub fn set_caps(tvl_cap: u128, account_cap: u128) {
@@ -278,6 +314,7 @@ impl SendXcm for RecordingSender {
         message: &mut Option<Xcm<()>>,
     ) -> SendResult<Self::Ticket> {
         if SEND_MODE.with(|mode| *mode.borrow() == SendMode::ValidateFailure) {
+            frame_support::storage::unhashed::put(PARTIAL_SEND_KEY, &1_u32);
             return Err(SendError::Transport("mock validation failure"));
         }
         match (destination.take(), message.take()) {
@@ -291,6 +328,7 @@ impl SendXcm for RecordingSender {
 
     fn deliver(ticket: Self::Ticket) -> Result<XcmHash, SendError> {
         if SEND_MODE.with(|mode| *mode.borrow() == SendMode::DeliverFailure) {
+            frame_support::storage::unhashed::put(PARTIAL_SEND_KEY, &2_u32);
             return Err(SendError::Transport("mock delivery failure"));
         }
         let hash = ticket.1.using_encoded(sp_io::hashing::blake2_256);
@@ -309,10 +347,8 @@ impl LocalXcmHealthSink for TestHealthSink {
     }
 
     fn note_send_failure() {
-        SEND_FAILURE_COUNT.with(|count| {
-            let mut count = count.borrow_mut();
-            *count = count.saturating_add(1);
-        });
+        let count: u32 = frame_support::storage::unhashed::get(SEND_FAILURE_COUNT_KEY).unwrap_or(0);
+        frame_support::storage::unhashed::put(SEND_FAILURE_COUNT_KEY, &count.saturating_add(1));
     }
 
     fn note_probe_timeout() {
@@ -347,8 +383,9 @@ impl ProbeSink for OracleProbeSink {
         health.pending_since.map(|_| health.last_query_id)
     }
 
-    fn probe_result(query_id: u64, passed: bool) {
+    fn probe_result(query_id: u64, passed: bool) -> Weight {
         let _ = Oracle::reserve_probe_result(query_id, passed);
+        ProbeMaxResponseWeight::get()
     }
 }
 
@@ -403,6 +440,7 @@ parameter_types! {
     pub DotLocation: Location = crate::identity::dot_location();
     pub AdvertisedXcmVersion: XcmVersion = crate::identity::XCM_VERSION_PINNED;
     pub const ProbeAmount: u128 = 10;
+    pub const ProbeFeeBudget: u128 = 100;
     pub const ProbeExecWeightBudget: Weight = Weight::from_parts(100, 100);
     pub const ProbeMaxResponseWeight: Weight = Weight::from_parts(100, 100);
     pub const OurParaId: u32 = chain_identity::FIXTURE_PARA_ID;
@@ -419,6 +457,8 @@ pub type TestAssetTransactors =
 pub type TestCappedAssets =
     CappedInflows<TestAssetTransactors, TestCaps, TestLocationToAccountId, AccountId>;
 pub type TestResponseHandler = ProbeAwareResponseHandler<PalletXcm, OracleProbeSink>;
+pub type TestBaseWeigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
+pub type TestWeigher = ProbeAwareWeightBounds<TestBaseWeigher, ProbeMaxResponseWeight>;
 pub type TestBarrier = BleavitBarrier<
     TestResponseHandler,
     UniversalLocation,
@@ -428,8 +468,28 @@ pub type TestBarrier = BleavitBarrier<
     AccountId,
 >;
 pub type TestRouter = HealthTrackingRouter<RecordingSender, TestHealthSink>;
-pub type TestProbeDispatcher =
-    XcmProbeDispatcher<TestRouter, ProbeExecWeightBudget, ProbeMaxResponseWeight, OurParaId>;
+pub struct TestProbeBudget;
+impl ProbeBudget for TestProbeBudget {
+    fn ready_to_arm(_: &pallet_oracle::OracleParams) -> bool {
+        true
+    }
+
+    fn reserve_fee(_: u128) -> Result<u128, sp_runtime::DispatchError> {
+        Treasury::charge_reserve_probe_fee(
+            ProbeFeeBudget::get(),
+            <TestTreasuryParams as pallet_futarchy_treasury::TreasuryParams>::reserve_probe_dot_rate(),
+        )?;
+        Ok(ProbeFeeBudget::get())
+    }
+}
+pub type TestProbeDispatcher = XcmProbeDispatcher<
+    WithUniqueTopic<RecordingSender>,
+    TestProbeBudget,
+    ProbeExecWeightBudget,
+    ProbeMaxResponseWeight,
+    OurParaId,
+    TestHealthSink,
+>;
 pub type TestRenewalDispatcher = XcmRenewalDispatcher<
     XcmExecutor<XcmConfig>,
     RuntimeCall,
@@ -459,7 +519,7 @@ impl staging_xcm_executor::Config for XcmConfig {
     type IsTeleporter = ();
     type UniversalLocation = UniversalLocation;
     type Barrier = TestBarrier;
-    type Weigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
+    type Weigher = TestWeigher;
     type Trader = GovernedWeightTrader<TestRates, ()>;
     type ResponseHandler = TestResponseHandler;
     type AssetTrap = PalletXcm;
@@ -495,7 +555,7 @@ impl pallet_xcm::Config for Test {
     type XcmExecutor = XcmExecutor<XcmConfig>;
     type XcmTeleportFilter = Nothing;
     type XcmReserveTransferFilter = crate::filter::ReserveTransferFilter;
-    type Weigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
+    type Weigher = TestWeigher;
     type UniversalLocation = UniversalLocation;
     type RuntimeOrigin = RuntimeOrigin;
     type RuntimeCall = RuntimeCall;
@@ -542,6 +602,11 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     ext.execute_with(|| {
         System::set_block_number(1);
         reset_test_state();
+        let _ = Treasury::fund_budget_line(
+            RuntimeOrigin::signed(alice()),
+            futarchy_treasury_core::BudgetLine::OpsReserveProbe,
+            100_000,
+        );
     });
     ext
 }
@@ -551,7 +616,8 @@ pub fn reset_test_state() {
     SEND_MODE.with(|mode| *mode.borrow_mut() = SendMode::Success);
     SEND_FEE.with(|fee| *fee.borrow_mut() = Assets::new());
     SENT_COUNT.with(|count| *count.borrow_mut() = 0);
-    SEND_FAILURE_COUNT.with(|count| *count.borrow_mut() = 0);
+    frame_support::storage::unhashed::kill(SEND_FAILURE_COUNT_KEY);
+    frame_support::storage::unhashed::kill(PARTIAL_SEND_KEY);
     PROBE_TIMEOUT_COUNT.with(|count| *count.borrow_mut() = 0);
     TVL_CAP.with(|cap| *cap.borrow_mut() = u128::MAX);
     ACCOUNT_CAP.with(|cap| *cap.borrow_mut() = u128::MAX);

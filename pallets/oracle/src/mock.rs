@@ -50,7 +50,7 @@ parameter_types! {
     /// Probe dispatch observations, including the live `res.probe_amount`.
     pub static ProbeDispatches: Vec<(u64, Balance)> = Vec::new();
     /// Whether the mock models a live XCM probe route.
-    pub static ProbeDispatchLive: bool = false;
+    pub static ProbeDispatchLive: bool = true;
     /// Reserve-health transitions the sibling-pallet sink was handed (07 §8).
     /// Deliberately *not* storage, so it survives the rollback the failing-sink
     /// test triggers: the SQ-205 atomicity assertions need to see that the sink
@@ -74,7 +74,7 @@ impl pallet_oracle::OracleParamsProvider for TestParams {
 pub struct TestProbeDispatch;
 
 impl pallet_oracle::ProbeDispatch for TestProbeDispatch {
-    fn live() -> bool {
+    fn live(_: &OracleParams) -> bool {
         ProbeDispatchLive::get()
     }
 
@@ -98,10 +98,12 @@ impl pallet_oracle::ProbeTimeoutSink for TestProbeTimeoutSink {
 /// that cannot commit, so the SQ-205 tests can prove the oracle transition
 /// unwinds with it.
 pub struct TestReserveHealthSink;
+pub const RESERVE_HEALTH_SINK_MARKER: &[u8] = b"oracle:test:reserve-health-sink";
 
 impl pallet_oracle::ReserveHealthSink for TestReserveHealthSink {
     fn reserve_health_changed(unhealthy: bool) -> frame_support::pallet_prelude::DispatchResult {
         ReserveHealthSinkCalls::mutate(|calls| calls.push(unhealthy));
+        sp_io::storage::set(RESERVE_HEALTH_SINK_MARKER, &[u8::from(unhealthy)]);
         if ReserveHealthSinkFails::get() {
             return Err(frame_support::pallet_prelude::DispatchError::Other(
                 "reserve health sink refused",
@@ -201,7 +203,7 @@ pub fn new_test_ext_with(oracle: pallet_oracle::GenesisConfig<Test>) -> sp_io::T
     ProbeTimeoutCount::set(0);
     ParamsValue::set(OracleParams::DEFAULT);
     ProbeDispatches::set(Vec::new());
-    ProbeDispatchLive::set(false);
+    ProbeDispatchLive::set(true);
     ReserveHealthSinkCalls::set(Vec::new());
     ReserveHealthSinkFails::set(false);
     let storage = RuntimeGenesisConfig {
@@ -211,7 +213,10 @@ pub fn new_test_ext_with(oracle: pallet_oracle::GenesisConfig<Test>) -> sp_io::T
     .build_storage()
     .expect("mock genesis must build");
     let mut ext = sp_io::TestExternalities::new(storage);
-    ext.execute_with(|| System::set_block_number(1));
+    ext.execute_with(|| {
+        System::set_block_number(1);
+        sp_io::storage::clear(RESERVE_HEALTH_SINK_MARKER);
+    });
     ext
 }
 

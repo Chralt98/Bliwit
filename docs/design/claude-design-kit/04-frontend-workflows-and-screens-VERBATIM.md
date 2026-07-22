@@ -329,7 +329,7 @@ Precondition row (reads on the **AH connection** at its own finalized B′, plus
 | **Phase-3 exposure caps (D-13)** | while PhaseFlags < Phase 4: global TVL cap headroom and per-account deposit cap headroom (constitution keys) re-read; a deposit that would exceed either is blocked with the cap shown |
 | XCM channel health | the C_onchain XCM-health sub-metric / R flag ([05](05-welfare-and-decision-engine.md)/[07](07-oracle-and-disputes.md)); degraded health warns (and PB-RESERVE halts split inflows — surfaced) |
 
-Arrival tracking: local finality on AH ≠ delivery. The tracker shows "sent — awaiting arrival" until the **futarchy-chain** connection observes the balance credit in finalized state; both legs are labelled with their own provenance. No XCM outcome participates in any decision/settlement path (I-24) — the tracker is display only.
+Arrival tracking: local finality on AH ≠ delivery. The tracker shows "sent — awaiting arrival" until the **futarchy-chain** connection observes the balance credit in finalized state; both legs are labelled with their own provenance. No **user-transfer** XCM outcome participates in any decision/settlement path — the tracker is display only. I-24's sole, directionally fail-static exception is the protocol-owned reserve probe `R` of [07](07-oracle-and-disputes.md) §8; this workflow cannot write or impersonate it.
 
 ### 11.9.2 Withdraw — futarchy chain → Asset Hub
 

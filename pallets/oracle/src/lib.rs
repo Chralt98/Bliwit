@@ -92,8 +92,8 @@ pub use oracle_core::{
     round_bond, stored_round_bond, Error as CoreError, Event as CoreEvent, Oracle, OracleParams,
     ReportInput, ReporterInfo, ReserveHealth as ReserveHealthValue, RoundKey, RoundState,
     SettlePath, SettledComponent, StoredRoundSchedule, WatchtowerInfo, MAX_ACK_RECORDS,
-    MAX_COMPONENT_VALUES, MAX_REPORTERS, MAX_ROUNDS, MAX_WATCHTOWERS, ORC_MAX_PROOF_BYTES,
-    ORC_ROUNDS, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
+    MAX_COMPONENT_VALUES, MAX_REPORTERS, MAX_RESERVE_PROBE_QUERY_ID, MAX_ROUNDS, MAX_WATCHTOWERS,
+    ORC_MAX_PROOF_BYTES, ORC_ROUNDS, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
 };
 
 use futarchy_primitives::{BlockNumber, EpochId, MetricId, MetricSpecVersion};
@@ -163,7 +163,7 @@ pub trait ReportingContext {
 /// leaves the probe pending until the fail-static timeout (07 §8, I-24).
 pub trait ProbeDispatch {
     /// Whether this runtime binding can actually send the probe program.
-    fn live() -> bool {
+    fn live(_: &OracleParams) -> bool {
         true
     }
 
@@ -171,7 +171,7 @@ pub trait ProbeDispatch {
 }
 
 impl ProbeDispatch for () {
-    fn live() -> bool {
+    fn live(_: &OracleParams) -> bool {
         false
     }
 
@@ -225,6 +225,9 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     /// Install the real cross-pallet reporting window/spec context consumed by
     /// `report`; mock runtimes whose provider is already primed may no-op.
     fn prime_reporting(component: MetricId, epoch: EpochId, version: MetricSpecVersion);
+    /// Prime the real reserve-probe budget and sibling route before measuring
+    /// the production dispatch path. Pallet-only mocks may no-op.
+    fn prime_reserve_probe() {}
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
@@ -243,7 +246,7 @@ pub mod pallet {
     use sp_runtime::{traits::SaturatedConversion, TryRuntimeError};
 
     /// The in-code storage version of this pallet.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -361,6 +364,13 @@ pub mod pallet {
     /// reserve.
     #[pallet::storage]
     pub type ReserveHealth<T: Config> = StorageValue<_, ReserveHealthValue, ValueQuery>;
+
+    /// Internal monotone latch: the production funding/readiness gate was
+    /// satisfied before the first v1 reserve attempt opened. This cannot be
+    /// inferred from `last_query_id`: v0 advanced that counter even though its
+    /// production dispatcher was the no-op `()` and sent no message.
+    #[pallet::storage]
+    pub type ReserveProbeArmed<T: Config> = StorageValue<_, bool, ValueQuery>;
 
     /// Internal (not FE-read): per-round watchtower acknowledgments, keyed by
     /// `report_hash` (07 §13). Bounded to live games' acks by the core's
@@ -538,6 +548,8 @@ pub mod pallet {
         ReserveUnhealthy,
         /// The reserve probe interval has not elapsed (07 §8).
         ProbeTooEarly,
+        /// The reserve probe has not yet passed its funding/readiness gate.
+        ProbeUnavailable,
         /// The `query_id` does not match the outstanding probe (07 §8).
         UnknownQuery,
         /// Arithmetic overflow — rejected, never wrapped (G-1).
@@ -750,11 +762,16 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::crank_reserve_probe())]
         pub fn crank_reserve_probe(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
-            let now = Self::now();
+            let was_armed = ReserveProbeArmed::<T>::get();
             let params = T::Params::get();
-            let mut fresh_query_id = None;
-            let mut folded_timeout = false;
-            Self::mutate_core(|o| {
+            // Evaluate readiness on both first and recurring paths so the
+            // production storage/weight envelope is branch-independent. Only
+            // the unarmed path is refused when current readiness is false.
+            let dispatch_live = T::ProbeDispatch::live(&params);
+            let ready = params.reserve_probe_config_valid() && dispatch_live;
+            ensure!(was_armed || ready, Error::<T>::ProbeUnavailable);
+            let now = Self::now();
+            let (fresh_query_id, folded_timeout, missed) = Self::mutate_reserve_health(|o| {
                 let mut folded = false;
                 if let Some(since) = o.reserve_health.pending_since {
                     if now >= since.saturating_add(params.probe_timeout) {
@@ -762,23 +779,58 @@ pub mod pallet {
                         // never healthy (07 §8) — count it before sending anew.
                         o.crank_probe_timeout_with_params(now, &params)?;
                         folded = true;
-                        folded_timeout = true;
                     }
                 }
-                // Send the next probe only when the interval has elapsed. If it
-                // has not but we just folded a timeout, still commit the fail
-                // rather than letting `ProbeTooEarly` roll the whole call back
-                // and discard it (Codex F3).
-                if now
-                    >= o.reserve_health
-                        .last_probe_at
-                        .saturating_add(params.probe_interval)
-                {
+
+                // Do not overwrite a still-live outstanding query even if a
+                // future parameter amendment makes timeout exceed cadence.
+                if o.reserve_health.pending_since.is_some() {
+                    return Err(CoreError::ProbeTooEarly);
+                }
+
+                let interval = params.probe_interval.max(1);
+                // The first readiness-qualified call opens the first attempt
+                // immediately, even before one nominal interval has elapsed.
+                // That attempt establishes the cadence anchor; pre-arm wall
+                // clock time is not an outage and scores no missed slots.
+                let elapsed_slots = if was_armed {
+                    now.saturating_sub(o.reserve_health.last_probe_at) / interval
+                } else {
+                    1
+                };
+                if elapsed_slots > 0 {
+                    // Once the disjoint wire namespace is exhausted, opening a
+                    // new attempt is impossible forever. Do not let the core's
+                    // `Overflow` roll back a timeout or erase completed
+                    // no-attempt slots: every elapsed slot is a fail-static
+                    // miss, and advancing the cadence anchor keeps subsequent
+                    // cranks bounded to the newly elapsed interval.
+                    if o.reserve_health.last_query_id >= MAX_RESERVE_PROBE_QUERY_ID {
+                        o.note_missed_reserve_probes_with_params(elapsed_slots, &params);
+                        o.reserve_health.last_probe_at = now;
+                        return Ok((None, folded, elapsed_slots));
+                    }
+                    // The final elapsed slot is the attempt opened below. Every
+                    // earlier slot had no keeper attempt and therefore scores
+                    // as a fail (SQ-385 literal fail-static ruling). A timeout
+                    // folded above belongs to the previously-opened attempt,
+                    // not to any of these missed cadence slots.
+                    // Cadence begins only when the readiness-qualified v1 arm
+                    // opens its first real attempt. Pre-arm wall-clock slots
+                    // were not measurement outages and must not manufacture an
+                    // unhealthy state before the probe existed.
+                    let missed = if was_armed {
+                        elapsed_slots.saturating_sub(1)
+                    } else {
+                        0
+                    };
+                    o.note_missed_reserve_probes_with_params(missed, &params);
                     let query_id = o.crank_reserve_probe_with_params(now, &params)?;
-                    fresh_query_id = Some(query_id);
-                    Ok(())
+                    Ok((Some(query_id), folded, missed))
                 } else if folded {
-                    Ok(())
+                    // Commit a just-reached timeout even though the next daily
+                    // slot has not opened yet (G-1; Codex F3).
+                    Ok((None, true, 0))
                 } else {
                     Err(CoreError::ProbeTooEarly)
                 }
@@ -786,13 +838,13 @@ pub mod pallet {
             if folded_timeout {
                 T::ProbeTimeoutSink::probe_timed_out();
             }
-            let dispatch_live = T::ProbeDispatch::live();
-            if dispatch_live {
-                if let Some(query_id) = fresh_query_id {
-                    T::ProbeDispatch::probe_due(query_id, params.probe_amount);
+            if let Some(query_id) = fresh_query_id {
+                if !was_armed {
+                    ReserveProbeArmed::<T>::put(true);
                 }
+                T::ProbeDispatch::probe_due(query_id, params.probe_amount);
             }
-            if dispatch_live && (fresh_query_id.is_some() || folded_timeout) {
+            if fresh_query_id.is_some() || folded_timeout || missed > 0 {
                 // B5 recalibrates this weight for the post-commit rebate write/payout.
                 T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
             }
@@ -879,7 +931,7 @@ pub mod pallet {
         pub fn reserve_probe_result(query_id: u64, passed: bool) -> DispatchResult {
             let now = Self::now();
             let params = T::Params::get();
-            Self::mutate_core(|o| {
+            Self::mutate_reserve_health(|o| {
                 o.reserve_probe_result_with_params(now, query_id, passed, &params)
             })
         }
@@ -967,6 +1019,11 @@ pub mod pallet {
             ReserveHealth::<T>::get().unhealthy
         }
 
+        /// Whether the one-time reserve-probe readiness gate has completed.
+        pub fn reserve_probe_armed() -> bool {
+            ReserveProbeArmed::<T>::get()
+        }
+
         // ---- Hydrate / persist (Track-A "load → call core → persist") ----
 
         /// Rebuild the whole [`Oracle`] aggregate from storage. Reads are bounded
@@ -1017,6 +1074,32 @@ pub mod pallet {
         /// and because FRAME rolls the dispatch back — G-1 status quo).
         fn mutate_core(op: impl FnOnce(&mut Oracle) -> Result<(), CoreError>) -> DispatchResult {
             Self::mutate_core_with_rebate_progress(op).map(|_| ())
+        }
+
+        /// Run a reserve-health-only core operation without hydrating any
+        /// reporter, round, acknowledgment or component-value storage. This is
+        /// the 07 §13 O(1) QueryResponse path: one authoritative record, the
+        /// edge-triggered mirrors, and the operation's bounded events.
+        fn mutate_reserve_health<R>(
+            op: impl FnOnce(&mut Oracle) -> Result<R, CoreError>,
+        ) -> Result<R, DispatchError> {
+            frame_support::storage::with_storage_layer(|| {
+                let before = ReserveHealth::<T>::get();
+                let mut oracle = Oracle {
+                    reserve_health: before,
+                    ..Oracle::default()
+                };
+                let result = op(&mut oracle).map_err(Self::map_core_error)?;
+                let after = oracle.reserve_health;
+                if before != after {
+                    ReserveHealth::<T>::put(after);
+                }
+                if before.unhealthy != after.unhealthy {
+                    T::ReserveHealthSink::reserve_health_changed(after.unhealthy)?;
+                }
+                Self::deposit_core_events(core::mem::take(&mut oracle.events));
+                Ok(result)
+            })
         }
 
         /// Hydrate → run → persist and report whether a round advanced through
@@ -1361,6 +1444,11 @@ pub mod pallet {
         /// Rebuild the core aggregate from storage and run its reviewed validator
         /// plus the FRAME storage-shape bounds (15 §1; I-18).
         pub fn do_try_state() -> Result<(), TryRuntimeError> {
+            if StorageVersion::get::<Pallet<T>>() != STORAGE_VERSION {
+                return Err(TryRuntimeError::Other(
+                    "oracle: on-chain storage version is not v1",
+                ));
+            }
             let oracle = Self::load();
             // Counter/iteration agreement for the counted maps.
             if oracle.reporters.len() != Reporters::<T>::count() as usize {
@@ -1403,6 +1491,11 @@ pub mod pallet {
                         "RoundSchedules: frozen schedule has no live round",
                     ));
                 }
+            }
+            if ReserveProbeArmed::<T>::get() && oracle.reserve_health.last_query_id == 0 {
+                return Err(TryRuntimeError::Other(
+                    "ReserveProbeArmed requires an opened v1 probe id",
+                ));
             }
             oracle
                 .try_state()

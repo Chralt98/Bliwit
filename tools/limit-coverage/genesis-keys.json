@@ -53,6 +53,8 @@
   "ops.ct_dot_rate",
   "ops.ct_fee_dot",
   "ops.ct_quote_ttl",
+  "ops.probe_fee",
+  "ops.probe_rate",
   "orc.bond_bps",
   "orc.bond_floor",
   "orc.n_min",

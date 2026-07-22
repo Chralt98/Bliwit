@@ -516,13 +516,25 @@ class SurfaceManifestTests(unittest.TestCase):
                     ),
                 },
                 {
-                    "id": "treasury.reserve_health_unwired",
-                    "owner": "B1a",
+                    "id": "welfare.reserve_daily_unbound",
+                    "owner": "A12",
                     "reason": (
-                        "SQ-205: the ReserveHealthSink seam exists but the runtime "
-                        "binds () — 08 §1.2 fail-static NAV is still not enforced. "
-                        "Blocked on SQ-380 (the probe feed is unwired and its latch "
-                        "is one-way), not on the seam."
+                        "SQ-195: day-resolved R welfare storage/view/pruning binding "
+                        "remains release-blocking; the production reserve probe and "
+                        "authenticated response writer are live"
+                    ),
+                },
+                {
+                    "id": "treasury.reserve_probe_unverified",
+                    "owner": "B15",
+                    "reason": (
+                        "07 §8 live Asset Hub fee/barrier/response + bidirectional-HRMP "
+                        "calibration remains release-blocking: probe armed with a timely "
+                        "authenticated pass, local F+R line runway, remote sovereign USDC "
+                        "plus F+R DOT envelopes/refill margin, and positive TREASURY "
+                        "reserve-line funding handover before Phase 4; SQ-484 "
+                        "monitoring/alerts and SQ-485 nonzero parameter floors remain "
+                        "open; SQ-205/SQ-380 production health/feed wiring is complete"
                     ),
                 },
                 {

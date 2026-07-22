@@ -681,6 +681,14 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             pallet_registry::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::FutarchyTreasury(call) => match call {
+            pallet_futarchy_treasury::Call::fund_budget_line { line, .. }
+                if *line == pallet_futarchy_treasury::BudgetLine::OpsReserveProbe =>
+            {
+                // The pallet authenticates the stored ops multisig, caps the
+                // top-up to the exact probe runway, and closes this Signed path
+                // at the first positive TREASURY reserve refill.
+                leaf(CallDomain::Public)
+            }
             pallet_futarchy_treasury::Call::fund_budget_line { .. }
             | pallet_futarchy_treasury::Call::spend { .. }
             | pallet_futarchy_treasury::Call::open_stream { .. }

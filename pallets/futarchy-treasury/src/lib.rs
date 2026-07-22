@@ -32,8 +32,12 @@
 //! `FutarchyTreasury` origin, dispatched by the execution guard when a
 //! TREASURY-class decision executes (06 §3 / 09). `claim_stream` is a Signed
 //! recipient call; `execute_coretime_renewal` is a permissionless Signed keeper
-//! call, freeze-exempt (D-9). The runtime wires [`Config::TreasuryOrigin`] over
-//! `pallet-origins` (A4/B1a); the mock provides a test resolver.
+//! call, freeze-exempt (D-9). While the one-way bootstrap latch is open, the
+//! stored ops multisig may also top up only `OpsReserveProbe` to the live
+//! fail-plus-recovery runway ceiling; the first successful positive
+//! `FutarchyTreasury` funding of that line closes the path permanently. The runtime wires
+//! [`Config::TreasuryOrigin`] over `pallet-origins` (A4/B1a); the mock provides
+//! a test resolver.
 //!
 //! ## Parameters (rule 4)
 //!
@@ -62,12 +66,12 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // (named, not glob — the pallet defines its own `Event`/`Error`).
 pub use futarchy_treasury_core::{
-    bps, vested_amount, AssetKind, BudgetLine, CoretimeQuote, Error as CoreError,
-    Event as CoreEvent, KeeperMeter, KeeperMeterClass, NavComponents, RollingMeter, Stream,
-    StreamInput, Treasury, TreasuryAccount, DEFAULT_VIT_SUPPLY, ISS_INFLATION_CAP_BPS,
-    MAX_BUDGET_LINES, MAX_FUNDED_CORETIME_PERIODS, MAX_PENDING_OUTFLOWS, MAX_POL_COMMITMENTS,
-    MAX_STREAMS, TRS_CAP_180D_BPS, TRS_CAP_30D_BPS, TRS_CAP_PROPOSAL_BPS, TRS_STREAM_THRESHOLD_BPS,
-    USDC, VIT,
+    bps, reserve_probe_runway_debit, vested_amount, AssetKind, BudgetLine, CoretimeQuote,
+    Error as CoreError, Event as CoreEvent, KeeperMeter, KeeperMeterClass, NavComponents,
+    RollingMeter, Stream, StreamInput, Treasury, TreasuryAccount, DEFAULT_VIT_SUPPLY,
+    ISS_INFLATION_CAP_BPS, MAX_BUDGET_LINES, MAX_FUNDED_CORETIME_PERIODS, MAX_PENDING_OUTFLOWS,
+    MAX_POL_COMMITMENTS, MAX_STREAMS, TRS_CAP_180D_BPS, TRS_CAP_30D_BPS, TRS_CAP_PROPOSAL_BPS,
+    TRS_STREAM_THRESHOLD_BPS, USDC, VIT,
 };
 pub use origins_core::Origin;
 
@@ -82,6 +86,29 @@ pub const MAX_PENDING_OUTFLOWS_BOUND: u32 = MAX_PENDING_OUTFLOWS as u32;
 pub const MAX_POL_COMMITMENTS_BOUND: u32 = MAX_POL_COMMITMENTS as u32;
 /// See [`MAX_BUDGET_LINES_BOUND`].
 pub const MAX_FUNDED_CORETIME_BOUND: u32 = MAX_FUNDED_CORETIME_PERIODS as u32;
+
+/// Rollout-phase seam for the Phase≤4 ops-multisig funding path (08 §2.1).
+pub trait TreasuryPhase {
+    fn treasury_armed() -> bool;
+}
+
+/// Exact live cap for the temporary signed reserve-probe top-up path. `None`
+/// fails closed when any governed input is absent, malformed, zero or overflows.
+pub trait BootstrapOpsFundingPolicy {
+    fn reserve_probe_ceiling() -> Option<futarchy_primitives::Balance>;
+}
+
+impl BootstrapOpsFundingPolicy for () {
+    fn reserve_probe_ceiling() -> Option<futarchy_primitives::Balance> {
+        None
+    }
+}
+
+impl TreasuryPhase for () {
+    fn treasury_armed() -> bool {
+        false
+    }
+}
 
 /// Live treasury tunables (rule 4). The runtime implements this over
 /// `pallet-constitution::Params` (B1a), converting each typed record to basis
@@ -108,8 +135,12 @@ pub trait TreasuryParams {
     /// rebate makes the entire path a structural no-op and cannot create an
     /// unbacked outflow.
     fn keeper_rebate() -> futarchy_primitives::Balance;
-    /// `ops.ct_dot_rate` — µUSDC per DOT for renewal budget accounting.
+    /// `ops.ct_dot_rate` — µUSDC per DOT for Coretime-envelope accounting.
     fn coretime_dot_rate() -> futarchy_primitives::Balance;
+    /// `ops.probe_rate` — µUSDC per DOT for reserve-probe envelope accounting.
+    /// This is independent of the Coretime rate so either maintenance path can
+    /// be conservatively repriced without silently changing the other.
+    fn reserve_probe_dot_rate() -> futarchy_primitives::Balance;
     /// `ops.ct_fee_dot` — DOT-planck fee budget for the two remote XCM legs.
     fn coretime_fee_dot() -> futarchy_primitives::Balance;
     /// `ops.ct_quote_ttl` — open-quote freshness window in blocks.
@@ -254,6 +285,7 @@ pub mod pallet {
     use frame_support::pallet_prelude::*;
     use frame_support::traits::EnsureOrigin;
     use frame_system::pallet_prelude::*;
+    use parity_scale_codec::{Decode, Encode};
     use sp_runtime::traits::SaturatedConversion;
     use sp_runtime::TryRuntimeError;
 
@@ -262,12 +294,9 @@ pub mod pallet {
         Balance, BlockNumber, EpochId, ProposalClass,
     };
 
-    /// The in-code storage version of this pallet. Stays 0 while no persistent
-    /// network exists (every environment rebuilds from genesis, which stamps
-    /// the then-current version): a bump without an accompanying
-    /// `OnRuntimeUpgrade` translation would leave stored state undecodable on
-    /// upgrade. The first real bump must land together with its migration.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    /// v1 adds the irreversible bootstrap-ops-funding closure latch. The
+    /// migration initializes it from the already-stored TREASURY phase bit.
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -294,6 +323,15 @@ pub mod pallet {
         /// issuance windows. Wired to `pallet-epoch`'s clock by the runtime
         /// (A8/B1a); a constant in the mock.
         type CurrentEpoch: Get<EpochId>;
+
+        /// Whether binding TREASURY governance is currently armed. Runtime
+        /// behavior does not derive bootstrap authority from this bit; it is
+        /// consulted only to initialize the v0→v1 closure latch conservatively.
+        type TreasuryPhase: TreasuryPhase;
+
+        /// Live fail+recovery runway ceiling for the narrowly-scoped signed
+        /// reserve-probe top-up path.
+        type BootstrapOpsFundingPolicy: BootstrapOpsFundingPolicy;
 
         /// Runtime XCM adapter for the DOT renewal-funding leg (09 §4). The
         /// accounting pallet stays XCM-free; an error rolls the extrinsic back.
@@ -388,9 +426,17 @@ pub mod pallet {
     #[pallet::storage]
     pub type State<T: Config> = StorageValue<_, TreasuryState, ValueQuery>;
 
-    /// Signed account authorized to note Coretime renewal quotes (09 §4).
+    /// Phase≤4 operations multisig: authorized to note Coretime renewal quotes
+    /// and, while the one-way latch is open, to top up only `OpsReserveProbe`
+    /// within the live runway ceiling (08 §1.1; 09 §4).
     #[pallet::storage]
     pub type CoretimeQuoteAuthority<T: Config> = StorageValue<_, T::AccountId, OptionQuery>;
+
+    /// Irreversible closure of the temporary Phase≤4 ops-multisig funding
+    /// authority. The first successful positive `FutarchyTreasury` funding of
+    /// `OpsReserveProbe` sets this; changing the phase bit never reopens it.
+    #[pallet::storage]
+    pub type BootstrapOpsFundingClosed<T: Config> = StorageValue<_, bool, ValueQuery>;
 
     /// Ops-operated account funded on the Coretime chain (09 §4).
     #[pallet::storage]
@@ -437,6 +483,8 @@ pub mod pallet {
         },
         /// A coretime renewal was paid from `ops.coretime` (09 §4, dead-man exempt).
         CoretimeRenewalCalled { line: BudgetLine, amount: Balance },
+        /// One bounded reserve-probe fee envelope was reserved (07 §8, SQ-114).
+        ReserveProbeFeeCharged { line: BudgetLine, amount: Balance },
         /// A class-arming attempt failed the minimum-viable-NAV floor (08 §4.2, loud).
         NavFloorUnmet {
             class: ProposalClass,
@@ -510,13 +558,20 @@ pub mod pallet {
         Overflow,
         /// Signed caller is not the stored Coretime quote authority.
         NotQuoteAuthority,
+        /// The ops multisig tried to fund a non-`ops.*` line.
+        BootstrapOpsLineOnly,
+        /// The one-way governed-funding handover closed bootstrap ops funding.
+        BootstrapOpsFundingClosed,
+        /// A signed reserve-probe top-up was zero, over the exact live runway,
+        /// or the governed runway inputs were unavailable.
+        BootstrapOpsFundingLimit,
         /// No Coretime renewal destination is configured.
         RenewalAccountUnset,
         /// The quote freshness window elapsed.
         QuoteExpired,
         /// A permissionless prune was attempted before expiry.
         QuoteNotExpired,
-        /// `ops.ct_dot_rate` is absent, malformed, or zero.
+        /// The applicable DOT→USDC rate is absent, malformed, or zero.
         RateUnset,
         /// `ops.ct_fee_dot` is absent, malformed, or zero.
         FeeBudgetUnset,
@@ -528,6 +583,18 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        fn on_runtime_upgrade() -> Weight {
+            let on_chain = StorageVersion::get::<Pallet<T>>();
+            if on_chain >= STORAGE_VERSION {
+                return T::DbWeight::get().reads(1);
+            }
+
+            BootstrapOpsFundingClosed::<T>::put(T::TreasuryPhase::treasury_armed());
+            STORAGE_VERSION.put::<Pallet<T>>();
+            // StorageVersion + live PhaseFlags; closure latch + version.
+            T::DbWeight::get().reads_writes(2, 2)
+        }
+
         // 15 §1 try-state coverage: the core validator (bounded collections,
         // per-stream `claimed ≤ total` & `duration > 0`, `Σ vit_lines ≤
         // vit_supply`) plus the FRAME-side solvency identities below. No cranks:
@@ -536,12 +603,48 @@ pub mod pallet {
         fn try_state(_n: BlockNumberFor<T>) -> Result<(), TryRuntimeError> {
             Self::do_try_state()
         }
+
+        #[cfg(feature = "try-runtime")]
+        fn pre_upgrade() -> Result<Vec<u8>, TryRuntimeError> {
+            Ok((
+                StorageVersion::get::<Pallet<T>>() < STORAGE_VERSION,
+                T::TreasuryPhase::treasury_armed(),
+                BootstrapOpsFundingClosed::<T>::get(),
+            )
+                .encode())
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn post_upgrade(state: Vec<u8>) -> Result<(), TryRuntimeError> {
+            let (migrated, treasury_was_armed, closed_before): (bool, bool, bool) =
+                Decode::decode(&mut &state[..]).map_err(|_| {
+                    TryRuntimeError::Other("treasury v1 migration: invalid pre-upgrade state")
+                })?;
+            if migrated {
+                frame_support::ensure!(
+                    StorageVersion::get::<Pallet<T>>() == STORAGE_VERSION,
+                    "treasury v1 migration: storage version was not advanced"
+                );
+                frame_support::ensure!(
+                    BootstrapOpsFundingClosed::<T>::get() == treasury_was_armed,
+                    "treasury v1 migration: closure does not match existing phase"
+                );
+            } else {
+                frame_support::ensure!(
+                    BootstrapOpsFundingClosed::<T>::get() == closed_before,
+                    "treasury v1 migration: current-version latch changed"
+                );
+            }
+            Ok(())
+        }
     }
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         /// `treasury.fund_budget_line(line, amount)` — move `amount` from `MAIN`
-        /// into a budget line (08 §1.1). Origin: `FutarchyTreasury`.
+        /// into a budget line (08 §1.1). Origin: `FutarchyTreasury`, or the
+        /// stored ops multisig for a runway-capped reserve-probe top-up until
+        /// the first successful positive TREASURY reserve-probe funding.
         #[pallet::call_index(0)]
         #[pallet::weight(T::WeightInfo::fund_budget_line())]
         pub fn fund_budget_line(
@@ -549,7 +652,33 @@ pub mod pallet {
             line: BudgetLine,
             amount: Balance,
         ) -> DispatchResult {
-            T::TreasuryOrigin::ensure_origin(origin)?;
+            // Read the complete bootstrap envelope on every branch so the generated
+            // worst-case benchmark (the KEEPER pot-transfer branch) also
+            // covers the signed ops path's proof keys and DB reads.
+            let bootstrap_authority = CoretimeQuoteAuthority::<T>::get();
+            let bootstrap_closed = BootstrapOpsFundingClosed::<T>::get();
+            let bootstrap_ceiling = T::BootstrapOpsFundingPolicy::reserve_probe_ceiling();
+            let treasury_origin = T::TreasuryOrigin::try_origin(origin.clone()).is_ok();
+            if !treasury_origin {
+                let who = ensure_signed(origin)?;
+                ensure!(
+                    bootstrap_authority.as_ref() == Some(&who),
+                    Error::<T>::NotQuoteAuthority
+                );
+                ensure!(
+                    line == BudgetLine::OpsReserveProbe,
+                    Error::<T>::BootstrapOpsLineOnly
+                );
+                ensure!(!bootstrap_closed, Error::<T>::BootstrapOpsFundingClosed);
+                let ceiling = bootstrap_ceiling.ok_or(Error::<T>::BootstrapOpsFundingLimit)?;
+                let next = Self::line_balance(BudgetLine::OpsReserveProbe)
+                    .checked_add(amount)
+                    .ok_or(Error::<T>::BootstrapOpsFundingLimit)?;
+                ensure!(
+                    amount > 0 && next <= ceiling,
+                    Error::<T>::BootstrapOpsFundingLimit
+                );
+            }
             Self::mutate(|t| t.fund_budget_line(Origin::FutarchyTreasury, line, amount))?;
             // Zero retains the core's established bookkeeping/event semantics,
             // but has no custody movement to perform. Skipping the seam cannot
@@ -564,6 +693,11 @@ pub mod pallet {
                 if let Some(payout_line) = payout_line {
                     T::PotFunding::fund(payout_line, amount)?;
                 }
+            }
+            if treasury_origin && line == BudgetLine::OpsReserveProbe && amount > 0 {
+                // The successful binding-governance refill is the irreversible
+                // handover point. Any later disarm cannot recreate authority.
+                BootstrapOpsFundingClosed::<T>::put(true);
             }
             Ok(())
         }
@@ -1037,6 +1171,41 @@ pub mod pallet {
             Self::load().line_balance(line)
         }
 
+        /// Reserve one bounded DOT fee envelope against `ops.reserve_probe`.
+        /// Runtime-internal only: the authenticated probe dispatcher calls this
+        /// immediately before local XCM send validation (07 §8, SQ-114).
+        pub fn charge_reserve_probe_fee(
+            dot_fee: Balance,
+            dot_rate: Balance,
+        ) -> Result<Balance, DispatchError> {
+            let mut charged = 0;
+            Self::mutate(|treasury| {
+                charged = treasury.charge_reserve_probe_fee(dot_fee, dot_rate)?;
+                Ok(())
+            })?;
+            Ok(charged)
+        }
+
+        /// Non-mutating launch check for the complete local fail+recovery
+        /// runway. It shares the exact per-envelope ceil conversion with the
+        /// real debit and performs one bounded line-balance comparison.
+        pub fn reserve_probe_runway_available(
+            dot_fee: Balance,
+            dot_rate: Balance,
+            fail_threshold: u8,
+            recover_threshold: u8,
+        ) -> bool {
+            let Ok(required) = futarchy_treasury_core::reserve_probe_runway_debit(
+                dot_fee,
+                dot_rate,
+                fail_threshold,
+                recover_threshold,
+            ) else {
+                return false;
+            };
+            Self::line_balance(BudgetLine::OpsReserveProbe) >= required
+        }
+
         /// Minted-VIT balance credited to one line by `issue_vit` (08 §2.3).
         pub fn vit_line_balance(line: BudgetLine) -> Balance {
             Self::load().vit_line_balance(line)
@@ -1217,6 +1386,9 @@ pub mod pallet {
                 CoreEvent::CoretimeRenewalCalled { line, amount } => {
                     Event::CoretimeRenewalCalled { line, amount }
                 }
+                CoreEvent::ReserveProbeFeeCharged { line, amount } => {
+                    Event::ReserveProbeFeeCharged { line, amount }
+                }
                 CoreEvent::CoretimeQuoteNoted {
                     period_index,
                     price,
@@ -1242,6 +1414,11 @@ pub mod pallet {
         /// Rebuild the aggregate and run the core validator plus the FRAME-side
         /// solvency identities (15 §1). Public so genesis and tests can call it.
         pub fn do_try_state() -> Result<(), TryRuntimeError> {
+            if StorageVersion::get::<Pallet<T>>() != STORAGE_VERSION {
+                return Err(TryRuntimeError::Other(
+                    "treasury: on-chain storage version is not v1",
+                ));
+            }
             let t = Self::load();
             t.try_state_at(Self::now_u64()).map_err(|_| {
                 TryRuntimeError::Other("treasury core try_state failed (I-7 / solvency bounds)")

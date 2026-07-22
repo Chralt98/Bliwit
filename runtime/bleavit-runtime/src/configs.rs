@@ -78,7 +78,11 @@ parameter_types! {
 // `crate::migrations`. NB: `SingleBlockMigrations` runs inside `on_runtime_upgrade`
 // and creates **no** `pallet-migrations` cursor, so it never engages the
 // `OnlyInherents` multi-block-migration lockdown (09 §3.2).
-type SingleBlockMigrations = (crate::migrations::RetireB16State,);
+type SingleBlockMigrations = (
+    crate::migrations::RetireB16State,
+    crate::migrations::MigrateConstitutionProbeParamsV1,
+    crate::migrations::MigrateOracleReserveProbeV1,
+);
 
 #[derive_impl(frame_system::config_preludes::ParaChainDefaultConfig)]
 impl frame_system::Config for Runtime {
@@ -668,7 +672,7 @@ impl staging_parachain_info::Config for Runtime {}
 pub(crate) mod xcm_config {
     use super::*;
     use staging_xcm::latest::prelude::*;
-    use staging_xcm_builder::{FixedWeightBounds, FrameTransactionalProcessor};
+    use staging_xcm_builder::{FixedWeightBounds, FrameTransactionalProcessor, WithUniqueTopic};
     use staging_xcm_executor::XcmExecutor;
 
     parameter_types! {
@@ -703,8 +707,10 @@ pub(crate) mod xcm_config {
         LocationToAccountId,
         AccountId,
     >;
+    pub type ResponseHandler =
+        bleavit_xcm::probe::ProbeAwareResponseHandler<PolkadotXcm, super::RuntimeOracleProbeSink>;
     pub type Barrier = bleavit_xcm::barrier::BleavitBarrier<
-        PolkadotXcm,
+        ResponseHandler,
         UniversalLocation,
         MaxPrefixes,
         PhaseInflowCaps,
@@ -716,7 +722,15 @@ pub(crate) mod xcm_config {
         PolkadotXcm,
         polkadot_runtime_common::xcm_sender::NoPriceForMessageDelivery<()>,
     >;
-    pub type Router = bleavit_xcm::health::HealthTrackingRouter<RelayRouter, XcmTrafficRecorder>;
+    /// Parent traffic routes by UMP; sibling traffic (including the reserve
+    /// probe to Asset Hub) routes by XCMP. The previous Parent-only sender made
+    /// every sibling probe fail local validation (SQ-380).
+    pub type NetworkRouter = (RelayRouter, XcmpQueue);
+    pub type TopicRouter = WithUniqueTopic<NetworkRouter>;
+    pub type Router = bleavit_xcm::health::HealthTrackingRouter<TopicRouter, XcmTrafficRecorder>;
+    pub type BaseWeigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
+    pub type Weigher =
+        bleavit_xcm::probe::ProbeAwareWeightBounds<BaseWeigher, super::RuntimeProbeCallbackWeight>;
 
     /// Maps the Treasury-class execution origin to the protocol custody
     /// location under which protocol-owned local traps are keyed (09 §6.1).
@@ -757,11 +771,11 @@ pub(crate) mod xcm_config {
         type IsTeleporter = ();
         type UniversalLocation = UniversalLocation;
         type Barrier = Barrier;
-        type Weigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
+        type Weigher = Weigher;
         // Unrefunded fees use payer-adverse disposal until treasury revenue
         // routing is wired; this cannot create an unbacked claim.
         type Trader = bleavit_xcm::trader::GovernedWeightTrader<ConstitutionTraderRates, ()>;
-        type ResponseHandler = PolkadotXcm;
+        type ResponseHandler = ResponseHandler;
         type AssetTrap = PolkadotXcm;
         type SubscriptionService = PolkadotXcm;
         type PalletInstancesInfo = crate::AllPalletsWithSystem;
@@ -856,11 +870,7 @@ impl pallet_xcm::Config for Runtime {
     type XcmExecutor = xcm_config::TrapRecoveryExecutor;
     type XcmTeleportFilter = Nothing;
     type XcmReserveTransferFilter = bleavit_xcm::filter::ReserveTransferFilter;
-    type Weigher = staging_xcm_builder::FixedWeightBounds<
-        xcm_config::UnitWeightCost,
-        RuntimeCall,
-        xcm_config::MaxInstructions,
-    >;
+    type Weigher = xcm_config::Weigher;
     type UniversalLocation = xcm_config::UniversalLocation;
     type RuntimeOrigin = RuntimeOrigin;
     type RuntimeCall = RuntimeCall;
@@ -1279,6 +1289,67 @@ fn default_param(key: ParamKey) -> Option<pallet_constitution::ParamValue> {
 }
 fn live_param(key: ParamKey) -> Option<pallet_constitution::ParamValue> {
     pallet_constitution::Params::<Runtime>::get(key).map(|record| record.value)
+}
+fn live_balance_param(name: &[u8]) -> Option<Balance> {
+    match live_param(pallet_constitution::key16(name)) {
+        Some(pallet_constitution::ParamValue::Balance(value)) => Some(value),
+        _ => None,
+    }
+}
+fn live_u32_param(name: &[u8]) -> Option<u32> {
+    match live_param(pallet_constitution::key16(name)) {
+        Some(pallet_constitution::ParamValue::U32(value)) => Some(value),
+        _ => None,
+    }
+}
+fn live_u8_param(name: &[u8]) -> Option<u8> {
+    match live_param(pallet_constitution::key16(name)) {
+        Some(pallet_constitution::ParamValue::U8(value)) => Some(value),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LiveReserveProbeEnvelope {
+    fee: Balance,
+    rate: Balance,
+    interval: u32,
+    timeout: u32,
+    amount: Balance,
+    fail_threshold: u8,
+    recover_threshold: u8,
+    runway: Balance,
+}
+
+fn live_reserve_probe_envelope() -> Option<LiveReserveProbeEnvelope> {
+    let fee = live_balance_param(b"ops.probe_fee")?;
+    let rate = live_balance_param(b"ops.probe_rate")?;
+    let interval = live_u32_param(b"res.probe_int")?;
+    let timeout = live_u32_param(b"res.probe_to")?;
+    let amount = live_balance_param(b"res.probe_amount")?;
+    let fail_threshold = live_u8_param(b"res.fail_thr")?;
+    let recover_threshold = live_u8_param(b"res.recover_thr")?;
+    if interval == 0 || timeout == 0 || amount == 0 || fail_threshold == 0 || recover_threshold == 0
+    {
+        return None;
+    }
+    let runway = pallet_futarchy_treasury::reserve_probe_runway_debit(
+        fee,
+        rate,
+        fail_threshold,
+        recover_threshold,
+    )
+    .ok()?;
+    Some(LiveReserveProbeEnvelope {
+        fee,
+        rate,
+        interval,
+        timeout,
+        amount,
+        fail_threshold,
+        recover_threshold,
+        runway,
+    })
 }
 pub(crate) fn balance_param(name: &[u8]) -> Balance {
     balance_param_or(name, 0)
@@ -4048,9 +4119,6 @@ impl pallet_oracle::Config for Runtime {
     type AdjudicationOrigin = pallet_origins::EnsureOracleResolution;
     type Reporting = RuntimeReporting;
     type Params = RuntimeOracleParams;
-    // Production remains fail-static until the B4 XCM dispatcher is wired.
-    // Benchmark Wasm uses a live no-op sender so the reserve-probe benchmark
-    // reaches its documented post-commit rebate path.
     type ProbeDispatch = RuntimeProbeDispatch;
     type ProbeTimeoutSink = OracleProbeTimeoutToWelfare;
     type ReserveHealthSink = RuntimeReserveHealthSink;
@@ -4070,6 +4138,102 @@ impl pallet_oracle::ProbeTimeoutSink for OracleProbeTimeoutToWelfare {
     }
 }
 
+/// Authenticated Asset Hub response sink for the production XCM executor
+/// (07 §8, SQ-380). Only the exact outstanding unflagged oracle id is exposed;
+/// `ProbeAwareResponseHandler` additionally authenticates the sibling origin,
+/// querier and high-bit partition before calling this sink.
+pub struct RuntimeOracleProbeSink;
+impl bleavit_xcm::probe::ProbeSink for RuntimeOracleProbeSink {
+    fn pending_query_id() -> Option<u64> {
+        let health = pallet_oracle::ReserveHealth::<Runtime>::get();
+        health.pending_since.map(|_| health.last_query_id)
+    }
+
+    fn probe_result(query_id: u64, passed: bool) -> Weight {
+        // A sibling-write refusal leaves the pending query and all three health
+        // records unchanged inside the oracle's explicit storage layer. The
+        // response then degrades through the ordinary timeout path (G-1).
+        let _ = crate::Oracle::reserve_probe_result(query_id, passed);
+        RuntimeProbeCallbackWeight::get()
+    }
+}
+
+/// Pre-dispatch accounting for one bounded reserve-probe DOT envelope
+/// (07 §8 / 08 §1.1, SQ-114). The XCM dispatcher wraps this debit and local
+/// send validation in one storage layer: insufficient funding refuses the
+/// send, while a locally rejected message rolls the debit back.
+pub struct RuntimeProbeBudget;
+impl bleavit_xcm::probe::ProbeBudget for RuntimeProbeBudget {
+    fn ready_to_arm(params: &pallet_oracle::OracleParams) -> bool {
+        let Some(live) = live_reserve_probe_envelope() else {
+            return false;
+        };
+        // Require the exact live records consumed by the oracle snapshot. A
+        // missing/wrongly-typed row must not arm through the provider's benign
+        // standalone fallback defaults.
+        if live.interval != params.probe_interval
+            || live.timeout != params.probe_timeout
+            || live.amount != params.probe_amount
+            || live.fail_threshold != params.fail_threshold
+            || live.recover_threshold != params.recover_threshold
+        {
+            return false;
+        }
+        crate::FutarchyTreasury::line_balance(pallet_futarchy_treasury::BudgetLine::OpsReserveProbe)
+            >= live.runway
+    }
+
+    fn reserve_fee(probe_amount: Balance) -> Result<Balance, DispatchError> {
+        // Post-arm attempts remain fail-static, but a malformed live envelope
+        // must still refuse the actual debit/send instead of composing the
+        // provider's benign fallback values into an unauthorized program.
+        let live = live_reserve_probe_envelope()
+            .filter(|live| live.amount == probe_amount)
+            .ok_or(DispatchError::Other("reserve probe envelope unavailable"))?;
+        crate::FutarchyTreasury::charge_reserve_probe_fee(live.fee, live.rate)?;
+        Ok(live.fee)
+    }
+}
+
+pub struct RuntimeBootstrapOpsFundingPolicy;
+impl pallet_futarchy_treasury::BootstrapOpsFundingPolicy for RuntimeBootstrapOpsFundingPolicy {
+    fn reserve_probe_ceiling() -> Option<Balance> {
+        live_reserve_probe_envelope().map(|live| live.runway)
+    }
+}
+
+pub struct RuntimeParaId;
+impl Get<u32> for RuntimeParaId {
+    fn get() -> u32 {
+        staging_parachain_info::Pallet::<Runtime>::parachain_id().into()
+    }
+}
+
+pub struct ProbeExecWeightBudget;
+impl Get<Weight> for ProbeExecWeightBudget {
+    fn get() -> Weight {
+        xcm_config::UnitWeightCost::get()
+            .saturating_mul(u64::from(xcm_config::MaxInstructions::get()))
+    }
+}
+
+pub struct ProbeMaxResponseWeight;
+impl Get<Weight> for ProbeMaxResponseWeight {
+    fn get() -> Weight {
+        RuntimeProbeCallbackWeight::get()
+    }
+}
+
+/// Generated worst-case oracle callback plus both authentication reads: the
+/// barrier's `expecting_response` check and the executor's `on_response` route.
+pub struct RuntimeProbeCallbackWeight;
+impl Get<Weight> for RuntimeProbeCallbackWeight {
+    fn get() -> Weight {
+        <crate::weights::pallet_oracle::WeightInfo<Runtime> as pallet_oracle::WeightInfo>::reserve_probe_result()
+            .saturating_add(<Runtime as frame_system::Config>::DbWeight::get().reads(2))
+    }
+}
+
 /// 07 §8 / 08 §1.2 (SQ-205): carry a reserve-health transition to both owners of
 /// its consequences — the constitution's 02 §7.3 bit-7 mirror and the treasury's
 /// fail-static NAV haircut — as one indivisible act.
@@ -4080,10 +4244,6 @@ impl pallet_oracle::ProbeTimeoutSink for OracleProbeTimeoutToWelfare {
 /// to exactly this flag, so a half-applied transition would leave `PhaseFlags`
 /// and NAV disagreeing about solvency (R-7).
 ///
-/// Unused outside `cfg(test)` on purpose — see `RuntimeReserveHealthSink` below
-/// for why production still binds `()`. The `allow` is the marker of that
-/// deliberate gap, not of dead code nobody noticed.
-#[allow(dead_code)]
 pub struct ReserveHealthToConstitutionAndTreasury;
 impl pallet_oracle::ReserveHealthSink for ReserveHealthToConstitutionAndTreasury {
     fn reserve_health_changed(unhealthy: bool) -> frame_support::dispatch::DispatchResult {
@@ -4093,44 +4253,16 @@ impl pallet_oracle::ReserveHealthSink for ReserveHealthToConstitutionAndTreasury
     }
 }
 
-/// **Deliberately unbound in production (SQ-205 / SQ-380).** The seam above is
-/// complete and tested, but binding it live today would arm a permanent,
-/// permissionless treasury halt rather than the 08 §1.2 fail-static haircut:
-///
-/// * `RuntimeProbeDispatch = ()` outside benchmarks (below), so no probe is ever
-///   *sent*; and `XcmConfig::ResponseHandler = PolkadotXcm` rather than
-///   `bleavit_xcm::probe::ProbeAwareResponseHandler`, so no probe response is
-///   ever *routed* — `Pallet::reserve_probe_result` has no production caller.
-/// * `crank_reserve_probe` nevertheless commits `pending_since` regardless of
-///   `ProbeDispatch::live()`, so its timeout folds still latch consecutive
-///   fails. Any signed keeper reaches `ReserveUnhealthy` in ~2 probe intervals.
-/// * Recovery needs `res.recover_threshold` consecutive *passes*, which arrive
-///   only through the unrouted response path. The latch is therefore one-way.
-///
-/// Wired live, that is `spendable_nav = 0` chain-wide, forever, at any keeper's
-/// option. The blocker is the probe feed, not this seam; SQ-380 tracks it and
-/// the release blocker `treasury.reserve_health_unwired` stays open until then.
-/// Tests bind the real sink so the composition above is proven and the
-/// production switch is a one-line change.
-#[cfg(not(test))]
-type RuntimeReserveHealthSink = ();
-#[cfg(test)]
 type RuntimeReserveHealthSink = ReserveHealthToConstitutionAndTreasury;
 
-#[cfg(feature = "runtime-benchmarks")]
-pub struct BenchmarkProbeDispatch;
-#[cfg(feature = "runtime-benchmarks")]
-impl pallet_oracle::ProbeDispatch for BenchmarkProbeDispatch {
-    fn live() -> bool {
-        true
-    }
-
-    fn probe_due(_: u64, _: Balance) {}
-}
-#[cfg(feature = "runtime-benchmarks")]
-type RuntimeProbeDispatch = BenchmarkProbeDispatch;
-#[cfg(not(feature = "runtime-benchmarks"))]
-type RuntimeProbeDispatch = ();
+type RuntimeProbeDispatch = bleavit_xcm::probe::XcmProbeDispatcher<
+    xcm_config::TopicRouter,
+    RuntimeProbeBudget,
+    ProbeExecWeightBudget,
+    ProbeMaxResponseWeight,
+    RuntimeParaId,
+    XcmTrafficRecorder,
+>;
 
 pub struct RegistryParams;
 impl pallet_registry::RegistryParams for RegistryParams {
@@ -4271,6 +4403,10 @@ impl pallet_futarchy_treasury::TreasuryParams for TreasuryParams {
 
     fn coretime_dot_rate() -> Balance {
         balance_param(b"ops.ct_dot_rate")
+    }
+
+    fn reserve_probe_dot_rate() -> Balance {
+        balance_param(b"ops.probe_rate")
     }
 
     fn coretime_fee_dot() -> Balance {
@@ -4459,10 +4595,20 @@ type RuntimeRenewalDispatch = ProductionRenewalDispatch;
 #[cfg(all(not(feature = "runtime-benchmarks"), test))]
 type RuntimeRenewalDispatch = TestRenewalDispatch;
 
+pub struct RuntimeTreasuryPhase;
+impl pallet_futarchy_treasury::TreasuryPhase for RuntimeTreasuryPhase {
+    fn treasury_armed() -> bool {
+        crate::Constitution::phase_flags() & pallet_constitution::PhaseFlagsValue::TREASURY_ARMED
+            != 0
+    }
+}
+
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
     type Params = TreasuryParams;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
+    type TreasuryPhase = RuntimeTreasuryPhase;
+    type BootstrapOpsFundingPolicy = RuntimeBootstrapOpsFundingPolicy;
     type RenewalDispatch = RuntimeRenewalDispatch;
     type RebatePayout = TreasuryRebatePayout;
     type PotFunding = TreasuryPotFunding;
@@ -6022,6 +6168,22 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
 
     fn adjudication_origin() -> RuntimeOrigin {
         pallet_origins::Origin::OracleResolution.into()
+    }
+    fn prime_reserve_probe() {
+        ParachainSystem::open_outbound_hrmp_channel_for_benchmarks_or_tests(
+            cumulus_primitives_core::ParaId::from(chain_identity::ASSET_HUB_PARA_ID),
+        );
+        let Some(envelope) = live_reserve_probe_envelope() else {
+            return;
+        };
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.main_usdc = state.main_usdc.saturating_add(envelope.runway);
+        });
+        let _ = crate::FutarchyTreasury::fund_budget_line(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            pallet_futarchy_treasury::BudgetLine::OpsReserveProbe,
+            envelope.runway,
+        );
     }
     fn prime_reporting(component: u16, epoch: EpochId, version: u16) {
         pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = epoch);

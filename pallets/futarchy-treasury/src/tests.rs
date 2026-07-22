@@ -5,7 +5,10 @@
 
 use crate::mock::*;
 use crate::{Error, Event, PayoutLine};
-use frame_support::{assert_err, assert_noop, assert_ok};
+use frame_support::{
+    assert_err, assert_noop, assert_ok,
+    traits::{Hooks, StorageVersion},
+};
 use futarchy_primitives::keeper::CrankClass;
 use futarchy_treasury_core::{
     AssetKind, BudgetLine, Stream, Treasury as CoreTreasury, DAYS_365_BLOCKS, DAY_BLOCKS,
@@ -55,7 +58,253 @@ fn funded_ext() -> sp_io::TestExternalities {
     ext
 }
 
+fn probe_funded_ext() -> sp_io::TestExternalities {
+    let mut ext = funded_ext();
+    ext.execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::OpsReserveProbe,
+            1_000 * USDC,
+        ));
+    });
+    ext
+}
+
+#[test]
+fn reserve_probe_internal_charge_persists_exact_line_delta_and_event() {
+    probe_funded_ext().execute_with(|| {
+        let before = Treasury::line_balance(BudgetLine::OpsReserveProbe);
+        System::reset_events();
+
+        assert_eq!(
+            Treasury::charge_reserve_probe_fee(101, 10_000_000_000),
+            Ok(101)
+        );
+        assert_eq!(
+            Treasury::line_balance(BudgetLine::OpsReserveProbe),
+            before - 101
+        );
+        assert!(System::events().iter().any(|record| {
+            matches!(
+                &record.event,
+                RuntimeEvent::Treasury(Event::ReserveProbeFeeCharged {
+                    line: BudgetLine::OpsReserveProbe,
+                    amount: 101,
+                })
+            )
+        }));
+    });
+}
+
+#[test]
+fn reserve_probe_internal_charge_errors_are_storage_and_event_atomic() {
+    probe_funded_ext().execute_with(|| {
+        for (fee, rate) in [(0, 1), (1, 0), (u128::MAX, 2)] {
+            System::reset_events();
+            let before = crate::State::<Test>::get();
+            assert!(Treasury::charge_reserve_probe_fee(fee, rate).is_err());
+            assert_eq!(crate::State::<Test>::get(), before);
+            assert!(System::events().is_empty());
+        }
+    });
+}
+
+#[test]
+fn ops_multisig_is_runway_capped_and_treasury_refill_closes_it_irreversibly() {
+    new_test_ext_with(crate::GenesisConfig::<Test> {
+        main_usdc: 1_000 * USDC,
+        coretime_quote_authority: Some(coretime_quote_authority()),
+        coretime_renewal_account: Some([44; 32]),
+        ..Default::default()
+    })
+    .execute_with(|| {
+        let ops = RuntimeOrigin::signed(coretime_quote_authority());
+        let ceiling = futarchy_treasury_core::reserve_probe_runway_debit(
+            ReserveProbeFeeDot::get(),
+            ReserveProbeDotRate::get(),
+            ReserveProbeFailThreshold::get(),
+            ReserveProbeRecoverThreshold::get(),
+        )
+        .expect("valid mock runway");
+        assert_ok!(Treasury::fund_budget_line(
+            ops.clone(),
+            BudgetLine::OpsReserveProbe,
+            ceiling - 1,
+        ));
+        assert_eq!(
+            Treasury::line_balance(BudgetLine::OpsReserveProbe),
+            ceiling - 1
+        );
+
+        for line in [
+            BudgetLine::OpsCoretime,
+            BudgetLine::OpsMonitoring,
+            BudgetLine::Keeper,
+        ] {
+            assert_noop!(
+                Treasury::fund_budget_line(ops.clone(), line, 1),
+                Error::<Test>::BootstrapOpsLineOnly
+            );
+        }
+        assert_noop!(
+            Treasury::fund_budget_line(
+                RuntimeOrigin::signed(acc(77)),
+                BudgetLine::OpsMonitoring,
+                USDC,
+            ),
+            Error::<Test>::NotQuoteAuthority
+        );
+
+        // Above-ceiling attempts are exact no-ops; a partial final top-up to
+        // the ceiling remains live even after TREASURY arms.
+        TreasuryArmedValue::set(true);
+        let before = crate::State::<Test>::get();
+        assert_noop!(
+            Treasury::fund_budget_line(ops.clone(), BudgetLine::OpsReserveProbe, 2),
+            Error::<Test>::BootstrapOpsFundingLimit
+        );
+        assert_eq!(crate::State::<Test>::get(), before);
+        assert!(!crate::BootstrapOpsFundingClosed::<Test>::get());
+        assert_ok!(Treasury::fund_budget_line(
+            ops.clone(),
+            BudgetLine::OpsReserveProbe,
+            1,
+        ));
+        assert_eq!(Treasury::line_balance(BudgetLine::OpsReserveProbe), ceiling);
+        assert!(!crate::BootstrapOpsFundingClosed::<Test>::get());
+
+        // Zero and other-line binding-governance calls do not perform the
+        // reserve-probe handover.
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::OpsReserveProbe,
+            0,
+        ));
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::OpsMonitoring,
+            1,
+        ));
+        assert!(!crate::BootstrapOpsFundingClosed::<Test>::get());
+
+        // A failed positive reserve funding also leaves the latch open.
+        let state = crate::State::<Test>::get();
+        assert!(Treasury::fund_budget_line(to(), BudgetLine::OpsReserveProbe, u128::MAX,).is_err());
+        assert_eq!(crate::State::<Test>::get(), state);
+        assert!(!crate::BootstrapOpsFundingClosed::<Test>::get());
+
+        // The first successful positive binding-governance reserve refill is
+        // the irreversible closure point.
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::OpsReserveProbe,
+            1,
+        ));
+        assert!(crate::BootstrapOpsFundingClosed::<Test>::get());
+        TreasuryArmedValue::set(false);
+        assert_noop!(
+            Treasury::fund_budget_line(ops, BudgetLine::OpsReserveProbe, 1),
+            Error::<Test>::BootstrapOpsFundingClosed
+        );
+    });
+}
+
+#[test]
+fn ops_multisig_zero_and_checked_add_overflow_are_exact_noops() {
+    new_test_ext_with(crate::GenesisConfig::<Test> {
+        main_usdc: 1_000 * USDC,
+        coretime_quote_authority: Some(coretime_quote_authority()),
+        coretime_renewal_account: Some([44; 32]),
+        ..Default::default()
+    })
+    .execute_with(|| {
+        let ops = RuntimeOrigin::signed(coretime_quote_authority());
+        let before_zero = crate::State::<Test>::get();
+        assert_noop!(
+            Treasury::fund_budget_line(ops.clone(), BudgetLine::OpsReserveProbe, 0),
+            Error::<Test>::BootstrapOpsFundingLimit
+        );
+        assert_eq!(crate::State::<Test>::get(), before_zero);
+        assert!(!crate::BootstrapOpsFundingClosed::<Test>::get());
+
+        // Corrupt only the line balance to reach the arithmetic boundary that
+        // an ordinary funded state can never approach under the small runway.
+        crate::State::<Test>::mutate(|state| {
+            state
+                .lines
+                .try_push((BudgetLine::OpsReserveProbe, u128::MAX))
+                .expect("fixture has budget-line capacity");
+        });
+        let before_overflow = crate::State::<Test>::get();
+        assert_noop!(
+            Treasury::fund_budget_line(ops, BudgetLine::OpsReserveProbe, 1),
+            Error::<Test>::BootstrapOpsFundingLimit
+        );
+        assert_eq!(crate::State::<Test>::get(), before_overflow);
+        assert!(!crate::BootstrapOpsFundingClosed::<Test>::get());
+    });
+}
+
 // ---- genesis (08 §2.1) ------------------------------------------------------
+
+#[test]
+fn storage_v1_initializes_bootstrap_closure_from_both_existing_phase_states() {
+    for treasury_armed in [false, true] {
+        new_test_ext().execute_with(|| {
+            StorageVersion::new(0).put::<Treasury>();
+            TreasuryArmedValue::set(treasury_armed);
+            crate::BootstrapOpsFundingClosed::<Test>::put(!treasury_armed);
+
+            let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+
+            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(1));
+            assert_eq!(
+                crate::BootstrapOpsFundingClosed::<Test>::get(),
+                treasury_armed,
+            );
+            if treasury_armed {
+                TreasuryArmedValue::set(false);
+                assert!(crate::BootstrapOpsFundingClosed::<Test>::get());
+            }
+        });
+    }
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn storage_v1_try_runtime_checks_phase_derived_bootstrap_closure() {
+    for treasury_armed in [false, true] {
+        new_test_ext().execute_with(|| {
+            StorageVersion::new(0).put::<Treasury>();
+            TreasuryArmedValue::set(treasury_armed);
+            crate::BootstrapOpsFundingClosed::<Test>::put(!treasury_armed);
+            let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
+            let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+            <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
+            assert_eq!(
+                crate::BootstrapOpsFundingClosed::<Test>::get(),
+                treasury_armed,
+            );
+        });
+    }
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn storage_v1_try_runtime_current_version_is_an_idempotent_latch_noop() {
+    new_test_ext().execute_with(|| {
+        TreasuryArmedValue::set(false);
+        crate::BootstrapOpsFundingClosed::<Test>::put(true);
+
+        for _ in 0..2 {
+            let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
+            let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+            <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
+            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(1));
+            assert!(crate::BootstrapOpsFundingClosed::<Test>::get());
+        }
+    });
+}
 
 #[test]
 fn default_genesis_is_empty_and_solvent() {
@@ -80,10 +329,6 @@ fn outflow_calls_admit_only_the_treasury_origin() {
                 sp_runtime::DispatchError::BadOrigin
             );
             assert_noop!(
-                Treasury::fund_budget_line(bad.clone(), BudgetLine::Keeper, 1),
-                sp_runtime::DispatchError::BadOrigin
-            );
-            assert_noop!(
                 Treasury::open_stream(bad.clone(), BudgetLine::Rewards, acc(1), 1, 0, 1),
                 sp_runtime::DispatchError::BadOrigin
             );
@@ -100,6 +345,14 @@ fn outflow_calls_admit_only_the_treasury_origin() {
                 sp_runtime::DispatchError::BadOrigin
             );
         }
+        assert_noop!(
+            Treasury::fund_budget_line(RuntimeOrigin::signed(nobody()), BudgetLine::Keeper, 1),
+            Error::<Test>::NotQuoteAuthority
+        );
+        assert_noop!(
+            Treasury::fund_budget_line(RuntimeOrigin::root(), BudgetLine::Keeper, 1),
+            sp_runtime::DispatchError::BadOrigin
+        );
     });
 }
 
@@ -670,6 +923,10 @@ mod renewal_dispatch_seam {
             10_000_000_000
         }
 
+        fn reserve_probe_dot_rate() -> u128 {
+            10_000_000_000
+        }
+
         fn coretime_fee_dot() -> u128 {
             100
         }
@@ -708,6 +965,8 @@ mod renewal_dispatch_seam {
         type TreasuryOrigin = frame_system::EnsureRoot<AccountId32>;
         type Params = DispatchParams;
         type CurrentEpoch = CurrentEpoch;
+        type TreasuryPhase = ();
+        type BootstrapOpsFundingPolicy = ();
         type RenewalDispatch = RecordingRenewalDispatch;
         type RebatePayout = ();
         type PotFunding = ();
@@ -1523,6 +1782,20 @@ fn try_state_reconciles_rebate_lines_against_real_custody_pots() {
 
         set_rebate_pot_balance(PayoutLine::Oracle, 30 * USDC);
         assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
+#[test]
+fn try_state_requires_v1_and_allows_armed_open_handover() {
+    new_test_ext().execute_with(|| {
+        TreasuryArmedValue::set(true);
+        crate::BootstrapOpsFundingClosed::<Test>::put(false);
+        assert_ok!(Treasury::do_try_state());
+
+        StorageVersion::new(0).put::<Treasury>();
+        assert!(Treasury::do_try_state().is_err());
+        StorageVersion::new(1).put::<Treasury>();
+        assert_ok!(Treasury::do_try_state());
     });
 }
 

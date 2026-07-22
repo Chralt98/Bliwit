@@ -621,6 +621,12 @@ genesis = false
 reason = "13 §1: unseeded operating-budget value — [VERIFY]-gated on Phase-2/3 operations planning; it has no dispatch-path limit of its own."
 
 [[entry]]
+key = "ops.reserve_prb"
+class = "value"
+genesis = false
+reason = "13 §1 / 07 §8: unseeded USDC-denominated reserve-probe operating line; its consumer debits before every send and refuses when the line is insufficient."
+
+[[entry]]
 key = "ops.ct_dot_rate"
 class = "param-bounds"
 genesis = true
@@ -631,6 +637,18 @@ key = "ops.ct_fee_dot"
 class = "param-bounds"
 genesis = true
 reason = "13 §1 / 09 §4: governed per-renewal DOT fee budget; amendment bounds are covered by the generated per-key suite, and treasury tests prove the live value participates in the exact debit."
+
+[[entry]]
+key = "ops.probe_fee"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / 07 §8: governed per-probe DOT fee envelope; amendment bounds are covered by the generated per-key suite, and probe tests bind it to the pre-dispatch line debit and exact XCM holding."
+
+[[entry]]
+key = "ops.probe_rate"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / 07 §8: dedicated governed µUSDC-per-whole-DOT conversion rate for the ops.reserve_probe line debit; amendment bounds are covered by the generated per-key suite, and treasury/probe tests prove live reads plus claimant-adverse ceiling conversion."
 
 [[entry]]
 key = "ops.ct_quote_ttl"

@@ -1,7 +1,7 @@
 # Data surface, canonical naming & UI-visible parameter values
 
 > **DERIVED, NON-NORMATIVE.** Refreshed 2026-07-22 from the frozen spec —
-> doc 02 (integration contract, frozen, v7) and doc 13 (the single home of parameter values) —
+> doc 02 (integration contract, frozen, v8) and doc 13 (the single home of parameter values) —
 > for upload to Claude Design. Where this file and the spec disagree, the spec wins. All names
 > below are CANONICAL: use these exact spellings in UI copy, labels and mock data. Values
 > marked [VERIFY] are unresolved in the spec — never invent them.
@@ -305,7 +305,8 @@ live. For mock data these are the correct realistic values.
 | Adjudication track | 60% approval / 10% support / 7-day, pre-cohort conviction snapshot | oracle-dispute referendum page |
 | Slashing split | 40% challenger / 60% INSURANCE; reporter −50% on 2nd false report, ejected on 3rd | challenge-reward preview; `offenses` badge |
 | `reg.bond_incident` / `reg.bond_milestone` | 5,000 / 2,500 USDC | registry filing forms |
-| Reserve probe | daily, 1 h timeout, 0.10 USDC; unhealthy after 2 failures, recovered after 3 passes | reserve-health tile |
+| Reserve probe | daily, 1 h timeout, 0.10 USDC; unhealthy after 2 failures, recovered after 3 passes; first arm opens the first attempt and establishes cadence with zero pre-arm misses; unarmed zero health is not launch-ready | reserve-health tile |
+| `ops.probe_fee_dot` / `ops.probe_dot_rate` | 0.5 DOT envelope / 5 USDC per DOT placeholders, both **[VERIFY]** before Phase 3; local `ops.reserve_probe` credit must cover fail + recovery thresholds (5 full debits at genesis); the remote sovereign account separately holds probe USDC plus 5 full DOT envelopes and a refill margin (the local line provisions neither asset; no JIT withdrawal); live evidence includes ≥1 timely authenticated pass | operator reserve-health diagnostics; show arm state, pass evidence, local credit, remote USDC and remote DOT as separate readiness checks; never present any as calibrated while `[VERIFY]` remains |
 
 ### B8. Ledger, positions, redemptions (13 §1–§4)
 
