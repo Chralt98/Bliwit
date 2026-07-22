@@ -13,7 +13,6 @@ use crate::{Runtime, RuntimeCall};
 pub(crate) enum ConditionalKind {
     ParamKeyClass,
     PendingUpgrade,
-    AmendRegistryScope,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -202,8 +201,10 @@ inventory! {
     "Session" { leaf public => ["set_keys", "purge_keys"]; }
     "Constitution" {
         conditional ParamKeyClass => ["set_param"];
-        conditional AmendRegistryScope => ["amend_registry"];
-        leaf meta => ["set_capability"];
+        // SQ-150 (ruled 2026-07-21): amend_registry is a plain FutarchyMeta
+        // leaf — non-kernel rows META-only, kernel rows immutable at dispatch —
+        // no longer a contested scope conditional.
+        leaf meta => ["set_capability", "amend_registry"];
         leaf public => ["set_phase_flag"];
         leaf values => ["set_release_channel"];
     }

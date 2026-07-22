@@ -384,16 +384,20 @@ pub mod pallet {
 
         /// `constitution.amend_registry` — amend one key's governance
         /// metadata (bounds / max-Δ / cooldown), never its value, class or
-        /// key set (06 §2.1 constitution track; 06 §3.2 row 4; 13 rule 2/7).
+        /// key set (06 §3.2 row 4; 13 rule 7).
         ///
-        /// Origins: the class-matched constitution/entrenched track, internal
-        /// bare `ConstitutionalValues`, or `FutarchyMeta` (META-amendable
-        /// within meta-bounds).
-        /// Kernel-bounded rows keep their bounds genesis-fixed; every
-        /// amendment must keep `min ≤ value ≤ max`, preserve the value kind,
-        /// and keep `cooldown ≤ 8` epochs. Registry rows are never inserted
-        /// or removed on-chain — new keys arrive with runtime upgrades
-        /// (13 §4: the key set is genesis-fixed).
+        /// Origin: **`FutarchyMeta` only** (SQ-150 ruling 2026-07-21) — non-kernel
+        /// rows are META-amendable within meta-bounds; the former
+        /// `ConstitutionalValues`/track paths are removed so no values path can
+        /// retune metadata the classifier already treats as a belief-side call.
+        /// Kernel-bounded rows are **immutable**: `checked_amend` refuses them
+        /// with `KernelBoundImmutable` even under `FutarchyMeta`, so the two
+        /// error surfaces are `BadOrigin` (any non-META origin) and
+        /// `KernelBoundImmutable` (META on a kernel row). Every accepted
+        /// amendment keeps `min ≤ value ≤ max`, preserves the value kind, and
+        /// keeps `cooldown ≤ 8` epochs. Registry rows are never inserted or
+        /// removed on-chain — new keys arrive with runtime upgrades (13 §4: the
+        /// key set is genesis-fixed).
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::amend_registry())]
         pub fn amend_registry(

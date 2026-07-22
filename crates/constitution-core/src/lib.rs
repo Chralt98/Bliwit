@@ -607,18 +607,22 @@ impl ConstitutionOrigin {
     pub const fn can_set_capability(self) -> bool {
         matches!(self, Self::FutarchyMeta)
     }
-    /// 06 §2.1 (`constitution` track) and 06 §3.2 row 4 / 13 rule 2: registry
-    /// amendments are values business (`ConstitutionalValues`) and
-    /// META-amendable within meta-bounds (`FutarchyMeta`).
-    pub const fn can_amend_registry(self, class: ParamClass) -> bool {
-        matches!(self, Self::FutarchyMeta | Self::ConstitutionalValues)
-            || matches!(
-                (self, class),
-                (Self::ConstitutionTrack, ParamClass::Const)
-                    | (Self::ConstitutionTrack, ParamClass::Meta)
-                    | (Self::ConstitutionTrack, ParamClass::MetaAndValues)
-                    | (Self::EntrenchedTrack, ParamClass::Entrenched)
-            )
+    /// 06 §3.2 row 4 / 13 rule 7 (SQ-150 ruling 2026-07-21): registry
+    /// amendments are **`FutarchyMeta`-only**. Non-kernel rows are amended by
+    /// META within the compile-time meta-bounds; kernel-bounded rows are
+    /// **immutable** — [`ParamRecord::checked_amend`] refuses them with
+    /// `KernelBoundImmutable` even for the one origin that clears this gate, so
+    /// no origin can move a kernel floor/ceiling. The former dual-authority
+    /// reading (a `ConstitutionalValues`/`constitution`-track path, 06 §2.1 as
+    /// superseded) is removed: it let a values referendum retune META metadata
+    /// while the classifier simultaneously projected the same call as
+    /// FutarchyMeta (the I-8 crossing S5 pinned), and minimising the authority
+    /// cannot weaken a defence through an ambiguous values path (R-7).
+    ///
+    /// The `class` argument is retained for the authority-matrix signature and
+    /// for future per-class scoping; the resolved policy does not branch on it.
+    pub const fn can_amend_registry(self, _class: ParamClass) -> bool {
+        matches!(self, Self::FutarchyMeta)
     }
     /// 02 §12: the release channel's writers are exhaustive — (a) the execution
     /// guard's runtime-internal path (not origin-mediated) and (b) the scoped
@@ -1918,6 +1922,38 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             true
         ),
         row(
+            // SQ-117 (ruled 2026-07-21): genesis-seeded from the 08 §6.2 crank-
+            // fee basis so B9's rebate pipeline stops paying zero. Default 3×,
+            // hard min 1×, hard max 10× the SAME basis (13 §1), so the whole row
+            // scales with one number. The basis is the [VERIFY] placeholder of
+            // 08 §6.2 (0.03 USDC); the seed is replaced — rounded DOWN against
+            // the claimant (R-7) — once launch `fee.vit_usdc_rate` fixes it.
+            b"keeper.rebate",
+            ParamValue::Balance(kernel::KEEPER_REBATE_FEE_BASIS_USDC.saturating_mul(3)),
+            ParamValue::Balance(kernel::KEEPER_REBATE_FEE_BASIS_USDC),
+            ParamValue::Balance(kernel::KEEPER_REBATE_FEE_BASIS_USDC.saturating_mul(10)),
+            None,
+            1,
+            ParamClass::Param,
+            false
+        ),
+        row(
+            // SQ-158 (owner A13): a distinct 13 §1 key so the values layer can
+            // raise the ProcessHold merit floor independently of B_1 (07 §12,
+            // default equality). Floor `orc.bond_floor`, ceiling `Balance::MAX`,
+            // factor-2 step, 2-epoch cooldown, META. The consumer composes
+            // `max(live key, frozen B_1)` so a lowering can never make
+            // censorship cheaper than the game's own round-1 bond (R-7).
+            b"dis.merit_min",
+            ParamValue::Balance(10_000_000_000),
+            ParamValue::Balance(10_000_000_000),
+            ParamValue::Balance(u128::MAX),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Meta,
+            false
+        ),
+        row(
             b"ops.ct_dot_rate",
             ParamValue::Balance(5_000_000),
             ParamValue::Balance(500_000),
@@ -1988,10 +2024,16 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             false
         ),
         row(
+            // SQ-36 (ruled 2026-07-21): frozen key — max == min == default.
+            // The ledger charges/refunds/reconciles DepositsHeld at the LIVE
+            // unit and 03 §10 gives no hook to rebase held deposits, so a raise
+            // would over-refund old entries out of pooled collateral (L-2/L-6).
+            // Per-entry vintages (the only tunable-preserving design) need an
+            // unbounded migration and are refused (R-7); see 13 §2 freeze note.
             b"ledger.pos_dep",
             ParamValue::Balance(100_000),
             ParamValue::Balance(100_000),
-            ParamValue::Balance(1_000_000),
+            ParamValue::Balance(100_000),
             None,
             2,
             ParamClass::Meta,

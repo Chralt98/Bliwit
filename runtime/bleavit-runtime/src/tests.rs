@@ -3944,8 +3944,13 @@ fn treasury_rebate_payout_moves_real_usdc_from_the_selected_pot() {
     use pallet_futarchy_treasury::{PayoutLine, RebatePayout, TreasuryParams as _};
 
     development_ext().execute_with(|| {
-        // `keeper.rebate` is deliberately unseeded until B5 calibration.
-        assert_eq!(crate::configs::TreasuryParams::keeper_rebate(), 0);
+        // SQ-117: `keeper.rebate` is now genesis-seeded from the 08 §6.2 fee
+        // basis at 3× (value still [VERIFY] pending launch fee.vit_usdc_rate),
+        // so the rebate pipeline reads a positive amount rather than zero.
+        assert_eq!(
+            crate::configs::TreasuryParams::keeper_rebate(),
+            kernel::KEEPER_REBATE_FEE_BASIS_USDC.saturating_mul(3)
+        );
         assert_eq!(
             crate::configs::TreasuryParams::keeper_budget_epoch(),
             12_000 * currency::USDC
@@ -13515,7 +13520,11 @@ fn undeciding_timeout_covers_the_longest_track_prepare_period() {
 }
 
 #[test]
-fn constitution_track_cannot_amend_entrenched_class_but_entrenched_track_can() {
+fn entrenched_class_set_param_is_track_scoped_but_amend_registry_is_meta_only() {
+    // `set_param` on an entrenched-class key stays direction-/track-scoped
+    // (constitution cannot, entrenched can), but SQ-150 (ruled 2026-07-21) makes
+    // `amend_registry` FutarchyMeta-only: NEITHER the constitution nor the
+    // entrenched track may amend a registry row's governance metadata anymore.
     development_ext().execute_with(|| {
         let key = pallet_constitution::key16(b"att.bond");
         let record = pallet_constitution::Params::<Runtime>::get(key);
@@ -13524,15 +13533,18 @@ fn constitution_track_cannot_amend_entrenched_class_but_entrenched_track_can() {
             return;
         };
         assert_eq!(record.class, pallet_constitution::ParamClass::Entrenched);
+        assert!(!record.kernel_bounded, "att.bond is a non-kernel row");
         pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
             clock.index = clock.index.saturating_add(record.cooldown_epochs)
         });
 
         let constitution_origin: RuntimeOrigin = crate::track_origins::Origin::Constitution.into();
         let entrenched_origin: RuntimeOrigin = crate::track_origins::Origin::Entrenched.into();
+        let meta_origin: RuntimeOrigin = pallet_origins::Origin::FutarchyMeta.into();
         let next = pallet_constitution::ParamValue::Balance(
             record.value.as_u128().saturating_add(currency::VIT),
         );
+        // set_param authority is unchanged (entrenched-class → entrenched track).
         assert_noop!(
             Constitution::set_param(constitution_origin.clone(), key, next),
             DispatchError::BadOrigin
@@ -13543,6 +13555,7 @@ fn constitution_track_cannot_amend_entrenched_class_but_entrenched_track_can() {
             next
         ));
 
+        // amend_registry: both values tracks are now refused; only META amends.
         assert_noop!(
             Constitution::amend_registry(
                 constitution_origin,
@@ -13554,8 +13567,19 @@ fn constitution_track_cannot_amend_entrenched_class_but_entrenched_track_can() {
             ),
             DispatchError::BadOrigin
         );
+        assert_noop!(
+            Constitution::amend_registry(
+                entrenched_origin,
+                key,
+                record.min,
+                record.max,
+                record.max_delta,
+                record.cooldown_epochs,
+            ),
+            DispatchError::BadOrigin
+        );
         assert_ok!(Constitution::amend_registry(
-            entrenched_origin,
+            meta_origin,
             key,
             record.min,
             record.max,

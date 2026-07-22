@@ -1068,6 +1068,17 @@ pub mod kernel {
     pub const REAP_BATCH: u32 = 100;
     pub const SETTLE_COHORT_MAX_ITEMS: u32 = 100;
     pub const KEEPER_BUDGET_EPOCH_FLOOR_USDC: u128 = 6_000_000_000;
+    /// SQ-117 (ruled 2026-07-21): the benchmark **fee basis** the launch
+    /// `keeper.rebate` seed is calibrated against — the sanctioned-crank fee
+    /// cost from which 13 §1 expresses the row (default `3×`, hard min `1×`,
+    /// hard max `10×`). This is the **[VERIFY]** placeholder of [08](../../docs/architecture/08-treasury-and-economics.md)
+    /// §6.2 (`≈ 0.03 USDC`, 30,000 µUSDC): a conservative pre-launch default,
+    /// **not** a calibrated number. It is replaced at benchmark time once the
+    /// launch `fee.vit_usdc_rate` fixes the real per-crank fee; the seed is
+    /// then rounded **down** to µUSDC against the claimant (R-7). Until then the
+    /// row is genesis-seeded (so B9's rebate pipeline stops paying zero) but its
+    /// value carries the 13 §1 `[VERIFY fee basis at benchmark time]` tag.
+    pub const KEEPER_REBATE_FEE_BASIS_USDC: u128 = 30_000;
 }
 
 /// Epoch phase-start offsets as fractions of `epoch.length` (13 §3.1). The pairs

@@ -439,9 +439,9 @@ reason = "13 §1 / rule 7: amendment bounds covered by the generated per-key sui
 
 [[entry]]
 key = "dis.merit_min"
-class = "value"
-genesis = false
-reason = "13 §1: derived B_1(c,m) at the dispute engine; intentionally unseeded and has no independent dispatch limit."
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: genesis-seeded as an independent META lever (SQ-158 ruling 2026-07-21), floor orc.bond_floor / ceiling Balance::MAX / factor-2 step; amendment bounds covered by the generated per-key suite; the dispute consumer (RuntimeEpochOracle::any_open_dispute_touching) binds the effective floor max(live key, frozen B_1)."
 
 [[entry]]
 key = "wt.quorum"
@@ -512,9 +512,9 @@ reason = "13 §1: guardian bond/allowance row is scope-K and enforced by pallet-
 
 [[entry]]
 key = "keeper.rebate"
-class = "value"
-genesis = false
-reason = "13 §1: unseeded economic value — [VERIFY]-gated on benchmarked fee basis; it has no dispatch-path limit of its own."
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: genesis-seeded from the 08 §6.2 fee basis (SQ-117 ruling 2026-07-21) so B9's rebate pipeline stops paying zero; amendment bounds (1x/10x the basis) covered by the generated per-key set_param/amend_registry suite; the runtime consumer reads live Params. The default value still carries a 13 §1 [VERIFY] tag pending launch benchmarking, which does not affect its dispatch-limit classification."
 
 [[entry]]
 key = "keeper.budget"
@@ -885,6 +885,11 @@ reason = "13 §2: rationale/values for §1 kernel-bounded rows; the generated am
 key = "keeper-budget-floor-note"
 class = "value"
 reason = "13 §2: safety rationale for keeper.budget’s §1 floor, not a separate dispatch limit."
+
+[[entry]]
+key = "position-deposit-freeze-note"
+class = "value"
+reason = "13 §2 (SQ-36): safety rationale for ledger.pos_dep’s max = min freeze, not a separate dispatch limit."
 
 [[entry]]
 key = "IntakeQueue"

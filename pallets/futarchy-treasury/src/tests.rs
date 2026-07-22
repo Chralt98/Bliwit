@@ -429,8 +429,9 @@ fn absent_keeper_rebate_param_is_a_structural_noop() {
         System::reset_events();
         let before = Treasury::treasury();
 
-        // Mock default mirrors production: the formula-default `keeper.rebate`
-        // row is absent until B5, so the adapter supplies zero.
+        // The mock holds `keeper.rebate` at 0 to exercise the fail-soft
+        // no-payout path; SQ-117 seeds a positive value in the runtime, but a
+        // zero rebate must still be a safe no-op (no outflow, no payout event).
         assert_eq!(KeeperRebate::get(), 0);
         crate::Pallet::<Test>::do_keeper_rebate(&acc(7), CrankClass::DecisionCritical);
 

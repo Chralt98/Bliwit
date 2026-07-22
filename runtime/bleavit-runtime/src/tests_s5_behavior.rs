@@ -850,33 +850,18 @@ fn every_non_public_inventory_row_is_behaviorally_exercised() {
         ));
     });
 
-    // `amend_registry` is the contested SQ-150 conditional: 06 §2.1, 06 §3.2,
-    // and 13 rule 7 currently support incompatible policies. Its alternative
-    // behavioral pins remain isolated in the ignored regressions below.
-    let contested_scope = (String::from("Constitution"), String::from("amend_registry"));
-
+    // SQ-150 (ruled 2026-07-21): `amend_registry` is now an ordinary
+    // FutarchyMeta leaf, exercised by the state-independent loop above like any
+    // other non-conditional row — no longer a contested scope carve-out.
     let expected: BTreeSet<_> = INVENTORY
         .iter()
-        .filter(|row| {
-            !matches!(
-                row.expected,
-                ExpectedTreatment::Leaf(CallDomain::Public)
-                    | ExpectedTreatment::Conditional(ConditionalKind::AmendRegistryScope)
-            )
-        })
+        .filter(|row| !matches!(row.expected, ExpectedTreatment::Leaf(CallDomain::Public)))
         .map(|row| (String::from(row.pallet), String::from(row.call)))
         .collect();
     assert_eq!(
         covered, expected,
         "a non-Public inventory row lacks a behavioral pin"
     );
-    assert!(INVENTORY.iter().any(|row| {
-        (String::from(row.pallet), String::from(row.call)) == contested_scope
-            && matches!(
-                row.expected,
-                ExpectedTreatment::Conditional(ConditionalKind::AmendRegistryScope)
-            )
-    }));
 }
 
 fn wrapper_is_unconditionally_denied(shape: WrapperShape) -> bool {
@@ -1068,68 +1053,142 @@ fn privileged_wrappers_follow_same_origin_recursion_and_proxyish_denial() {
     });
 }
 
+/// SQ-150 (ruled 2026-07-21), positive META + negative values, exercising the
+/// runtime's real `pallet-origins` GovernanceOrigin resolution through the
+/// pallet dispatchable (belief-side calls are base-filtered when dispatched
+/// externally, so the origin check is exercised via the direct call — the
+/// tests.rs:1928 pattern): a non-kernel registry row is amendable by
+/// `FutarchyMeta` and refused (`BadOrigin`) for `ConstitutionalValues` and
+/// every other class origin. Replaces the ignored `sq_135_*` counterexamples.
 #[test]
-#[ignore = "SQ-150 (contested: 06 §2.1 authorizes CV amend_registry within meta-bounds; 06 §3.2 exclusive columns + 13 rule 7 read against; I-8 crossing real today)"]
-fn sq_135_constitutional_values_can_amend_meta_scoped_registry_rows() {
-    // CONTESTED (SQ-150): 06 §2.1 expressly authorizes ConstitutionalValues
-    // `amend_registry` within meta-bounds, supporting today's pallet behavior.
-    // Against that, 06 §3.2's exclusive columns and 13 rule 7 assign
-    // non-kernel rows to FutarchyMeta and refuse kernel-bounded amendments.
-    // This counterexample pins the observable cross-origin effect while the
-    // canonical policy remains unresolved.
+fn sq_150_amend_registry_is_futarchy_meta_only_in_the_runtime() {
+    use sp_runtime::DispatchError;
     development_ext().execute_with(|| {
         let (key, record) = pallet_constitution::Params::<Runtime>::iter()
             .find(|(_, record)| !record.kernel_bounded)
             .expect("genesis must contain a non-kernel registry row");
-        let call = amend_registry_call(key, record);
-        let result = call.dispatch(pallet_origins::Origin::ConstitutionalValues.into());
-        assert!(
-            matches!(result, Err(error) if error.error == sp_runtime::DispatchError::BadOrigin),
-            "SQ-150 crossing: ConstitutionalValues amended non-kernel key {key:?}: {result:?}"
+
+        // Positive: FutarchyMeta amends within the row's meta-bounds.
+        let ok = crate::Constitution::amend_registry(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            key,
+            record.min,
+            record.max,
+            record.max_delta,
+            record.cooldown_epochs,
         );
+        assert!(
+            ok.is_ok(),
+            "SQ-150: FutarchyMeta must amend non-kernel key {key:?}: {ok:?}"
+        );
+
+        // Negative: no values/track/class origin may amend a non-kernel row.
+        for origin in [
+            pallet_origins::Origin::ConstitutionalValues,
+            pallet_origins::Origin::OracleResolution,
+            pallet_origins::Origin::FutarchyParam,
+            pallet_origins::Origin::FutarchyTreasury,
+            pallet_origins::Origin::FutarchyCode,
+            pallet_origins::Origin::GuardianHold,
+            pallet_origins::Origin::EmergencyPlaybook,
+        ] {
+            let result = crate::Constitution::amend_registry(
+                origin.into(),
+                key,
+                record.min,
+                record.max,
+                record.max_delta,
+                record.cooldown_epochs,
+            );
+            assert_eq!(
+                result,
+                Err(DispatchError::BadOrigin),
+                "SQ-150: {origin:?} must not amend non-kernel key {key:?}"
+            );
+        }
     });
 }
 
+/// SQ-150 negative-kernel leg in the runtime: kernel-bounded rows are immutable —
+/// `FutarchyMeta` clears the origin gate but is refused with the reason-naming
+/// `KernelBoundImmutable`, and every other origin is stopped at the origin gate
+/// (`BadOrigin`). Either way no origin moves a kernel bound.
 #[test]
-#[ignore = "SQ-150 (contested: 06 §2.1 authorizes CV amend_registry within meta-bounds; 06 §3.2 exclusive columns + 13 rule 7 read against; I-8 crossing real today)"]
-fn sq_135_candidate_amend_registry_scope_matrix_is_not_enforced() {
-    // CONTESTED (SQ-150): this expected matrix is ONE CANDIDATE POLICY from
-    // reading 06 §3.2's exclusive Meta column together with 13 rule 7:
-    // non-kernel rows are Meta-amendable and kernel-bounded rows are denied.
-    // It is not "the" matrix: 06 §2.1 expressly authorizes CV amendments within
-    // meta-bounds, and §3.2 separately contains a CV "kernel bounds" cell.
-    // Pinning this branch prevents an eventual resolution from passing by
-    // accident while the three-way contradiction remains open.
+fn sq_150_kernel_bounded_rows_are_immutable_to_every_origin_in_the_runtime() {
+    use sp_runtime::DispatchError;
+    development_ext().execute_with(|| {
+        let (key, record) = pallet_constitution::Params::<Runtime>::iter()
+            .find(|(_, record)| record.kernel_bounded)
+            .expect("genesis must contain a kernel-bounded registry row");
+
+        let meta_result = crate::Constitution::amend_registry(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            key,
+            record.min,
+            record.max,
+            record.max_delta,
+            record.cooldown_epochs,
+        );
+        assert_eq!(
+            meta_result,
+            Err(pallet_constitution::Error::<Runtime>::KernelBoundImmutable.into()),
+            "SQ-150: META on kernel key {key:?} must be KernelBoundImmutable"
+        );
+
+        for origin in [
+            pallet_origins::Origin::ConstitutionalValues,
+            pallet_origins::Origin::FutarchyParam,
+            pallet_origins::Origin::FutarchyTreasury,
+            pallet_origins::Origin::GuardianHold,
+        ] {
+            let result = crate::Constitution::amend_registry(
+                origin.into(),
+                key,
+                record.min,
+                record.max,
+                record.max_delta,
+                record.cooldown_epochs,
+            );
+            assert_eq!(
+                result,
+                Err(DispatchError::BadOrigin),
+                "SQ-150: {origin:?} on kernel key {key:?} must be BadOrigin"
+            );
+        }
+    });
+}
+
+/// SQ-150 classifier leg: `amend_registry` projects to the FutarchyMeta domain
+/// for **every** registry row (kernel or not — the classifier is not
+/// target-aware; immutability binds at dispatch), is NOT a values-enactment
+/// leaf, and is denied by the origin-blind base filter (belief-side).
+#[test]
+fn sq_150_amend_registry_projects_meta_and_is_not_a_values_leaf() {
     development_ext().execute_with(|| {
         let mut observed_kernel = false;
         let mut observed_non_kernel = false;
         for (key, record) in pallet_constitution::Params::<Runtime>::iter() {
+            observed_kernel |= record.kernel_bounded;
+            observed_non_kernel |= !record.kernel_bounded;
             let call = amend_registry_call(key, record);
-            let expected_domain = if record.kernel_bounded {
-                observed_kernel = true;
-                CallDomain::Nobody
-            } else {
-                observed_non_kernel = true;
-                CallDomain::Meta
-            };
             assert_eq!(
                 BleavitSafetyClassifier::project(&call),
-                FilterCall::Leaf(expected_domain),
-                "SQ-150 candidate projection ignores the scope of {key:?}"
+                FilterCall::Leaf(CallDomain::Meta),
+                "SQ-150: amend_registry({key:?}) must project to the FutarchyMeta domain"
             );
             assert!(
                 !is_values_enactment_leaf(&call),
-                "SQ-150 candidate values membership ignores the scope of {key:?}"
+                "SQ-150: amend_registry({key:?}) must NOT be a values-enactment leaf"
             );
             assert!(
                 !RuntimeBaseCallFilter::contains(&call),
-                "SQ-150 candidate bare admission ignores the scope of {key:?}"
+                "SQ-150: amend_registry({key:?}) is belief-side; bare base filter must deny it"
             );
             for origin in all_class_origins() {
                 assert_eq!(
                     RuntimeBaseCallFilter::contains_for(origin, &call),
-                    matching_origin(expected_domain) == Some(origin),
-                    "SQ-150 candidate: {origin:?} has the wrong authority over amend_registry({key:?})"
+                    matching_origin(CallDomain::Meta) == Some(origin),
+                    "SQ-150: {origin:?} has the wrong authority over amend_registry({key:?})"
                 );
             }
         }
@@ -1201,18 +1260,19 @@ fn inventory_derived_values_enactment_set_is_exact_and_cannot_be_laundered() {
             .map(|(name, _)| name.clone())
             .collect();
 
-        // SQ-150's `amend_registry` conditional is deliberately outside this
-        // active comparison universe: its policy is contested independently.
         // Every ordinary inventory leaf/denial plus every live set_param class
-        // remains eligible to expose an unexpected values-set addition.
+        // remains eligible to expose an unexpected values-set addition. Only the
+        // `set_param` ParamKeyClass conditional (whose values membership is
+        // class-derived and covered by the live set_param arm below) is excluded;
+        // SQ-150 retired the `amend_registry` conditional — it is now an ordinary
+        // FutarchyMeta leaf, so it stays in the universe and MUST NOT appear in
+        // the values set.
         let mut comparison_universe: Vec<_> = INVENTORY
             .iter()
             .filter(|row| {
                 !matches!(
                     row.expected,
-                    ExpectedTreatment::Conditional(
-                        ConditionalKind::ParamKeyClass | ConditionalKind::AmendRegistryScope
-                    )
+                    ExpectedTreatment::Conditional(ConditionalKind::ParamKeyClass)
                 )
             })
             .map(|row| (row_name(row), metadata.materialize(row)))
@@ -1517,28 +1577,11 @@ fn assert_i8_for_call(name: &str, call: &RuntimeCall) {
 }
 
 #[test]
-fn i8_inventory_is_disjoint_except_for_the_contested_sq_135_crossing() {
-    development_ext().execute_with(|| {
-        let metadata = RuntimeMetadataModel::load();
-        let mut skipped = Vec::new();
-        for (name, call) in all_inventory_and_param_calls(&metadata) {
-            if name == "Constitution.amend_registry" {
-                skipped.push(name);
-                continue;
-            }
-            assert_i8_for_call(&name, &call);
-        }
-        assert_eq!(skipped, vec![String::from("Constitution.amend_registry")]);
-    });
-}
-
-#[test]
-#[ignore = "SQ-150 (contested: 06 §2.1 authorizes CV amend_registry within meta-bounds; 06 §3.2 exclusive columns + 13 rule 7 read against; I-8 crossing real today)"]
-fn sq_135_i8_full_inventory_values_and_belief_scopes_overlap() {
-    // CONTESTED policy, real crossing: regardless of whether 06 §2.1's CV
-    // authorization or the 06 §3.2-exclusive/13-rule-7 reading ultimately
-    // wins, TODAY `is_values_enactment_leaf` admits amend_registry while the
-    // classifier projects it as FutarchyMeta. The I-8 overlap is observable.
+fn i8_inventory_values_and_belief_scopes_are_fully_disjoint() {
+    // SQ-150 (ruled 2026-07-21) closed the last I-8 crossing: `amend_registry`
+    // is now a belief-side FutarchyMeta call and is NO longer in the
+    // values-enactment set, so the whole inventory (plus every live set_param
+    // class) is disjoint with no carve-out.
     development_ext().execute_with(|| {
         let metadata = RuntimeMetadataModel::load();
         for (name, call) in all_inventory_and_param_calls(&metadata) {

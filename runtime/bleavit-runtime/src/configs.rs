@@ -2821,7 +2821,7 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
         pallet_oracle::Rounds::<Runtime>::iter().any(|(_, round)| {
             round.spec_version == spec
                 && round.challenger.is_some()
-                && pallet_oracle::RoundSchedules::<Runtime>::get((
+                && match pallet_oracle::RoundSchedules::<Runtime>::get((
                     round.component,
                     round.epoch,
                     round.spec_version,
@@ -2829,8 +2829,17 @@ impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
                 .and_then(|schedule| {
                     pallet_oracle::stored_round_bond(schedule.round_one_bond, 1, schedule.round_cap)
                         .ok()
-                })
-                .is_none_or(|floor| round.bond >= floor)
+                }) {
+                    // Malformed frozen schedule ⇒ the game's own B_1 is
+                    // uncomputable; G-1 conservatively holds the decision.
+                    None => true,
+                    // 07 §12 merit floor = max(live `dis.merit_min`, frozen
+                    // B_1) (SQ-158): the independent META lever can raise the
+                    // bar above the game's B_1, but the `max` keeps it from ever
+                    // dropping below the round-1 bond the challenger posted, so a
+                    // lowering can never make censorship cheaper (R-7).
+                    Some(frozen_b1) => round.bond >= frozen_b1.max(balance_param(b"dis.merit_min")),
+                }
         })
     }
 }
@@ -4058,10 +4067,12 @@ impl pallet_futarchy_treasury::TreasuryParams for TreasuryParams {
         balance_param(b"keeper.budget")
     }
     fn keeper_rebate() -> Balance {
-        // 13 §1 marks this as a benchmark-time formula, so genesis Params
-        // deliberately omits it. Unlike the other adapters, do not consult
-        // `genesis_params()` as a fallback: absent/wrong-kind means zero until
-        // B5 installs a calibrated raw row (conservative no-outflow default).
+        // SQ-117 (ruled 2026-07-21): the row is now genesis-seeded from the
+        // 08 §6.2 fee basis (`kernel::KEEPER_REBATE_FEE_BASIS_USDC`), so the
+        // rebate pipeline pays a real amount rather than zero. The seed value
+        // still carries a 13 §1 `[VERIFY]` tag pending launch benchmarking. The
+        // absent/wrong-kind fallback stays a conservative no-outflow zero (G-1)
+        // rather than consulting `genesis_params()`, exactly as before.
         let key = pallet_constitution::key16(b"keeper.rebate");
         match live_param(key) {
             Some(pallet_constitution::ParamValue::Balance(value)) => value,

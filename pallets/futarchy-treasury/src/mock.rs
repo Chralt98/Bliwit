@@ -56,7 +56,9 @@ parameter_types! {
     pub static StreamThresholdBps: u32 = TRS_STREAM_THRESHOLD_BPS;
     pub static InflationCapBps: u32 = ISS_INFLATION_CAP_BPS;
     pub static KeeperBudgetEpoch: u128 = futarchy_treasury_core::KEEPER_BUDGET_EPOCH;
-    // `keeper.rebate` is intentionally absent from genesis Params until B5.
+    // `keeper.rebate` held at 0 here to exercise the fail-soft no-payout path.
+    // SQ-117 seeds a positive value in the runtime genesis; the mock keeps zero
+    // deliberately, so a zero rebate must remain a safe no-op.
     pub static KeeperRebate: u128 = 0;
     // Test-only injected coretime parameters. They are deliberately simple
     // non-default values so tests prove the pallet consumes the seam.

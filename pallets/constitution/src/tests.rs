@@ -1192,9 +1192,10 @@ fn extrinsic_value_types_do_not_admit_wrong_kinds_via_scale() {
 fn genesis_registry_matches_13_1_row_encodings() {
     new_test_ext().execute_with(|| {
         // Every 13 §1 row with a scalar concrete default and no open
-        // [VERIFY] tag is seeded (98 total, incl. per-class suffix keys and
-        // rule-6 short keys); spot-pin the unit encodings per kind.
-        assert_eq!(Params::<Test>::count(), 98);
+        // [VERIFY] tag is seeded (100 total, incl. per-class suffix keys and
+        // rule-6 short keys; +2 for keeper.rebate/dis.merit_min genesis seeds,
+        // SQ-117/SQ-158); spot-pin the unit encodings per kind.
+        assert_eq!(Params::<Test>::count(), 100);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
         // Phase-0-calibrated (V-12): dec.delta.meta 0.090 on the 1e9 grid.
@@ -1744,15 +1745,20 @@ fn amend_registry_updates_governance_metadata_within_meta_bounds() {
         assert_eq!(after.value, before.value);
         assert_eq!(after.class, before.class);
         assert_eq!(after.last_changed_epoch, before.last_changed_epoch);
-        // ConstitutionalValues (constitution track) may amend too.
-        assert_ok!(Constitution::amend_registry(
-            RuntimeOrigin::signed(VALUES_ACC),
-            key16(b"mkt.fee"),
-            ParamValue::Perbill(500_000),
-            ParamValue::Perbill(10_000_000),
-            None,
-            1,
-        ));
+        // SQ-150 (ruled 2026-07-21): `ConstitutionalValues` may NO LONGER amend —
+        // amend_registry is FutarchyMeta-only. The former CV/track authority is
+        // removed; the dedicated `sq_150_*` cases pin the full policy.
+        assert_noop!(
+            Constitution::amend_registry(
+                RuntimeOrigin::signed(VALUES_ACC),
+                key16(b"mkt.fee"),
+                ParamValue::Perbill(500_000),
+                ParamValue::Perbill(10_000_000),
+                None,
+                1,
+            ),
+            DispatchError::BadOrigin
+        );
         assert_ok!(Constitution::do_try_state());
     });
 }
@@ -1912,13 +1918,14 @@ fn amend_registry_error_paths_are_exact() {
 #[test]
 fn amend_registry_cannot_unlock_a_value_change_beyond_kernel_bounds() {
     new_test_ext().execute_with(|| {
-        // Adversarial sequence (R-7): even after a values-side amendment of a
-        // NON-kernel row, set_param stays inside the amended bounds; and a
-        // kernel-bounded ceiling can never be raised to admit a larger value.
+        // Adversarial sequence (R-7): a kernel-bounded ceiling can never be
+        // raised to admit a larger value — even by META, the sole origin that
+        // clears the SQ-150 FutarchyMeta-only origin gate, the amendment is
+        // refused with `KernelBoundImmutable`.
         set_epoch(4);
         assert_noop!(
             Constitution::amend_registry(
-                RuntimeOrigin::signed(VALUES_ACC),
+                RuntimeOrigin::signed(META_ACC),
                 key16(b"gate.p_max"),
                 ParamValue::Fixed(futarchy_primitives::FixedU64(0)),
                 ParamValue::Fixed(futarchy_primitives::FixedU64(500_000_000)), // 0.5!
@@ -1935,5 +1942,216 @@ fn amend_registry_cannot_unlock_a_value_change_beyond_kernel_bounds() {
             ),
             Error::<Test>::AboveMax
         );
+    });
+}
+
+// ------------------------------- A13 · constitution/params cluster (batch X) --
+
+/// SQ-36 (ruled 2026-07-21): `ledger.pos_dep` is frozen — the registry maximum
+/// equals its minimum and default, so no governance path can raise the deposit
+/// unit while entries created at the old unit are still live. The ledger
+/// charges, refunds and reconciles `DepositsHeld` at the *live* unit
+/// (`pallets/conditional-ledger/src/lib.rs` `settle_deposits` / `reap_one` /
+/// L-6), and has no 03 §10 hook to rebase held deposits; a raise would
+/// over-refund old entries out of pooled collateral. 13 §1 states the freeze.
+#[test]
+fn sq_36_ledger_position_deposit_is_frozen_at_its_kernel_floor() {
+    new_test_ext().execute_with(|| {
+        let record = Params::<Test>::get(key16(b"ledger.pos_dep")).unwrap();
+        assert_eq!(
+            record.min, record.max,
+            "13 §1: ledger.pos_dep max must equal its K floor (frozen key)"
+        );
+        assert_eq!(
+            record.value, record.min,
+            "13 §1: ledger.pos_dep default must equal its frozen bound"
+        );
+        assert!(record.kernel_bounded);
+        // Every raise is refused, at the smallest possible step.
+        let raise = ParamValue::Balance(record.max.as_u128().saturating_add(1));
+        assert_noop!(
+            Constitution::set_param(
+                RuntimeOrigin::signed(META_ACC),
+                key16(b"ledger.pos_dep"),
+                raise
+            ),
+            Error::<Test>::AboveMax
+        );
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
+/// SQ-117 (ruled 2026-07-21): `keeper.rebate` is seeded at genesis from the
+/// 08 §6.2 crank-fee basis, so B9's rebate pipeline stops paying zero. The
+/// basis itself stays `[VERIFY]`-tagged in 13 §1 until launch benchmarking
+/// fixes `fee.vit_usdc_rate`; only the seeding mechanism is pinned here.
+#[test]
+fn sq_117_keeper_rebate_is_seeded_within_its_13_bounds() {
+    new_test_ext().execute_with(|| {
+        let record = Params::<Test>::get(key16(b"keeper.rebate"))
+            .expect("13 §1 keeper.rebate must be genesis-seeded");
+        assert_eq!(record.class, ParamClass::Param);
+        assert!(!record.kernel_bounded);
+        assert_eq!(record.cooldown_epochs, 1);
+        assert_eq!(record.max_delta, None);
+        // 13 §1: hard min 1x and hard max 10x the same crank-fee basis the
+        // default is 3x of, so the whole row scales with one number.
+        let value = record.value.as_u128();
+        let min = record.min.as_u128();
+        assert!(value > 0, "a zero seed leaves the A-1 incentive inert");
+        assert_eq!(value, min.saturating_mul(3));
+        assert_eq!(record.max.as_u128(), min.saturating_mul(10));
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
+/// SQ-158 (owner A13): `dis.merit_min` is a distinct 13 §1 key precisely so the
+/// merit floor can be raised independently of `B_1` (07 §12 *Merit floor*).
+/// Seeding it restores that lever; the consumer composes `max(live key, frozen
+/// B_1)` so a lowering can never make censorship cheaper than the game's own
+/// round-1 bond (R-7).
+#[test]
+fn sq_158_dis_merit_min_is_seeded_as_an_independent_meta_lever() {
+    new_test_ext().execute_with(|| {
+        let record = Params::<Test>::get(key16(b"dis.merit_min"))
+            .expect("13 §1 dis.merit_min must be genesis-seeded");
+        let floor = Params::<Test>::get(key16(b"orc.bond_floor")).unwrap();
+        assert_eq!(record.class, ParamClass::Meta);
+        assert!(!record.kernel_bounded);
+        assert_eq!(record.cooldown_epochs, 2);
+        assert_eq!(record.max_delta, Some(crate::MaxDelta::Factor(2)));
+        // 13 §1: floor `orc.bond_floor`, no ceiling.
+        assert_eq!(record.min, floor.value);
+        assert_eq!(record.value, floor.value);
+        assert_eq!(record.max, ParamValue::Balance(u128::MAX));
+        // The lever really moves: a META raise inside the factor-2 step lands.
+        set_epoch(record.cooldown_epochs);
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(META_ACC),
+            key16(b"dis.merit_min"),
+            ParamValue::Balance(record.value.as_u128().saturating_mul(2)),
+        ));
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
+/// SQ-150 (ruled 2026-07-21): non-kernel registry rows are META-only.
+/// Positive leg — `FutarchyMeta` amends a non-kernel row of any class.
+#[test]
+fn sq_150_futarchy_meta_amends_every_non_kernel_registry_class() {
+    new_test_ext().execute_with(|| {
+        let mut seen: Vec<ParamClass> = Vec::new();
+        for record in genesis_params() {
+            if record.kernel_bounded || seen.contains(&record.class) {
+                continue;
+            }
+            seen.push(record.class);
+            assert_ok!(Constitution::amend_registry(
+                RuntimeOrigin::signed(META_ACC),
+                record.key,
+                record.min,
+                record.max,
+                record.max_delta,
+                record.cooldown_epochs,
+            ));
+        }
+        assert!(
+            seen.len() >= 3,
+            "genesis must exercise several non-kernel classes, saw {seen:?}"
+        );
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
+/// SQ-150 negative leg (values): `ConstitutionalValues` — and every other
+/// non-META origin — is refused on a non-kernel row. This is the I-8 crossing
+/// the S5 suite pinned: one call was reachable from both the values and the
+/// belief scope.
+#[test]
+fn sq_150_no_values_origin_may_amend_a_non_kernel_registry_row() {
+    new_test_ext().execute_with(|| {
+        let record = genesis_params()
+            .into_iter()
+            .find(|record| !record.kernel_bounded)
+            .expect("genesis must contain a non-kernel registry row");
+        for refused in [
+            VALUES_ACC,
+            CONSTITUTION_ACC,
+            ENTRENCHED_ACC,
+            PARAM_ACC,
+            TREASURY_ACC,
+            CODE_ACC,
+            GUARDIAN_ACC,
+            PLAYBOOK_ACC,
+            NOBODY_ACC,
+        ] {
+            assert_noop!(
+                Constitution::amend_registry(
+                    RuntimeOrigin::signed(refused),
+                    record.key,
+                    record.min,
+                    record.max,
+                    record.max_delta,
+                    record.cooldown_epochs,
+                ),
+                DispatchError::BadOrigin
+            );
+        }
+        assert_ok!(Constitution::do_try_state());
+    });
+}
+
+/// SQ-150 negative leg (kernel): kernel-bounded rows are immutable. The one
+/// origin that clears the FutarchyMeta-only origin gate (META) is refused by
+/// `checked_amend` with the reason-naming `KernelBoundImmutable` (13 rule 7,
+/// not a bare `BadOrigin`); every other origin — values, tracks, class origins,
+/// Root, nobody — is refused at the origin gate with `BadOrigin`. Either way
+/// no origin can move a kernel floor/ceiling.
+#[test]
+fn sq_150_no_origin_may_amend_a_kernel_bounded_registry_row() {
+    new_test_ext().execute_with(|| {
+        let record = genesis_params()
+            .into_iter()
+            .find(|record| record.kernel_bounded)
+            .expect("genesis must contain a kernel-bounded registry row");
+        // META clears the origin gate, then hits the kernel-immutability wall.
+        assert_noop!(
+            Constitution::amend_registry(
+                RuntimeOrigin::signed(META_ACC),
+                record.key,
+                record.min,
+                record.max,
+                record.max_delta,
+                record.cooldown_epochs,
+            ),
+            Error::<Test>::KernelBoundImmutable
+        );
+        // Every other origin is stopped at the origin gate.
+        for refused in [
+            RuntimeOrigin::signed(VALUES_ACC),
+            RuntimeOrigin::signed(CONSTITUTION_ACC),
+            RuntimeOrigin::signed(ENTRENCHED_ACC),
+            RuntimeOrigin::signed(PARAM_ACC),
+            RuntimeOrigin::signed(TREASURY_ACC),
+            RuntimeOrigin::signed(CODE_ACC),
+            RuntimeOrigin::signed(GUARDIAN_ACC),
+            RuntimeOrigin::signed(PLAYBOOK_ACC),
+            RuntimeOrigin::signed(NOBODY_ACC),
+            RuntimeOrigin::root(),
+            RuntimeOrigin::none(),
+        ] {
+            assert_noop!(
+                Constitution::amend_registry(
+                    refused,
+                    record.key,
+                    record.min,
+                    record.max,
+                    record.max_delta,
+                    record.cooldown_epochs,
+                ),
+                DispatchError::BadOrigin
+            );
+        }
+        assert_ok!(Constitution::do_try_state());
     });
 }

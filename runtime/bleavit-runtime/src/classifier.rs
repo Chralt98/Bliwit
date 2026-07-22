@@ -1007,7 +1007,10 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             // the bare scheduler leaf must clear the origin-blind base filter
             // or the configured values path is unreachable.
             | RuntimeCall::Epoch(pallet_epoch::Call::set_next_epoch_length { .. })
-            | RuntimeCall::Constitution(pallet_constitution::Call::amend_registry { .. })
+            // SQ-150 (ruled 2026-07-21): `amend_registry` is FutarchyMeta-only,
+            // a belief-side call — NOT a values-enactment leaf. Removing it here
+            // closes the I-8 crossing (the call previously sat in both the
+            // values set and the FutarchyMeta projection below).
             | RuntimeCall::Constitution(pallet_constitution::Call::set_release_channel { .. })
             // `referenda.cancel`/`kill` are ConstitutionalValues-domain (the
             // runtime's `CancelOrigin`/`KillOrigin`), so a values referendum
