@@ -8,4 +8,3 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
-runtime/bleavit-runtime/src/weights/pallet_attestor.rs set_members: corrected undercharge, not a regression — the prior weight benchmarked an empty registry so it never read Attestations nor ran the SQ-262 O(16x256) unsettled-liability scan; the fixture now builds that worst case and the weight is a conservative hand-set bound pending a reference-host omni-bencher sweep (PR #130 Finding 1)
