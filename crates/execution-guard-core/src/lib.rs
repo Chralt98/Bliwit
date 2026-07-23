@@ -689,6 +689,44 @@ impl ExecutionGuard {
         Ok(())
     }
 
+    /// Complete a separately committed terminal recovery image. If the
+    /// primary image reached code application but its one-shot transition did
+    /// not finish, the primary authorization may still be pending; recovery
+    /// consumes it only when its target is exactly the following spec version.
+    /// For an already-applied primary, recovery advances the current version
+    /// by exactly one. No arbitrary version jump or unrelated pending upgrade
+    /// can be hidden by this path.
+    pub fn complete_recovery_application(
+        &mut self,
+        code_hash: H256,
+        target_spec_version: u32,
+    ) -> Result<(), Error> {
+        if let Some(pending) = self.pending_upgrade {
+            ensure!(
+                pending
+                    .target_spec_version
+                    .checked_add(1)
+                    .is_some_and(|expected| expected == target_spec_version),
+                Error::UpgradeVersionMismatch
+            );
+            self.pending_upgrade = None;
+        } else {
+            ensure!(
+                self.current_spec_name
+                    .spec_version
+                    .checked_add(1)
+                    .is_some_and(|expected| expected == target_spec_version),
+                Error::UpgradeVersionMismatch
+            );
+        }
+        self.current_spec_name.spec_version = target_spec_version;
+        self.events.push(Event::UpgradeApplied {
+            code_hash,
+            spec_version: target_spec_version,
+        });
+        Ok(())
+    }
+
     #[cfg(test)]
     fn check_dispatch_time(
         &self,

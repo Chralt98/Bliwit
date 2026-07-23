@@ -4,13 +4,16 @@ use crate::mock::*;
 use crate::pallet::PendingUpgrade as PendingUpgradeStorage;
 use frame_support::{
     assert_noop, assert_ok,
-    dispatch::{DispatchErrorWithPostInfo, GetDispatchInfo, Pays, PostDispatchInfo},
+    dispatch::{DispatchClass, DispatchErrorWithPostInfo, GetDispatchInfo, Pays, PostDispatchInfo},
     traits::Hooks,
     weights::Weight,
 };
 use futarchy_primitives::{keeper::CrankClass, DispatchOutcomeCode, RejectReason};
 use parity_scale_codec::Encode;
-use sp_runtime::{traits::Dispatchable, DispatchError, TryRuntimeError};
+use sp_runtime::{
+    traits::{Dispatchable, SaturatedConversion},
+    DispatchError, TryRuntimeError,
+};
 
 macro_rules! assert_noop {
     (GuardPallet::execute($($args:tt)*), $error:expr $(,)?) => {{
@@ -38,6 +41,92 @@ fn bounded_code(code: &[u8]) -> RuntimeCode<Test> {
     RuntimeCode::<Test>::try_from(code.to_vec()).expect("test code is bounded")
 }
 
+const TEST_RECOVERY_CODE: &[u8] = b"execution-guard-recovery-runtime-v3";
+const TEST_RECOVERY_ATTESTATION_ID: u32 = 8;
+
+fn test_phase_four_plan() -> PhaseFourPlan {
+    PhaseFourPlan {
+        tvl_cap: 1,
+        deposit_cap: 1,
+    }
+}
+
+fn put_recovery_preimage(code: &[u8]) -> (H256, u32) {
+    let recovery_hash = hash(code);
+    let recovery_len = u32::try_from(code.len()).expect("test recovery code fits u32");
+    PreimageData::mutate(|items| items.push((recovery_hash, code.to_vec())));
+    (recovery_hash, recovery_len)
+}
+
+fn recovery_commit_call(
+    recovery_hash: H256,
+    recovery_len: u32,
+    target_spec_version: u32,
+    attestation_id: u32,
+) -> RuntimeCall {
+    RuntimeCall::ExecutionGuard(Call::commit_recovery_image {
+        hash: recovery_hash,
+        len: recovery_len,
+        target_spec_version,
+        attestation_id,
+    })
+}
+
+fn test_recovery_descriptor() -> RecoveryImageDescriptor {
+    RecoveryImageDescriptor {
+        hash: hash(TEST_RECOVERY_CODE),
+        len: u32::try_from(TEST_RECOVERY_CODE.len()).expect("test recovery code fits u32"),
+        target_spec_version: 3,
+        attestation_id: TEST_RECOVERY_ATTESTATION_ID,
+    }
+}
+
+fn test_qualified_recovery(
+    payload_hash: H256,
+    primary_hash: H256,
+) -> pallet::QualifiedRecoveryImage {
+    pallet::QualifiedRecoveryImage {
+        payload_hash,
+        primary_hash,
+        version_constraint: spec(1),
+        descriptor: test_recovery_descriptor(),
+    }
+}
+
+fn prepare_upgrade_payload(primary_hash: H256) -> (H256, u32) {
+    let (recovery_hash, recovery_len) = put_recovery_preimage(TEST_RECOVERY_CODE);
+    RecoveryAttestationArtifact::set(Some((TEST_RECOVERY_ATTESTATION_ID, recovery_hash)));
+    ObservedArtifactVersions::mutate(|versions| {
+        versions.push((recovery_hash, spec(3)));
+    });
+    put_preimage(&[
+        authorize_call(primary_hash),
+        recovery_commit_call(recovery_hash, recovery_len, 3, TEST_RECOVERY_ATTESTATION_ID),
+    ])
+}
+
+fn enqueue_upgrade_payload(
+    pid: ProposalId,
+    primary_hash: H256,
+    attestation_id: u32,
+    referendum: u32,
+) -> frame_support::dispatch::DispatchResult {
+    AttestationArtifact::set(Some((attestation_id, primary_hash)));
+    let (payload_hash, payload_len) = prepare_upgrade_payload(primary_hash);
+    commit_payload(pid, payload_hash);
+    GuardPallet::qualify_recovery_image(RuntimeOrigin::signed(keeper()), pid)?;
+    let mut item = queued_item(
+        pid,
+        futarchy_primitives::ProposalClass::Code,
+        payload_hash,
+        payload_len,
+        vec![CallDomain::InternalRootAuthorizeUpgrade, CallDomain::Code],
+    );
+    item.attestation_id = Some(attestation_id);
+    item.ratify_ref = Some(referendum);
+    GuardPallet::enqueue(RuntimeOrigin::signed(epoch_account()), item, false)
+}
+
 fn setup_param(pid: ProposalId, value: u32) {
     assert_ok!(enqueue_calls(
         pid,
@@ -61,8 +150,7 @@ fn model_queue_item(pid: ProposalId, payload_hash: H256, payload_len: u32) -> Qu
 
 fn setup_upgrade(pid: ProposalId, code: &[u8], referendum: u32) {
     let code_hash = hash(code);
-    AttestationArtifact::set(Some((7, code_hash)));
-    assert_ok!(enqueue_code(pid, authorize_call(code_hash), 7, referendum));
+    assert_ok!(enqueue_upgrade_payload(pid, code_hash, 7, referendum));
     assert_ok!(GuardPallet::ratify(ratify_origin(), pid, referendum));
     run_to_maturity(pid);
 }
@@ -268,14 +356,25 @@ fn post_dispatch_failure_still_charges_consumed_inner_weight() {
     new_test_ext().execute_with(|| {
         let code = b"post-dispatch-weight";
         let code_hash = hash(code);
-        let declared = authorize_call(code_hash).get_dispatch_info().total_weight();
+        let authorize_weight = authorize_call(code_hash).get_dispatch_info().total_weight();
+        let recovery_hash = hash(TEST_RECOVERY_CODE);
+        let recovery_weight = recovery_commit_call(
+            recovery_hash,
+            TEST_RECOVERY_CODE.len() as u32,
+            3,
+            TEST_RECOVERY_ATTESTATION_ID,
+        )
+        .get_dispatch_info()
+        .total_weight();
         setup_upgrade(1, code, 9);
         ReleaseRefuses::set(true);
 
         let error = GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1)
             .expect_err("release-channel callback rejects after inner dispatch");
         assert_eq!(error.error, DispatchError::Other("release channel refused"));
-        let expected = <() as crate::WeightInfo>::execute(1).saturating_add(declared);
+        let expected = <() as crate::WeightInfo>::execute(2)
+            .saturating_add(authorize_weight)
+            .saturating_add(recovery_weight);
         assert_eq!(error.post_info.actual_weight, Some(expected));
         assert!(expected.all_lte(GuardPallet::execute_precharge()));
         assert!(Queue::<Test>::contains_key(1));
@@ -607,8 +706,7 @@ fn ordered_checks_3_and_4_reject_stale_version_and_bad_ratification_binding() {
     new_test_ext().execute_with(|| {
         let code = b"ratification-bound-runtime";
         let code_hash = hash(code);
-        AttestationArtifact::set(Some((7, code_hash)));
-        assert_ok!(enqueue_code(1, authorize_call(code_hash), 7, 42));
+        assert_ok!(enqueue_upgrade_payload(1, code_hash, 7, 42));
         run_to_maturity(1);
         assert_noop!(
             GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
@@ -642,10 +740,9 @@ fn ordered_check_5_fails_closed_for_forged_underquorum_and_challenged_attestatio
     new_test_ext().execute_with(|| {
         let code = b"attested-runtime";
         let code_hash = hash(code);
-        AttestationArtifact::set(Some((7, code_hash)));
         AttestationQuorum::set(false);
         assert_noop!(
-            enqueue_code(1, authorize_call(code_hash), 7, 7),
+            enqueue_upgrade_payload(1, code_hash, 7, 7),
             Error::<Test>::AttestationMissing
         );
     });
@@ -716,15 +813,13 @@ fn ordered_check_11_enforces_payload_call_domain_and_safety_bounds() {
         let calls = (0..=MAX_CALLS)
             .map(|value| param_call(value as u32))
             .collect::<Vec<_>>();
-        assert_ok!(enqueue_calls(
-            1,
-            futarchy_primitives::ProposalClass::Param,
-            calls,
-            vec![CallDomain::Param],
-        ));
-        run_to_maturity(1);
         assert_noop!(
-            GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
+            enqueue_calls(
+                1,
+                futarchy_primitives::ProposalClass::Param,
+                calls,
+                vec![CallDomain::Param],
+            ),
             Error::<Test>::TooManyCalls
         );
     });
@@ -1021,12 +1116,587 @@ fn native_signed_system_upgrade_calls_are_blocked_by_base_call_filter() {
 }
 
 #[test]
+fn recovery_qualification_is_operational_caches_the_exact_descriptor_and_bounds_enqueue_proofs() {
+    new_test_ext().execute_with(|| {
+        let primary_hash = hash(b"qualified-primary");
+        AttestationArtifact::set(Some((7, primary_hash)));
+        let (payload_hash, payload_len) = prepare_upgrade_payload(primary_hash);
+        commit_payload(1, payload_hash);
+
+        let call = Call::<Test>::qualify_recovery_image { pid: 1 };
+        assert_eq!(call.get_dispatch_info().class, DispatchClass::Operational);
+        assert_ok!(GuardPallet::qualify_recovery_image(
+            RuntimeOrigin::signed(keeper()),
+            1,
+        ));
+        let descriptor = test_recovery_descriptor();
+        assert_eq!(
+            QualifiedRecoveryImages::<Test>::get(1),
+            Some(test_qualified_recovery(payload_hash, primary_hash)),
+        );
+        assert!(PreimageFetchRequests::get().contains(&(descriptor.hash, descriptor.len)));
+        assert!(matches!(
+            last_guard_event(),
+            Some(Event::RecoveryImageQualified {
+                pid: 1,
+                recovery_hash,
+                target_spec_version: 3,
+            }) if recovery_hash == descriptor.hash
+        ));
+
+        // Qualification paid the full-Wasm proof once. Queue admission may
+        // re-read only the small payload and descriptor/length metadata.
+        PreimageFetchRequests::set(Vec::new());
+        let mut item = queued_item(
+            1,
+            ProposalClass::Code,
+            payload_hash,
+            payload_len,
+            vec![CallDomain::InternalRootAuthorizeUpgrade, CallDomain::Code],
+        );
+        item.attestation_id = Some(7);
+        item.ratify_ref = Some(77);
+        assert_ok!(GuardPallet::enqueue(
+            RuntimeOrigin::signed(epoch_account()),
+            item,
+            false,
+        ));
+        let fetches = PreimageFetchRequests::get();
+        assert!(fetches.contains(&(payload_hash, payload_len)));
+        assert!(
+            !fetches.contains(&(descriptor.hash, descriptor.len)),
+            "enqueue must consume the cached descriptor without fetching full recovery Wasm",
+        );
+        assert!(!QualifiedRecoveryImages::<Test>::contains_key(1));
+        assert_eq!(QueuedRecoveryImages::<Test>::get(1), Some(descriptor));
+    });
+}
+
+#[test]
+fn recovery_enqueue_requires_an_exact_qualification_match() {
+    new_test_ext().execute_with(|| {
+        let primary_hash = hash(b"qualification-match-primary");
+        AttestationArtifact::set(Some((7, primary_hash)));
+        let (payload_hash, payload_len) = prepare_upgrade_payload(primary_hash);
+        commit_payload(1, payload_hash);
+        let item = || {
+            let mut item = queued_item(
+                1,
+                ProposalClass::Code,
+                payload_hash,
+                payload_len,
+                vec![CallDomain::InternalRootAuthorizeUpgrade, CallDomain::Code],
+            );
+            item.attestation_id = Some(7);
+            item.ratify_ref = Some(77);
+            item
+        };
+
+        assert_noop!(
+            GuardPallet::enqueue(RuntimeOrigin::signed(epoch_account()), item(), false,),
+            Error::<Test>::RecoveryImageInvalid
+        );
+        assert!(!Queue::<Test>::contains_key(1));
+
+        assert_ok!(GuardPallet::qualify_recovery_image(
+            RuntimeOrigin::signed(keeper()),
+            1,
+        ));
+        let mut mismatched = test_qualified_recovery(payload_hash, primary_hash);
+        mismatched.descriptor.attestation_id =
+            mismatched.descriptor.attestation_id.saturating_add(1);
+        QualifiedRecoveryImages::<Test>::insert(1, mismatched.clone());
+        assert_noop!(
+            GuardPallet::enqueue(RuntimeOrigin::signed(epoch_account()), item(), false,),
+            Error::<Test>::RecoveryImageInvalid
+        );
+        assert_eq!(
+            QualifiedRecoveryImages::<Test>::get(1),
+            Some(mismatched),
+            "a failed descriptor transfer must roll back the attempted take",
+        );
+        assert!(!Queue::<Test>::contains_key(1));
+    });
+}
+
+#[test]
+fn terminal_prequeue_cleanup_unpins_a_qualified_recovery_image() {
+    new_test_ext().execute_with(|| {
+        let primary_hash = hash(b"qualified-terminal-primary");
+        let (payload_hash, _) = prepare_upgrade_payload(primary_hash);
+        commit_payload(1, payload_hash);
+        assert_ok!(GuardPallet::qualify_recovery_image(
+            RuntimeOrigin::signed(keeper()),
+            1,
+        ));
+        let descriptor = test_recovery_descriptor();
+
+        assert_ok!(GuardPallet::dequeue_terminal(1));
+
+        assert!(!QualifiedRecoveryImages::<Test>::contains_key(1));
+        assert_eq!(Unpinned::get(), vec![descriptor.hash]);
+        assert_ok!(GuardPallet::do_try_state());
+    });
+}
+
+#[test]
+fn qualified_recovery_storage_is_hard_bounded_by_intake_plus_live_proposals() {
+    new_test_ext().execute_with(|| {
+        let primary_hash = hash(b"qualification-bound-primary");
+        let (payload_hash, _) = prepare_upgrade_payload(primary_hash);
+        let qualified = test_qualified_recovery(payload_hash, primary_hash);
+        RecoveryPins::set(vec![qualified.descriptor.hash]);
+        for pid in 1..=u64::from(MAX_QUALIFIED_RECOVERY_IMAGES_BOUND) {
+            commit_payload(pid, payload_hash);
+            QualifiedRecoveryImages::<Test>::insert(pid, qualified.clone());
+        }
+        let overflow_pid = u64::from(MAX_QUALIFIED_RECOVERY_IMAGES_BOUND).saturating_add(1);
+        commit_payload(overflow_pid, payload_hash);
+        assert_eq!(
+            QualifiedRecoveryImages::<Test>::count(),
+            MAX_QUALIFIED_RECOVERY_IMAGES_BOUND,
+        );
+
+        assert_noop!(
+            GuardPallet::qualify_recovery_image(RuntimeOrigin::signed(keeper()), overflow_pid,),
+            Error::<Test>::QueueFull
+        );
+        assert_eq!(
+            QualifiedRecoveryImages::<Test>::count(),
+            MAX_QUALIFIED_RECOVERY_IMAGES_BOUND,
+        );
+        assert!(!QualifiedRecoveryImages::<Test>::contains_key(overflow_pid));
+        assert_ok!(GuardPallet::do_try_state());
+    });
+}
+
+#[test]
+fn try_state_rejects_unpinned_qualified_recovery_image() {
+    new_test_ext().execute_with(|| {
+        let primary_hash = hash(b"unpinned-qualified-primary");
+        let (payload_hash, _) = prepare_upgrade_payload(primary_hash);
+        commit_payload(1, payload_hash);
+        assert_ok!(GuardPallet::qualify_recovery_image(
+            RuntimeOrigin::signed(keeper()),
+            1,
+        ));
+        RecoveryPins::set(Vec::new());
+
+        assert_eq!(
+            GuardPallet::do_try_state(),
+            Err(TryRuntimeError::Other(
+                "execution guard qualified recovery image is invalid",
+            )),
+        );
+    });
+}
+
+#[test]
+fn try_state_rejects_qualified_recovery_counter_drift() {
+    new_test_ext().execute_with(|| {
+        let primary_hash = hash(b"counter-drift-primary");
+        let (payload_hash, _) = prepare_upgrade_payload(primary_hash);
+        commit_payload(1, payload_hash);
+        assert_ok!(GuardPallet::qualify_recovery_image(
+            RuntimeOrigin::signed(keeper()),
+            1,
+        ));
+        sp_io::storage::set(
+            &QualifiedRecoveryImages::<Test>::counter_storage_final_key(),
+            &0_u32.encode(),
+        );
+
+        assert_eq!(
+            GuardPallet::do_try_state(),
+            Err(TryRuntimeError::Other(
+                "execution guard qualified recovery-image bound exceeded",
+            )),
+        );
+    });
+}
+
+#[test]
+fn try_state_rejects_a_corrupt_phase_four_plan() {
+    new_test_ext().execute_with(|| {
+        let primary = b"phase-four-corrupt-primary";
+        setup_upgrade(1, primary, 91);
+        ExactPhaseThree::set(true);
+        assert_ok!(GuardPallet::authorize_phase_four(
+            RuntimeOrigin::root(),
+            1,
+            [0x44; 32],
+        ));
+        PhaseFourPlanValid::set(false);
+
+        assert_eq!(
+            GuardPallet::do_try_state(),
+            Err(TryRuntimeError::Other(
+                "execution guard pending Phase-4 bridge is invalid",
+            )),
+        );
+    });
+}
+
+#[test]
+fn try_state_rejects_unpinned_queued_and_rerun_recovery_images() {
+    new_test_ext().execute_with(|| {
+        setup_upgrade(1, b"queued-unpinned-primary", 91);
+        RecoveryPins::set(Vec::new());
+        assert_eq!(
+            GuardPallet::do_try_state(),
+            Err(TryRuntimeError::Other(
+                "execution guard queued recovery image is invalid",
+            )),
+        );
+    });
+    new_test_ext().execute_with(|| {
+        setup_upgrade(1, b"rerun-unpinned-primary", 91);
+        assert_ok!(GuardPallet::dequeue_for_rerun(1));
+        RecoveryPins::set(Vec::new());
+        assert_eq!(
+            GuardPallet::do_try_state(),
+            Err(TryRuntimeError::Other(
+                "execution guard rerun recovery pin is orphaned",
+            )),
+        );
+    });
+}
+
+#[test]
+fn try_state_rejects_rerun_recovery_counter_drift() {
+    new_test_ext().execute_with(|| {
+        setup_upgrade(1, b"rerun-counter-primary", 91);
+        assert_ok!(GuardPallet::dequeue_for_rerun(1));
+        sp_io::storage::set(
+            &RerunRecoveryPins::<Test>::counter_storage_final_key(),
+            &0_u32.encode(),
+        );
+        assert_eq!(
+            GuardPallet::do_try_state(),
+            Err(TryRuntimeError::Other(
+                "execution guard rerun recovery-image bound exceeded",
+            )),
+        );
+    });
+}
+
+#[test]
+fn upgrade_admission_requires_one_distinct_attested_recovery_image() {
+    new_test_ext().execute_with(|| {
+        let primary_hash = hash(b"primary-without-recovery");
+        AttestationArtifact::set(Some((7, primary_hash)));
+
+        assert_noop!(
+            enqueue_code(1, authorize_call(primary_hash), 7, 77),
+            Error::<Test>::RecoveryImageMissing
+        );
+        assert!(!Queue::<Test>::contains_key(1));
+        assert!(!QueuedRecoveryImages::<Test>::contains_key(1));
+
+        let (same_hash, same_len) = put_recovery_preimage(b"same-image");
+        RecoveryAttestationArtifact::set(Some((TEST_RECOVERY_ATTESTATION_ID, same_hash)));
+        let (payload_hash, payload_len) = put_preimage(&[
+            authorize_call(same_hash),
+            recovery_commit_call(same_hash, same_len, 3, TEST_RECOVERY_ATTESTATION_ID),
+        ]);
+        commit_payload(2, payload_hash);
+        let mut item = queued_item(
+            2,
+            futarchy_primitives::ProposalClass::Code,
+            payload_hash,
+            payload_len,
+            vec![CallDomain::InternalRootAuthorizeUpgrade, CallDomain::Code],
+        );
+        item.attestation_id = Some(TEST_RECOVERY_ATTESTATION_ID);
+        item.ratify_ref = Some(78);
+        assert_noop!(
+            GuardPallet::enqueue(RuntimeOrigin::signed(epoch_account()), item, false),
+            Error::<Test>::RecoveryImageInvalid
+        );
+        assert!(!Queue::<Test>::contains_key(2));
+
+        assert_noop!(
+            GuardPallet::commit_recovery_image(
+                RuntimeOrigin::from(pallet_origins::Origin::FutarchyCode),
+                hash(TEST_RECOVERY_CODE),
+                TEST_RECOVERY_CODE.len() as u32,
+                3,
+                TEST_RECOVERY_ATTESTATION_ID,
+            ),
+            Error::<Test>::RecoveryImageInvalid
+        );
+        assert!(RecoveryImage::<Test>::get().is_none());
+    });
+}
+
+#[test]
+fn phase_three_exact_bridge_is_one_shot_and_requires_a_justification() {
+    new_test_ext().execute_with(|| {
+        let primary = b"phase-four-primary-runtime";
+        let primary_hash = hash(primary);
+        setup_upgrade(1, primary, 91);
+        ExactPhaseThree::set(true);
+        let justification_hash = [0x44; 32];
+
+        assert_noop!(
+            GuardPallet::authorize_phase_four(
+                RuntimeOrigin::signed(keeper()),
+                1,
+                justification_hash,
+            ),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(
+            GuardPallet::authorize_phase_four(RuntimeOrigin::root(), 1, [0; 32]),
+            Error::<Test>::JustificationMissing
+        );
+        let post = GuardPallet::authorize_phase_four(RuntimeOrigin::root(), 1, justification_hash)
+            .expect("exact bridge origin authorizes the passed shadow mandate");
+        assert_eq!(post.pays_fee, Pays::No);
+        assert_eq!(
+            PhaseFourBridge::<Test>::get(),
+            PhaseFourBridgeState::Pending {
+                pid: 1,
+                code_hash: primary_hash,
+                plan: test_phase_four_plan(),
+            }
+        );
+        assert_eq!(
+            PendingUpgradeStorage::<Test>::get().map(|pending| pending.hash),
+            Some(primary_hash)
+        );
+        assert!(RecoveryImage::<Test>::get().is_some_and(|recovery| {
+            recovery.pid == 1 && recovery.primary_hash == primary_hash
+        }));
+
+        let replay =
+            GuardPallet::authorize_phase_four(RuntimeOrigin::root(), 1, justification_hash)
+                .expect_err("a pending bridge cannot be replayed");
+        assert_eq!(replay.error, Error::<Test>::PhaseFourBridgeUsed.into());
+
+        assert_ok!(GuardPallet::phase_four_scheduled(primary_hash));
+        assert_eq!(
+            PhaseFourBridge::<Test>::get(),
+            PhaseFourBridgeState::Scheduled {
+                pid: 1,
+                code_hash: primary_hash,
+                plan: test_phase_four_plan(),
+            }
+        );
+        System::set_block_number(
+            PendingUpgradeStorage::<Test>::get()
+                .expect("pending bridge upgrade")
+                .applicable_at
+                .into(),
+        );
+        assert_ok!(GuardPallet::validation_code_applied());
+        assert_eq!(
+            PhaseFourBridge::<Test>::get(),
+            PhaseFourBridgeState::Consumed
+        );
+        let consumed =
+            GuardPallet::authorize_phase_four(RuntimeOrigin::root(), 1, justification_hash)
+                .expect_err("an applied bridge is permanently one-shot");
+        assert_eq!(consumed.error, Error::<Test>::PhaseFourBridgeUsed.into());
+        ExactPhaseThree::set(false);
+        ExactPhaseFour::set(true);
+        assert_ok!(GuardPallet::do_try_state());
+    });
+}
+
+#[test]
+fn phase_four_bridge_abort_returns_to_unused_without_leaking_upgrade_state() {
+    new_test_ext().execute_with(|| {
+        let primary_hash = hash(b"phase-four-relay-abort");
+        setup_upgrade(1, b"phase-four-relay-abort", 92);
+        ExactPhaseThree::set(true);
+        assert_ok!(GuardPallet::authorize_phase_four(
+            RuntimeOrigin::root(),
+            1,
+            [0x45; 32],
+        ));
+        assert_ok!(GuardPallet::phase_four_scheduled(primary_hash));
+        UpgradeSchedulingPerformed::set(true);
+        let _ = GuardPallet::on_initialize(System::block_number());
+        assert!(ScheduledUpgrade::<Test>::get().is_some());
+
+        assert_ok!(GuardPallet::validation_code_aborted());
+        assert_eq!(PhaseFourBridge::<Test>::get(), PhaseFourBridgeState::Unused);
+        assert!(PendingUpgradeStorage::<Test>::get().is_none());
+        assert!(ScheduledUpgrade::<Test>::get().is_none());
+        assert!(RecoveryImage::<Test>::get().is_none());
+        assert!(release_log().last().is_some_and(|(_, _, cleared)| *cleared));
+
+        let spacing_boundary = LastUpgradeAuthorized::<Test>::get()
+            .expect("first bridge authorization")
+            + CodeSpacing::get();
+        System::set_block_number(spacing_boundary.into());
+        let retry_hash = hash(b"phase-four-after-relay-abort");
+        setup_upgrade(2, b"phase-four-after-relay-abort", 93);
+        assert_ok!(GuardPallet::authorize_phase_four(
+            RuntimeOrigin::root(),
+            2,
+            [0x46; 32],
+        ));
+        assert_eq!(
+            PhaseFourBridge::<Test>::get(),
+            PhaseFourBridgeState::Pending {
+                pid: 2,
+                code_hash: retry_hash,
+                plan: test_phase_four_plan(),
+            }
+        );
+        assert_ok!(GuardPallet::do_try_state());
+    });
+}
+
+#[test]
+fn recovery_attestation_mismatch_rolls_back_then_exact_retry_commits_once() {
+    new_test_ext().execute_with(|| {
+        let primary = b"recovery-binding-primary";
+        let primary_hash = hash(primary);
+        setup_upgrade(1, primary, 93);
+        let descriptor = QueuedRecoveryImages::<Test>::get(1)
+            .expect("queue admission freezes the recovery descriptor");
+
+        RecoveryAttestationArtifact::set(Some((TEST_RECOVERY_ATTESTATION_ID, [0x55; 32])));
+        let queued_before = Queue::<Test>::get(1).expect("queued upgrade");
+        let mismatch = GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1)
+            .expect_err("a live recovery attestation mismatch fails before dispatch");
+        assert_eq!(mismatch.error, Error::<Test>::AttestationMissing.into());
+        assert_eq!(Queue::<Test>::get(1), Some(queued_before));
+        assert!(PendingUpgradeStorage::<Test>::get().is_none());
+        assert!(RecoveryImage::<Test>::get().is_none());
+        assert_eq!(QueuedRecoveryImages::<Test>::get(1), Some(descriptor));
+        assert!(UpgradeDispatchOrigins::get().is_empty());
+
+        RecoveryAttestationArtifact::set(Some((TEST_RECOVERY_ATTESTATION_ID, descriptor.hash)));
+        assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1));
+        let committed_at = System::block_number().saturated_into();
+        assert_eq!(
+            RecoveryImage::<Test>::get(),
+            Some(RecoveryImageCommitment {
+                pid: 1,
+                primary_hash,
+                hash: descriptor.hash,
+                len: descriptor.len,
+                target_spec_version: descriptor.target_spec_version,
+                attestation_id: descriptor.attestation_id,
+                committed_at,
+            })
+        );
+        assert!(!QueuedRecoveryImages::<Test>::contains_key(1));
+        assert_ok!(GuardPallet::do_try_state());
+    });
+}
+
+#[test]
+fn recovery_commitment_and_authorization_roll_back_together_on_release_refusal() {
+    new_test_ext().execute_with(|| {
+        setup_upgrade(1, b"recovery-release-rollback", 94);
+        let queued_before = Queue::<Test>::get(1).expect("queued upgrade");
+        let recovery_before =
+            QueuedRecoveryImages::<Test>::get(1).expect("queued recovery descriptor");
+        ReleaseRefuses::set(true);
+
+        let error = GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1)
+            .expect_err("release refusal rolls back the whole authorization");
+        assert_eq!(error.error, DispatchError::Other("release channel refused"));
+        assert_eq!(Queue::<Test>::get(1), Some(queued_before));
+        assert_eq!(QueuedRecoveryImages::<Test>::get(1), Some(recovery_before));
+        assert!(PendingUpgradeStorage::<Test>::get().is_none());
+        assert!(RecoveryImage::<Test>::get().is_none());
+        assert_eq!(
+            UpgradeDispatchOrigins::get(),
+            vec![UpgradeDispatchOrigin::Root]
+        );
+        assert!(release_log().is_empty());
+        assert!(Unpinned::get().is_empty());
+        assert_ok!(GuardPallet::do_try_state());
+    });
+}
+
+#[test]
+fn prepared_recovery_is_bound_to_exact_bytes_and_terminal_version() {
+    new_test_ext().execute_with(|| {
+        setup_upgrade(1, b"recovery-prepare-primary", 95);
+        assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1));
+        let recovery = RecoveryImage::<Test>::get().expect("recovery committed");
+        System::set_block_number(
+            PendingUpgradeStorage::<Test>::get()
+                .expect("pending primary upgrade")
+                .applicable_at
+                .into(),
+        );
+        assert_ok!(GuardPallet::validation_code_applied());
+        System::set_block_number(
+            recovery
+                .committed_at
+                .saturating_add(DESCRIPTOR_LEAD_TIME)
+                .into(),
+        );
+        ObservedSpecVersion::set(Some(recovery.target_spec_version));
+
+        let (prepared, bytes) = GuardPallet::prepare_recovery_image()
+            .expect("exact pinned recovery image is materialized");
+        assert_eq!(prepared, recovery);
+        assert_eq!(bytes, TEST_RECOVERY_CODE);
+
+        PreimageData::mutate(|items| {
+            let (_, bytes) = items
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == recovery.hash)
+                .expect("recovery preimage remains pinned");
+            bytes[0] ^= 1;
+        });
+        assert_noop!(
+            GuardPallet::prepare_recovery_image(),
+            Error::<Test>::BadPreimage
+        );
+    });
+}
+
+#[test]
+fn terminal_recovery_eligibility_is_frozen_before_primary_application() {
+    new_test_ext().execute_with(|| {
+        setup_upgrade(1, b"recovery-trigger-attestation", 96);
+        assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1));
+        let recovery = RecoveryImage::<Test>::get().expect("recovery committed");
+        System::set_block_number(
+            PendingUpgradeStorage::<Test>::get()
+                .expect("pending primary upgrade")
+                .applicable_at
+                .into(),
+        );
+        assert_ok!(GuardPallet::validation_code_applied());
+        System::set_block_number(
+            recovery
+                .committed_at
+                .saturating_add(DESCRIPTOR_LEAD_TIME)
+                .into(),
+        );
+        ObservedSpecVersion::set(Some(recovery.target_spec_version));
+
+        AttestationPresent::set(false);
+        assert_ok!(GuardPallet::prepare_recovery_image());
+
+        AttestationPresent::set(true);
+        AttestationQuorum::set(false);
+        assert_ok!(GuardPallet::prepare_recovery_image());
+
+        AttestationQuorum::set(true);
+        RecoveryAttestationArtifact::set(Some((recovery.attestation_id, [0x99; 32])));
+        assert_ok!(GuardPallet::prepare_recovery_image());
+        assert_eq!(RecoveryImage::<Test>::get(), Some(recovery));
+    });
+}
+
+#[test]
 fn ratify_binds_referendum_and_payload_and_emits_frozen_event() {
     new_test_ext().execute_with(|| {
         let code = b"ratified-runtime";
         let code_hash = hash(code);
-        AttestationArtifact::set(Some((7, code_hash)));
-        assert_ok!(enqueue_code(1, authorize_call(code_hash), 7, 77));
+        assert_ok!(enqueue_upgrade_payload(1, code_hash, 7, 77));
         assert_noop!(
             GuardPallet::ratify(ratify_origin(), 1, 78),
             Error::<Test>::NotRatified
@@ -1057,7 +1727,7 @@ fn prequeue_ratification_is_bound_consumed_and_epoch_reap_is_narrow() {
     new_test_ext().execute_with(|| {
         let code = b"prequeue-ratified-runtime";
         let code_hash = hash(code);
-        let (payload_hash, _) = put_preimage(&[authorize_call(code_hash)]);
+        let (payload_hash, _) = prepare_upgrade_payload(code_hash);
         commit_payload(1, payload_hash);
         assert_ok!(GuardPallet::ratify(ratify_origin(), 1, 77));
         let record = Ratifications::<Test>::get(1).expect("prequeue ratification");
@@ -1071,8 +1741,7 @@ fn prequeue_ratification_is_bound_consumed_and_epoch_reap_is_narrow() {
             })
         ));
 
-        AttestationArtifact::set(Some((7, code_hash)));
-        assert_ok!(enqueue_code(1, authorize_call(code_hash), 7, 77));
+        assert_ok!(enqueue_upgrade_payload(1, code_hash, 7, 77));
         assert!(Queue::<Test>::get(1).expect("queued").ratification_passed);
         assert_eq!(Ratifications::<Test>::get(1), Some(record));
 
@@ -1122,10 +1791,16 @@ fn r2_dequeue_terminal_is_idempotent_and_clears_all_guard_owned_state() {
         assert!(!PreimageData::get()
             .iter()
             .any(|(candidate, _)| *candidate == payload_hash));
-        assert_eq!(Unpinned::get(), vec![payload_hash]);
+        assert_eq!(
+            Unpinned::get(),
+            vec![hash(TEST_RECOVERY_CODE), payload_hash]
+        );
 
         assert_ok!(GuardPallet::dequeue_terminal(1));
-        assert_eq!(Unpinned::get(), vec![payload_hash]);
+        assert_eq!(
+            Unpinned::get(),
+            vec![hash(TEST_RECOVERY_CODE), payload_hash]
+        );
         assert_ok!(GuardPallet::do_try_state());
     });
 }
@@ -1544,10 +2219,13 @@ fn code_spacing_exact_boundary_and_expedited_zero_spacing_are_recorded() {
     new_test_ext().execute_with(|| {
         let code = b"expedited-runtime";
         let code_hash = hash(code);
-        let call = authorize_call(code_hash);
-        let (payload_hash, payload_len) = put_preimage(&[call]);
-        commit_payload(1, payload_hash);
         AttestationArtifact::set(Some((7, code_hash)));
+        let (payload_hash, payload_len) = prepare_upgrade_payload(code_hash);
+        commit_payload(1, payload_hash);
+        assert_ok!(GuardPallet::qualify_recovery_image(
+            RuntimeOrigin::signed(keeper()),
+            1,
+        ));
         MigrationHalt::<Test>::put(true);
         LastUpgradeAuthorized::<Test>::put(1);
         let mut item = queued_item(
@@ -1555,7 +2233,7 @@ fn code_spacing_exact_boundary_and_expedited_zero_spacing_are_recorded() {
             futarchy_primitives::ProposalClass::Code,
             payload_hash,
             payload_len,
-            vec![CallDomain::InternalRootAuthorizeUpgrade],
+            vec![CallDomain::InternalRootAuthorizeUpgrade, CallDomain::Code],
         );
         item.attestation_id = Some(7);
         item.ratify_ref = Some(9);

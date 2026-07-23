@@ -79,6 +79,33 @@ def _event_fixture():
 
 
 class DeadlineTests(unittest.TestCase):
+    def test_recovery_metadata_coverage_checks_every_metadata_surface(self) -> None:
+        _, _, metadata, event = _event_fixture()
+        event["required"] = True
+        raw = {
+            "id": "storage.release_channel",
+            "kind": "raw_storage",
+            "required": True,
+        }
+        recorded, missing = RECORDER.metadata_surface_coverage(
+            metadata, [event, raw]
+        )
+        self.assertEqual(recorded, ["event.mini.changed"])
+        self.assertEqual(missing, [])
+
+        drifted = {
+            **event,
+            "layout": {"fields": [{"name": "wrong", "type": "u32"}]},
+        }
+        recorded, missing = RECORDER.metadata_surface_coverage(
+            metadata, [drifted, raw]
+        )
+        self.assertEqual(recorded, [])
+        self.assertEqual(
+            [(item["surface"], item["reason"]) for item in missing],
+            [("event.mini.changed", "layout mismatch")],
+        )
+
     def test_unrelated_notifications_cannot_extend_operation_deadline(self) -> None:
         now = [0.0]
 

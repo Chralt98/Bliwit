@@ -474,18 +474,17 @@ mod benches {
         for pid in 1..=u64::from(n) {
             let mut proposal =
                 benchmark_proposal::<T>(pid, ProposalState::Qualified, TERMINAL_SETTLEMENT_EPOCH);
-            if proposal.payload_len != futarchy_primitives::kernel::MAX_BYTES
-                || payload_hashes.contains(&proposal.payload_hash)
-            {
+            proposal.class = ProposalClass::Code;
+            T::BenchmarkHelper::prime_recovery_qualification(&mut proposal);
+            if payload_hashes.contains(&proposal.payload_hash) {
                 return Err(BenchmarkError::Stop(
-                    "tick items require distinct maximum-size payload preimages",
+                    "tick items require distinct recovery-qualified payload preimages",
                 ));
             }
             payload_hashes.push(proposal.payload_hash);
             T::Preimage::request(proposal.payload_hash)
                 .map_err(|_| BenchmarkError::Stop("tick qualification preimage pin failed"))?;
             crate::QualificationPreimageRequests::<T>::insert(pid, proposal.payload_hash);
-            proposal.class = ProposalClass::Code;
             proposal.decide_at = block_for(
                 TERMINAL_SETTLEMENT_EPOCH,
                 phase_offsets::DECIDE_NUM,
@@ -563,10 +562,11 @@ mod benches {
         let mut state = EpochState::new();
         let mut proposal = benchmark_proposal::<T>(pid, ProposalState::Trading, 0);
         proposal.class = ProposalClass::Code;
+        proposal.markets = Some(T::BenchmarkHelper::prime_decision(pid, 0, true));
+        T::BenchmarkHelper::prime_recovery_qualification(&mut proposal);
         T::Preimage::request(proposal.payload_hash)
             .map_err(|_| BenchmarkError::Stop("decide qualification preimage pin failed"))?;
         crate::QualificationPreimageRequests::<T>::insert(pid, proposal.payload_hash);
-        proposal.markets = Some(T::BenchmarkHelper::prime_decision(pid, 0, true));
         T::BenchmarkHelper::prime_guard_enqueue(pid);
         state.resource_locks = proposal
             .resources

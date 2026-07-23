@@ -118,6 +118,47 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("if-no-files-found: ignore", workflow)
         self.assertIn("path: release-work/env-evidence/**", workflow)
 
+    def test_release_profile_is_explicit_and_reviewed(self) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        for profile in ("bootstrap", "phase-four"):
+            self.assertIn(f"          - {profile}", workflow)
+        self.assertNotIn("          - bootstrap-recovery", workflow)
+        self.assertNotIn("          - phase-four-recovery", workflow)
+        self.assertIn(
+            "RUNTIME_PROFILE: ${{ github.event_name == 'workflow_dispatch' "
+            "&& inputs.runtime_profile || '' }}",
+            workflow,
+        )
+        self.assertIn('tools/release/build-runtime.sh "$RELEASE_WORK/runtime" "$primary_profile"', workflow)
+        self.assertIn(
+            'tools/release/build-runtime.sh "$RELEASE_WORK/runtime/recovery" "$recovery_profile"',
+            workflow,
+        )
+        self.assertIn(
+            '--recovery-metadata "$RELEASE_WORK/runtime/recovery/metadata.scale"',
+            workflow,
+        )
+
+    def test_standing_gate_runs_explicit_runtime_profile_matrix(self) -> None:
+        script = (ROOT / "tools/ci/rust-workspace-gates.sh").read_text(
+            encoding="utf-8"
+        )
+        profile_gate = (ROOT / "tools/ci/runtime-profile-gates.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("tools/ci/runtime-profile-gates.sh", script)
+        for profile in (
+            "bootstrap",
+            "phase-four",
+            "bootstrap-recovery",
+            "phase-four-recovery",
+        ):
+            self.assertIn(f"  {profile}", profile_gate)
+        self.assertIn("--no-default-features", profile_gate)
+        self.assertIn(
+            "recovery_profile_has_zero_multi_block_migrations", profile_gate
+        )
+
     def test_environment_ci_compiles_and_tests_the_evidence_driver(self) -> None:
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn("pyyaml==6.0.2 websockets==15.0.1", workflow)

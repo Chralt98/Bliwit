@@ -51,9 +51,11 @@ use frame_support::{
     BoundedVec,
 };
 use futarchy_primitives::{
-    kernel, BlockNumber, EpochId, ProposalClass, ProposalId, ResourceId, RuntimeVersionConstraint,
-    H256,
+    kernel, Balance, BlockNumber, EpochId, ProposalClass, ProposalId, ResourceId,
+    RuntimeVersionConstraint, H256,
 };
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
+use scale_info::TypeInfo;
 
 pub use execution_guard_core::{
     domain_allowed, requires_ratification, AttestationView as CoreAttestationView, CallDomain,
@@ -78,6 +80,8 @@ pub const MAX_MIGRATION_HALT_CURSOR_BOUND: u32 =
     futarchy_primitives::bounds::MIGRATION_CURSOR_MAX_LEN + 16;
 pub const MAX_RATIFICATIONS_BOUND: u32 =
     futarchy_primitives::bounds::INTAKE_QUEUE + futarchy_primitives::bounds::MAX_LIVE_PROPOSALS;
+pub const MAX_QUALIFIED_RECOVERY_IMAGES_BOUND: u32 =
+    futarchy_primitives::bounds::INTAKE_QUEUE + futarchy_primitives::bounds::MAX_LIVE_PROPOSALS;
 
 pub type ReDerivedDomains = BoundedVec<CallDomain, ConstU32<MAX_CALLS_BOUND>>;
 
@@ -97,6 +101,12 @@ pub trait EpochHandoff {
     /// Ratification may precede queue admission (06 §2.2), so the guard
     /// cannot derive this binding from `Queue` alone.
     fn payload_hash(pid: ProposalId) -> Option<H256>;
+    /// Immutable proposal context exposed only while a proposal is eligible
+    /// for healthy-chain recovery-image qualification.
+    fn recovery_qualification_context(pid: ProposalId) -> Option<(H256, RuntimeVersionConstraint)> {
+        let _ = pid;
+        None
+    }
     fn mark_executed(pid: ProposalId) -> DispatchResult;
     fn mark_failed_executed(pid: ProposalId) -> DispatchResult;
     fn retry_exhausted_to_measurement(pid: ProposalId) -> DispatchResult;
@@ -141,6 +151,45 @@ pub trait Preimages {
     fn fetch(hash: H256, expected_len: u32) -> Option<Vec<u8>>;
     fn pin(hash: H256) -> DispatchResult;
     fn unpin(hash: H256) -> DispatchResult;
+}
+
+/// Preimage access for a full runtime image. Unlike [`Preimages`], this seam is
+/// bounded by `MaxRuntimeCodeBytes`, not the 64 KiB proposal-payload ceiling.
+pub trait RecoveryImages {
+    fn len(hash: H256) -> Option<u32>;
+    fn fetch(hash: H256, expected_len: u32) -> Option<Vec<u8>>;
+    fn is_pinned(_hash: H256) -> bool {
+        true
+    }
+    /// Qualification-time, state-backed host envelope. This must include every
+    /// artifact-independent schedulability bound available while the chain is
+    /// healthy (notably the relay host's current maximum code size).
+    fn preflight_qualifies(_code: &[u8]) -> bool {
+        true
+    }
+    fn pin(hash: H256) -> DispatchResult;
+    fn unpin(hash: H256) -> DispatchResult;
+}
+
+/// Runtime-owned Phase-3 state used by the one-shot sudo-to-guard bridge.
+pub trait PhaseState {
+    /// True only for the exact Phase-3 bootstrap posture: shadow mode and sudo
+    /// present, with no binding proposal-class bit armed.
+    fn exact_phase_three() -> bool;
+    fn exact_phase_four() -> bool;
+    /// Monotone post-bootstrap predicate used by permanent bridge history:
+    /// PARAM remains armed, Sudo/shadow never return, and later binding bits
+    /// may be added by subsequent phases.
+    fn post_sudo_phase() -> bool {
+        Self::exact_phase_four()
+    }
+    /// True when this proposal class is binding in the current phase.
+    fn class_execution_enabled(_class: ProposalClass) -> bool {
+        true
+    }
+    fn phase_four_plan_valid(_plan: &PhaseFourPlan) -> bool {
+        true
+    }
 }
 
 /// Bonded attestor projection (I-19). All reads fail closed.
@@ -192,6 +241,21 @@ pub trait UpgradeSchedule {
 /// at most one bounded storage read, which `on_initialize` charges.
 pub trait MigrationStatusProvider {
     fn cursor_exists() -> bool;
+    fn recovery_state() -> MigrationRecoveryState {
+        MigrationRecoveryState::default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MigrationRecoveryState {
+    pub lockdown: bool,
+    pub bypass: bool,
+    pub retired_cursor: bool,
+    pub scheduled_hash: Option<H256>,
+    pub aborted: bool,
+    pub recovery_code_applied: bool,
+    pub phase_transition_lock: bool,
+    pub phase_transition_applied: bool,
 }
 
 impl MigrationStatusProvider for () {
@@ -233,6 +297,17 @@ pub trait BatchDispatcher<Call> {
     fn safety_filter(class: ProposalClass, call: &Call) -> bool;
     /// Recognizes only the exact allowlisted `system.authorize_upgrade(hash)`.
     fn authorize_upgrade_hash(call: &Call) -> Option<H256>;
+    fn recovery_image_descriptor(call: &Call) -> Option<RecoveryImageDescriptor>;
+    fn phase_four_plan(_class: ProposalClass, _calls: &[Call]) -> Option<PhaseFourPlan> {
+        None
+    }
+    /// True only for the two exact cap-value leaves that a Phase-4 mandate
+    /// commits for deferred application. They are validated at authorization
+    /// but MUST NOT dispatch until the code-application migration atomically
+    /// removes Sudo and arms PARAM.
+    fn is_phase_four_cap_commitment(_call: &Call) -> bool {
+        false
+    }
     fn dispatch_with_class_origin(call: Call, class: ProposalClass) -> DispatchResult;
     /// Post-info-preserving form used for execute refunds. Existing runtime
     /// dispatchers that erase `PostDispatchInfo` remain source-compatible and
@@ -263,11 +338,52 @@ pub trait BatchDispatcher<Call> {
     fn observed_runtime_version(code: &[u8]) -> Option<RuntimeVersionConstraint>;
 }
 
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub struct RecoveryImageDescriptor {
+    pub hash: H256,
+    pub len: u32,
+    pub target_spec_version: u32,
+    pub attestation_id: u32,
+}
+
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub struct PhaseFourPlan {
+    pub tvl_cap: Balance,
+    pub deposit_cap: Balance,
+}
+
 #[cfg(feature = "runtime-benchmarks")]
 pub trait BenchmarkHelper<RuntimeOrigin> {
     fn ratify_origin() -> RuntimeOrigin;
+    fn recovery_commit_origin() -> RuntimeOrigin;
+    fn phase_four_origin() -> RuntimeOrigin;
     fn prime_ratify(pid: ProposalId, referendum_index: u32);
     fn prime_execute(pid: ProposalId, calls: u32);
+    fn prime_recovery_commit(pid: ProposalId) -> RecoveryImageDescriptor;
+    fn prime_recovery_qualification(pid: ProposalId, bytes: u32);
+    fn prime_phase_four(pid: ProposalId);
     fn prime_failed(pid: ProposalId);
     fn prime_pending_upgrade(bytes: u32) -> Vec<u8>;
     fn prime_stale(pid: ProposalId);
@@ -325,8 +441,12 @@ pub mod pallet {
         type UpgradeSchedule: UpgradeSchedule;
         type MigrationStatus: MigrationStatusProvider;
         type Preimages: Preimages;
+        type RecoveryImages: RecoveryImages;
         type ReleaseChannel: ReleaseChannelWriter;
         type RatifyOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+        type RecoveryCommitOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+        type PhaseFourBridgeOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+        type PhaseState: PhaseState;
         type Dispatcher: BatchDispatcher<Self::RuntimeCall>;
         /// Fail-soft keeper rebate sink (08 §6). It must never affect a crank.
         type KeeperRebate: KeeperRebateSink<Self::AccountId>;
@@ -356,6 +476,38 @@ pub mod pallet {
     pub type RuntimeBatch<T> =
         BoundedVec<<T as frame_system::Config>::RuntimeCall, ConstU32<MAX_CALLS_BOUND>>;
     pub type RuntimeCode<T> = BoundedVec<u8, <T as Config>::MaxRuntimeCodeBytes>;
+
+    #[derive(
+        Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+    )]
+    pub struct RecoveryImageCommitment {
+        pub pid: ProposalId,
+        pub primary_hash: H256,
+        pub hash: H256,
+        pub len: u32,
+        pub target_spec_version: u32,
+        pub attestation_id: u32,
+        pub committed_at: BlockNumber,
+    }
+
+    #[derive(
+        Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+    )]
+    pub struct QualifiedRecoveryImage {
+        pub payload_hash: H256,
+        pub primary_hash: H256,
+        pub version_constraint: RuntimeVersionConstraint,
+        pub descriptor: RecoveryImageDescriptor,
+    }
+
+    #[derive(
+        Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+    )]
+    pub(crate) struct ExecutingUpgradeContext {
+        pub(crate) pid: ProposalId,
+        pub(crate) primary_hash: H256,
+        pub(crate) primary_target_spec_version: u32,
+    }
 
     /// 02 §7.4 Queue value. Field order is the brief's frozen order.
     #[derive(
@@ -526,6 +678,72 @@ pub mod pallet {
     pub type AttestationBindings<T: Config> =
         StorageMap<_, Blake2_128Concat, ProposalId, (u32, H256), OptionQuery>;
 
+    /// The recovery image committed by the currently authorized CODE/META
+    /// mandate. Its full Wasm lives in pallet-preimage and stays requested
+    /// until the primary image finishes without an MBM, its MBM completes, or
+    /// this image is applied.
+    #[pallet::storage]
+    pub type RecoveryImage<T: Config> = StorageValue<_, RecoveryImageCommitment, OptionQuery>;
+
+    #[pallet::storage]
+    pub type QueuedRecoveryImages<T: Config> =
+        StorageMap<_, Blake2_128Concat, ProposalId, RecoveryImageDescriptor, OptionQuery>;
+
+    /// A recovery image qualified while the chain is healthy. Qualification is
+    /// a separately weighted, one-image operation so the epoch's ten-item tick
+    /// batch never multiplies a full-runtime-Wasm proof. The preimage request
+    /// owned by this entry transfers to `QueuedRecoveryImages` at enqueue.
+    #[pallet::storage]
+    pub type QualifiedRecoveryImages<T: Config> =
+        CountedStorageMap<_, Blake2_128Concat, ProposalId, QualifiedRecoveryImage, OptionQuery>;
+
+    /// Recovery-image pins retained across the proposal's non-terminal rerun
+    /// cycle. Ownership transfers back to `QueuedRecoveryImages` on re-enqueue
+    /// without issuing a second preimage request.
+    #[pallet::storage]
+    pub type RerunRecoveryPins<T: Config> =
+        CountedStorageMap<_, Blake2_128Concat, ProposalId, RecoveryImageDescriptor, OptionQuery>;
+
+    /// Ephemeral context visible only while the guard dispatches one already-
+    /// validated upgrade batch. It prevents the public call surface from
+    /// creating an unbound recovery commitment.
+    #[pallet::storage]
+    pub(crate) type ExecutingUpgrade<T: Config> =
+        StorageValue<_, ExecutingUpgradeContext, OptionQuery>;
+
+    #[derive(
+        Clone,
+        Debug,
+        Decode,
+        DecodeWithMemTracking,
+        Default,
+        Encode,
+        Eq,
+        MaxEncodedLen,
+        PartialEq,
+        TypeInfo,
+    )]
+    pub enum PhaseFourBridgeState {
+        #[default]
+        Unused,
+        Pending {
+            pid: ProposalId,
+            code_hash: H256,
+            plan: PhaseFourPlan,
+        },
+        Scheduled {
+            pid: ProposalId,
+            code_hash: H256,
+            plan: PhaseFourPlan,
+        },
+        Consumed,
+    }
+
+    /// One-shot Phase-3→4 bridge state. Relay Abort returns `Pending` to
+    /// `Unused`; only observed code application makes it permanently consumed.
+    #[pallet::storage]
+    pub type PhaseFourBridge<T: Config> = StorageValue<_, PhaseFourBridgeState, ValueQuery>;
+
     /// Payload pins retained while a queued proposal is in a rerun cycle.
     /// This internal bounded marker transfers the existing pin back into a
     /// later queue entry without an unpinned interval or a double request.
@@ -592,6 +810,28 @@ pub mod pallet {
             cursor: MigrationHaltCursor,
             failed_step: Option<u32>,
         },
+        // B16 operator diagnostics are appended after every pre-existing
+        // off-contract variant so their introduction cannot renumber one.
+        RecoveryImageCommitted {
+            pid: ProposalId,
+            primary_hash: H256,
+            recovery_hash: H256,
+            target_spec_version: u32,
+        },
+        RecoveryImageApplied {
+            recovery_hash: H256,
+            spec_version: u32,
+        },
+        PhaseFourUpgradeAuthorized {
+            pid: ProposalId,
+            code_hash: H256,
+            justification_hash: H256,
+        },
+        RecoveryImageQualified {
+            pid: ProposalId,
+            recovery_hash: H256,
+            target_spec_version: u32,
+        },
     }
 
     #[pallet::error]
@@ -624,6 +864,11 @@ pub mod pallet {
         DescriptorLeadTime,
         UpgradeHashMismatch,
         UpgradeVersionMismatch,
+        RecoveryImageMissing,
+        RecoveryImageInvalid,
+        ShadowMode,
+        PhaseFourBridgeUsed,
+        JustificationMissing,
         RetryWindowOpen,
         Overflow,
     }
@@ -633,17 +878,32 @@ pub mod pallet {
         fn on_initialize(now: BlockNumberFor<T>) -> Weight {
             let mut writes = 0;
             if PendingAnchorCapture::<T>::get() {
+                let mut capture_consumed = false;
                 if T::MigrationStatus::cursor_exists() {
                     if let Some(anchor_block) = now.checked_sub(&One::one()) {
                         let parent_hash = frame_system::Pallet::<T>::parent_hash().into();
                         PreMigrationAnchor::<T>::put((anchor_block, parent_hash));
                         writes += 1;
+                        capture_consumed = true;
                     }
+                } else if Self::release_recovery_image().is_ok() {
+                    // The primary image registered no MBMs, so its dormant
+                    // recovery request has no remaining purpose.
+                    writes += 1;
+                    capture_consumed = true;
+                } else {
+                    // A corrupt/missing request must not silently consume the
+                    // only cleanup latch. Keep retrying under an execution
+                    // halt until operators repair the pin state.
+                    MigrationHalt::<T>::put(true);
+                    writes += 1;
                 }
-                // No cursor means the image registered no MBMs. Either way,
-                // this application boundary is consumed exactly once.
-                PendingAnchorCapture::<T>::kill();
-                writes += 1;
+                if capture_consumed {
+                    // No cursor means the image registered no MBMs. Either
+                    // way, a valid application boundary is consumed once.
+                    PendingAnchorCapture::<T>::kill();
+                    writes += 1;
+                }
             }
             if let Some(pending) = PendingUpgrade::<T>::get() {
                 if ScheduledUpgrade::<T>::get().is_none()
@@ -695,15 +955,15 @@ pub mod pallet {
             let checks_only = T::WeightInfo::execute(MAX_CALLS_BOUND);
             let who = ensure_signed(origin)
                 .map_err(|error| Self::execute_error_with_weight(error.into(), checks_only))?;
-            match with_storage_layer(|| Self::do_execute(pid)) {
-                Ok(charge) => {
+            match with_storage_layer(|| Self::do_execute(pid, false)) {
+                Ok(result) => {
                     // B9 keeper rebate: the crank advanced state (a successful
                     // execute always consumes the queue entry). Fail-soft — the
                     // rebate can never affect the crank result (08 §6.3).
                     if !Queue::<T>::contains_key(pid) {
                         T::KeeperRebate::rebate(&who, CrankClass::General);
                     }
-                    let actual = Self::execute_actual_weight(charge);
+                    let actual = Self::execute_actual_weight(result.charge);
                     debug_assert!(actual.all_lte(Self::execute_precharge()));
                     Ok(PostDispatchInfo {
                         actual_weight: Some(actual),
@@ -766,6 +1026,98 @@ pub mod pallet {
                 T::KeeperRebate::rebate(&who, CrankClass::General);
             }
             result
+        }
+
+        /// Commit the pre-attested recovery Wasm carried by the same
+        /// values-ratified CODE/META payload as its primary authorization.
+        /// The call is useful only inside the guard's transient dispatch
+        /// context; a bare custom-origin dispatch therefore still fails.
+        #[pallet::call_index(5)]
+        #[pallet::weight(T::WeightInfo::commit_recovery_image())]
+        pub fn commit_recovery_image(
+            origin: OriginFor<T>,
+            hash: H256,
+            len: u32,
+            target_spec_version: u32,
+            attestation_id: u32,
+        ) -> DispatchResult {
+            T::RecoveryCommitOrigin::ensure_origin(origin)?;
+            with_storage_layer(|| {
+                Self::do_commit_recovery_image(hash, len, target_spec_version, attestation_id)
+            })
+        }
+
+        /// One-shot Phase-3→4 bridge. Bootstrap sudo may select only a passed
+        /// shadow CODE/META mandate; all authorization checks and the sole
+        /// internal-Root dispatch remain inside the guard (I-10).
+        #[pallet::call_index(6)]
+        #[pallet::weight(Pallet::<T>::execute_precharge().saturating_add(T::WeightInfo::authorize_phase_four()))]
+        pub fn authorize_phase_four(
+            origin: OriginFor<T>,
+            pid: ProposalId,
+            justification_hash: H256,
+        ) -> DispatchResultWithPostInfo {
+            T::PhaseFourBridgeOrigin::ensure_origin(origin)?;
+            ensure!(
+                justification_hash != [0_u8; 32],
+                Error::<T>::JustificationMissing
+            );
+            ensure!(T::PhaseState::exact_phase_three(), Error::<T>::ShadowMode);
+            ensure!(
+                matches!(PhaseFourBridge::<T>::get(), PhaseFourBridgeState::Unused),
+                Error::<T>::PhaseFourBridgeUsed
+            );
+            let queued = Queue::<T>::get(pid).ok_or(Error::<T>::NotFound)?;
+            ensure!(
+                matches!(queued.class, ProposalClass::Code | ProposalClass::Meta),
+                Error::<T>::BadUpgradePayload
+            );
+            let charge = with_storage_layer(|| -> Result<ExecuteCharge, ExecuteFailure> {
+                let result = Self::do_execute(pid, true)?;
+                let pending = PendingUpgrade::<T>::get().ok_or(Error::<T>::BadUpgradePayload)?;
+                let plan = result
+                    .phase_four_plan
+                    .ok_or(Error::<T>::BadUpgradePayload)?;
+                PhaseFourBridge::<T>::put(PhaseFourBridgeState::Pending {
+                    pid,
+                    code_hash: pending.hash,
+                    plan,
+                });
+                Self::deposit_event(Event::PhaseFourUpgradeAuthorized {
+                    pid,
+                    code_hash: pending.hash,
+                    justification_hash,
+                });
+                Ok(result.charge)
+            })
+            .map_err(|failure| {
+                let actual = failure
+                    .post_dispatch_charge
+                    .map(Self::execute_actual_weight)
+                    .unwrap_or_else(|| T::WeightInfo::execute(MAX_CALLS_BOUND));
+                Self::execute_error_with_weight(failure.error, actual)
+            })?;
+            Ok(PostDispatchInfo {
+                actual_weight: Some(
+                    Self::execute_actual_weight(charge)
+                        .saturating_add(T::WeightInfo::authorize_phase_four()),
+                ),
+                pays_fee: Pays::No,
+            })
+        }
+
+        /// Permissionless, one-image recovery qualification. This operational
+        /// call is the only healthy-chain path that reads the full recovery
+        /// Wasm; epoch screening and queue admission consume the immutable
+        /// cached descriptor with bounded storage proofs.
+        #[pallet::call_index(7)]
+        #[pallet::weight((
+            T::WeightInfo::qualify_recovery_image(T::MaxRuntimeCodeBytes::get()),
+            DispatchClass::Operational,
+        ))]
+        pub fn qualify_recovery_image(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
+            let _ = ensure_signed(origin)?;
+            with_storage_layer(|| Self::do_qualify_recovery_image(pid))
         }
     }
 
@@ -899,6 +1251,11 @@ pub mod pallet {
         consumed_inner: Weight,
     }
 
+    struct ExecuteResult {
+        charge: ExecuteCharge,
+        phase_four_plan: Option<PhaseFourPlan>,
+    }
+
     struct ExecuteFailure {
         error: DispatchError,
         post_dispatch_charge: Option<ExecuteCharge>,
@@ -975,11 +1332,15 @@ pub mod pallet {
                     .checked_add(T::Params::exec_grace(item.class))
                     .ok_or(Error::<T>::Overflow)?;
                 ensure!(item.grace_end == grace_end, Error::<T>::GraceExpired);
+                let calls = Self::decode_batch(&bytes)?;
+                let phase_four_admission = T::PhaseState::exact_phase_three()
+                    && T::Dispatcher::phase_four_plan(item.class, &calls).is_some();
                 ensure!(
-                    item.declared_domains.iter().all(
-                        |domain| execution_guard_core::domain_allowed(item.class, *domain)
+                    item.declared_domains.iter().all(|domain| {
+                        (execution_guard_core::domain_allowed(item.class, *domain)
+                            || (phase_four_admission && *domain == CallDomain::Code))
                             && !matches!(domain, CallDomain::InternalRootApplyUpgrade)
-                    ),
+                    }),
                     Error::<T>::CapabilityDenied
                 );
                 let attestation_binding =
@@ -999,6 +1360,76 @@ pub mod pallet {
                     } else {
                         None
                     };
+                let mut primary_hash = None;
+                let mut recovery = None;
+                for call in &calls {
+                    if let Some(hash) = T::Dispatcher::authorize_upgrade_hash(call) {
+                        ensure!(
+                            primary_hash.replace(hash).is_none(),
+                            Error::<T>::BadUpgradePayload
+                        );
+                    }
+                    if let Some(descriptor) = T::Dispatcher::recovery_image_descriptor(call) {
+                        ensure!(
+                            recovery.replace(descriptor).is_none(),
+                            Error::<T>::BadUpgradePayload
+                        );
+                    }
+                }
+                match (primary_hash, recovery) {
+                    (Some(primary), Some(descriptor)) => {
+                        ensure!(descriptor.hash != primary, Error::<T>::RecoveryImageInvalid);
+                        ensure!(
+                            descriptor.target_spec_version
+                                == item.version_constraint.spec_version.saturating_add(2),
+                            Error::<T>::UpgradeVersionMismatch
+                        );
+                        ensure!(
+                            descriptor.len > 0
+                                && descriptor.len <= T::MaxRuntimeCodeBytes::get()
+                                && T::RecoveryImages::len(descriptor.hash) == Some(descriptor.len),
+                            Error::<T>::BadPreimage
+                        );
+                        ensure!(
+                            T::Attestations::artifact_hash(descriptor.attestation_id)
+                                == Some(descriptor.hash)
+                                && T::Attestations::present_unrevoked_unchallenged(
+                                    descriptor.attestation_id,
+                                )
+                                && T::Attestations::has_quorum(item.pid, descriptor.hash),
+                            Error::<T>::AttestationMissing
+                        );
+                        let retained_recovery = RerunRecoveryPins::<T>::get(item.pid);
+                        ensure!(
+                            retained_recovery.is_none() || retained_recovery == Some(descriptor),
+                            Error::<T>::RecoveryImageInvalid
+                        );
+                        if retained_recovery.is_none() {
+                            let qualified = QualifiedRecoveryImages::<T>::take(item.pid)
+                                .ok_or(Error::<T>::RecoveryImageInvalid)?;
+                            ensure!(
+                                qualified.payload_hash == item.payload_hash
+                                    && qualified.primary_hash == primary
+                                    && qualified.version_constraint == item.version_constraint
+                                    && qualified.descriptor == descriptor,
+                                Error::<T>::RecoveryImageInvalid
+                            );
+                        } else {
+                            ensure!(
+                                !QualifiedRecoveryImages::<T>::contains_key(item.pid),
+                                Error::<T>::RecoveryImageInvalid
+                            );
+                            RerunRecoveryPins::<T>::remove(item.pid);
+                        }
+                        QueuedRecoveryImages::<T>::insert(item.pid, descriptor);
+                    }
+                    (None, None) => ensure!(
+                        !RerunRecoveryPins::<T>::contains_key(item.pid)
+                            && !QualifiedRecoveryImages::<T>::contains_key(item.pid),
+                        Error::<T>::RecoveryImageInvalid
+                    ),
+                    _ => return Err(Error::<T>::RecoveryImageMissing.into()),
+                }
                 ensure!(
                     !expedited
                         || (matches!(item.class, ProposalClass::Code | ProposalClass::Meta)
@@ -1094,6 +1525,149 @@ pub mod pallet {
         /// rollback interval, so its application anchor must not outlive it.
         pub fn migration_completed() {
             PreMigrationAnchor::<T>::kill();
+            if Self::release_recovery_image().is_err() {
+                MigrationHalt::<T>::put(true);
+            }
+        }
+
+        /// Validate and materialize the exact pre-authorized recovery image.
+        /// The runtime calls this only from the mandatory parachain inherent,
+        /// inside the same storage transaction that retires the stuck cursor
+        /// and asks Cumulus to schedule the code.
+        pub fn prepare_recovery_image() -> Result<(RecoveryImageCommitment, Vec<u8>), DispatchError>
+        {
+            let recovery = RecoveryImage::<T>::get().ok_or(Error::<T>::RecoveryImageMissing)?;
+            let now = Self::now();
+            let applicable_at = recovery
+                .committed_at
+                .checked_add(DESCRIPTOR_LEAD_TIME)
+                .ok_or(Error::<T>::Overflow)?;
+            ensure!(now >= applicable_at, Error::<T>::DescriptorLeadTime);
+            ensure!(
+                recovery.len > 0 && recovery.len <= T::MaxRuntimeCodeBytes::get(),
+                Error::<T>::PayloadTooLarge
+            );
+            ensure!(
+                T::RecoveryImages::len(recovery.hash) == Some(recovery.len),
+                Error::<T>::BadPreimage
+            );
+            // Eligibility is frozen when the primary and recovery pair is
+            // authorized. Once the primary has applied, mutable membership,
+            // challenge, or revocation state must not strand a chain already
+            // in terminal lockdown with no callable repair surface.
+            let code = T::RecoveryImages::fetch(recovery.hash, recovery.len)
+                .ok_or(Error::<T>::BadPreimage)?;
+            ensure!(
+                u32::try_from(code.len()).ok() == Some(recovery.len)
+                    && Self::hash_bytes(&code) == recovery.hash,
+                Error::<T>::BadPreimage
+            );
+            let observed = T::Dispatcher::observed_runtime_version(&code)
+                .ok_or(Error::<T>::UpgradeVersionMismatch)?;
+            let current = Self::current_spec()?;
+            ensure!(
+                observed.spec_name == current.spec_name
+                    && observed.spec_version == recovery.target_spec_version,
+                Error::<T>::UpgradeVersionMismatch
+            );
+            Ok((recovery, code))
+        }
+
+        pub fn recovery_scheduled(hash: H256) -> DispatchResult {
+            let recovery = RecoveryImage::<T>::get().ok_or(Error::<T>::RecoveryImageMissing)?;
+            ensure!(recovery.hash == hash, Error::<T>::UpgradeHashMismatch);
+            Ok(())
+        }
+
+        /// Record the application boundary of the one-shot Phase-3→4 image.
+        /// The state transition is performed only after Cumulus accepts the
+        /// exact committed code for relay scheduling.
+        pub fn phase_four_scheduled(hash: H256) -> DispatchResult {
+            match PhaseFourBridge::<T>::get() {
+                PhaseFourBridgeState::Pending {
+                    pid,
+                    code_hash,
+                    plan,
+                } if code_hash == hash => {
+                    PhaseFourBridge::<T>::put(PhaseFourBridgeState::Scheduled {
+                        pid,
+                        code_hash,
+                        plan,
+                    });
+                    Ok(())
+                }
+                _ => Err(Error::<T>::PhaseFourBridgeUsed.into()),
+            }
+        }
+
+        pub fn recovery_code_applied(
+            installed_hash: H256,
+            installed_version: RuntimeVersionConstraint,
+        ) -> DispatchResult {
+            with_storage_layer(|| Self::do_recovery_code_applied(installed_hash, installed_version))
+        }
+
+        fn do_recovery_code_applied(
+            installed_hash: H256,
+            installed_version: RuntimeVersionConstraint,
+        ) -> DispatchResult {
+            let recovery = RecoveryImage::<T>::get().ok_or(Error::<T>::RecoveryImageMissing)?;
+            ensure!(
+                !T::MigrationStatus::cursor_exists(),
+                Error::<T>::RecoveryImageInvalid
+            );
+            ensure!(
+                installed_hash == recovery.hash,
+                Error::<T>::UpgradeHashMismatch
+            );
+            ensure!(
+                Self::current_spec()?.spec_name == installed_version.spec_name
+                    && installed_version.spec_version == recovery.target_spec_version,
+                Error::<T>::UpgradeVersionMismatch
+            );
+            match PendingUpgrade::<T>::get() {
+                Some(pending) => ensure!(
+                    pending.hash == recovery.primary_hash
+                        && pending
+                            .target_spec_version
+                            .checked_add(1)
+                            .is_some_and(|target| target == recovery.target_spec_version),
+                    Error::<T>::RecoveryImageInvalid
+                ),
+                None => ensure!(
+                    Self::current_spec()?
+                        .spec_version
+                        .checked_add(1)
+                        .is_some_and(|target| target == recovery.target_spec_version),
+                    Error::<T>::UpgradeVersionMismatch
+                ),
+            }
+            let mut state = Self::load()?;
+            state
+                .complete_recovery_application(recovery.hash, recovery.target_spec_version)
+                .map_err(Self::map_core_error)?;
+            T::ReleaseChannel::on_upgrade_applied(recovery.target_spec_version)?;
+            PendingUpgrade::<T>::kill();
+            ScheduledUpgrade::<T>::kill();
+            if matches!(
+                PhaseFourBridge::<T>::get(),
+                PhaseFourBridgeState::Scheduled {
+                    pid, code_hash, ..
+                }
+                    if pid == recovery.pid && code_hash == recovery.primary_hash
+            ) {
+                PhaseFourBridge::<T>::put(PhaseFourBridgeState::Consumed);
+            }
+            CurrentSpecName::<T>::put(installed_version);
+            PreMigrationAnchor::<T>::kill();
+            PendingAnchorCapture::<T>::kill();
+            Self::release_recovery_image()?;
+            Self::persist(state)?;
+            Self::deposit_event(Event::RecoveryImageApplied {
+                recovery_hash: recovery.hash,
+                spec_version: recovery.target_spec_version,
+            });
+            Ok(())
         }
 
         /// Deposit the PB-MIGRATION [`Event::MigrationHalted`] diagnostic
@@ -1105,6 +1679,14 @@ pub mod pallet {
                 cursor,
                 failed_step,
             });
+        }
+
+        fn release_recovery_image() -> DispatchResult {
+            if let Some(recovery) = RecoveryImage::<T>::get() {
+                T::RecoveryImages::unpin(recovery.hash)?;
+                RecoveryImage::<T>::kill();
+            }
+            Ok(())
         }
 
         pub fn queue_reject_reason(pid: ProposalId) -> Option<RejectReason> {
@@ -1128,6 +1710,13 @@ pub mod pallet {
                     })
                 });
                 if !valid {
+                    return Some(RejectReason::AttestationMissing);
+                }
+                if QueuedRecoveryImages::<T>::get(pid).is_some_and(|recovery| {
+                    T::Attestations::artifact_hash(recovery.attestation_id) != Some(recovery.hash)
+                        || !T::Attestations::present_unrevoked_unchallenged(recovery.attestation_id)
+                        || !T::Attestations::has_quorum(pid, recovery.hash)
+                }) {
                     return Some(RejectReason::AttestationMissing);
                 }
             }
@@ -1158,9 +1747,16 @@ pub mod pallet {
             Self::persist(state)
         }
 
-        fn do_execute(pid: ProposalId) -> Result<ExecuteCharge, ExecuteFailure> {
+        fn do_execute(
+            pid: ProposalId,
+            allow_phase_four_bridge: bool,
+        ) -> Result<ExecuteResult, ExecuteFailure> {
             let now = Self::now();
             let queued = Queue::<T>::get(pid).ok_or(Error::<T>::NotFound)?;
+            ensure!(
+                allow_phase_four_bridge || T::PhaseState::class_execution_enabled(queued.class),
+                Error::<T>::ShadowMode
+            );
 
             // 09 §1.2(1) queue state.
             ensure!(!queued.cancelled, Error::<T>::Cancelled);
@@ -1215,6 +1811,17 @@ pub mod pallet {
                             && T::Attestations::has_quorum(pid, artifact),
                         Error::<T>::AttestationMissing
                     );
+                    if let Some(recovery) = QueuedRecoveryImages::<T>::get(pid) {
+                        ensure!(
+                            T::Attestations::artifact_hash(recovery.attestation_id)
+                                == Some(recovery.hash)
+                                && T::Attestations::present_unrevoked_unchallenged(
+                                    recovery.attestation_id,
+                                )
+                                && T::Attestations::has_quorum(pid, recovery.hash),
+                            Error::<T>::AttestationMissing
+                        );
+                    }
                     Some(artifact)
                 } else {
                     None
@@ -1223,14 +1830,22 @@ pub mod pallet {
             // (6) static class envelope plus the live constitution capability
             // table. Queue-time admission never freezes a capability on. The
             // exact decoded call is required for keyed/variant capabilities.
+            let calls = Self::decode_batch(&bytes)?;
+            let phase_four_plan = allow_phase_four_bridge
+                .then(|| T::Dispatcher::phase_four_plan(queued.class, &calls))
+                .flatten();
+            let phase_four_payload = phase_four_plan.is_some();
             ensure!(
-                queued
-                    .declared_domains
-                    .iter()
-                    .all(|domain| execution_guard_core::domain_allowed(queued.class, *domain)),
+                !allow_phase_four_bridge || phase_four_payload,
+                Error::<T>::BadUpgradePayload
+            );
+            ensure!(
+                queued.declared_domains.iter().all(|domain| {
+                    execution_guard_core::domain_allowed(queued.class, *domain)
+                        || (phase_four_payload && *domain == CallDomain::Code)
+                }),
                 Error::<T>::CapabilityDenied
             );
-            let calls = Self::decode_batch(&bytes)?;
             for call in &calls {
                 let analysis = T::Dispatcher::rederive_call(call)
                     .map_err(|_| Error::<T>::BadDomainDeclaration)?;
@@ -1246,11 +1861,12 @@ pub mod pallet {
                     Error::<T>::BadDomainDeclaration
                 );
                 ensure!(
-                    analysis
-                        .domains
-                        .iter()
-                        .all(|domain| execution_guard_core::domain_allowed(queued.class, *domain))
-                        && T::Capabilities::call_enabled(queued.class, call),
+                    analysis.domains.iter().all(|domain| {
+                        execution_guard_core::domain_allowed(queued.class, *domain)
+                            || (phase_four_payload
+                                && *domain == CallDomain::Code
+                                && T::Dispatcher::recovery_image_descriptor(call).is_some())
+                    }) && (phase_four_payload || T::Capabilities::call_enabled(queued.class, call)),
                     Error::<T>::CapabilityDenied
                 );
             }
@@ -1332,12 +1948,15 @@ pub mod pallet {
                         Error::<T>::BadDomainDeclaration
                     );
                     ensure!(
-                        execution_guard_core::domain_allowed(queued.class, *domain),
+                        execution_guard_core::domain_allowed(queued.class, *domain)
+                            || (phase_four_payload
+                                && *domain == CallDomain::Code
+                                && T::Dispatcher::recovery_image_descriptor(call).is_some()),
                         Error::<T>::CapabilityDenied
                     );
                 }
                 ensure!(
-                    T::Capabilities::call_enabled(queued.class, call),
+                    phase_four_payload || T::Capabilities::call_enabled(queued.class, call),
                     Error::<T>::CapabilityDenied
                 );
 
@@ -1366,7 +1985,10 @@ pub mod pallet {
                 } else {
                     ensure!(!internal_root, Error::<T>::SafetyFilter);
                     ensure!(
-                        T::Dispatcher::safety_filter(queued.class, call),
+                        (phase_four_payload
+                            && (T::Dispatcher::recovery_image_descriptor(call).is_some()
+                                || T::Dispatcher::is_phase_four_cap_commitment(call)))
+                            || T::Dispatcher::safety_filter(queued.class, call),
                         Error::<T>::SafetyFilter
                     );
                     ensure!(
@@ -1417,8 +2039,18 @@ pub mod pallet {
                 (None, None)
             };
 
+            if let Some(upgrade) = upgrade {
+                ExecutingUpgrade::<T>::put(ExecutingUpgradeContext {
+                    pid,
+                    primary_hash: upgrade.hash,
+                    primary_target_spec_version: upgrade.target_spec_version,
+                });
+            }
+
             // Every check is complete. Only now may real dispatch occur.
-            let dispatch = Self::dispatch_batch(calls.into_inner(), queued.class);
+            let dispatch =
+                Self::dispatch_batch(calls.into_inner(), queued.class, phase_four_payload);
+            ExecutingUpgrade::<T>::kill();
             let outcome = dispatch.outcome;
             let charge = ExecuteCharge {
                 actual_calls: nested_calls,
@@ -1445,6 +2077,12 @@ pub mod pallet {
 
                 if outcome == DispatchOutcomeCode::Ok {
                     if let Some(upgrade) = upgrade {
+                        ensure!(
+                            RecoveryImage::<T>::get().is_some_and(|recovery| {
+                                recovery.pid == pid && recovery.primary_hash == upgrade.hash
+                            }),
+                            Error::<T>::RecoveryImageMissing
+                        );
                         T::ReleaseChannel::on_upgrade_authorized(upgrade.target_spec_version, now)?;
                         if let Some(history) = next_spacing_history {
                             UpgradeSpacingHistory::<T>::put(history);
@@ -1460,14 +2098,84 @@ pub mod pallet {
                 error,
                 post_dispatch_charge: Some(charge),
             })?;
-            Ok(charge)
+            Ok(ExecuteResult {
+                charge,
+                phase_four_plan,
+            })
         }
 
-        fn dispatch_batch(calls: Vec<T::RuntimeCall>, class: ProposalClass) -> BatchDispatch {
+        fn do_commit_recovery_image(
+            hash: H256,
+            len: u32,
+            target_spec_version: u32,
+            attestation_id: u32,
+        ) -> DispatchResult {
+            let context = ExecutingUpgrade::<T>::get().ok_or(Error::<T>::RecoveryImageInvalid)?;
+            ensure!(
+                RecoveryImage::<T>::get().is_none(),
+                Error::<T>::PendingUpgradeExists
+            );
+            let descriptor = RecoveryImageDescriptor {
+                hash,
+                len,
+                target_spec_version,
+                attestation_id,
+            };
+            ensure!(
+                QueuedRecoveryImages::<T>::get(context.pid) == Some(descriptor),
+                Error::<T>::RecoveryImageInvalid
+            );
+            ensure!(
+                hash != context.primary_hash,
+                Error::<T>::RecoveryImageInvalid
+            );
+            ensure!(
+                context
+                    .primary_target_spec_version
+                    .checked_add(1)
+                    .is_some_and(|expected| target_spec_version == expected),
+                Error::<T>::UpgradeVersionMismatch
+            );
+            ensure!(
+                T::Attestations::artifact_hash(attestation_id) == Some(hash)
+                    && T::Attestations::present_unrevoked_unchallenged(attestation_id)
+                    && T::Attestations::has_quorum(context.pid, hash),
+                Error::<T>::AttestationMissing
+            );
+            QueuedRecoveryImages::<T>::remove(context.pid);
+            RecoveryImage::<T>::put(RecoveryImageCommitment {
+                pid: context.pid,
+                primary_hash: context.primary_hash,
+                hash,
+                len,
+                target_spec_version,
+                attestation_id,
+                committed_at: Self::now(),
+            });
+            Self::deposit_event(Event::RecoveryImageCommitted {
+                pid: context.pid,
+                primary_hash: context.primary_hash,
+                recovery_hash: hash,
+                target_spec_version,
+            });
+            Ok(())
+        }
+
+        fn dispatch_batch(
+            calls: Vec<T::RuntimeCall>,
+            class: ProposalClass,
+            phase_four_payload: bool,
+        ) -> BatchDispatch {
             let result: Result<Weight, BatchFailure> = with_storage_layer(|| {
                 let mut consumed_inner = Weight::zero();
                 for (index, call) in calls.into_iter().enumerate() {
                     let declared = call.get_dispatch_info().total_weight();
+                    if phase_four_payload && T::Dispatcher::is_phase_four_cap_commitment(&call) {
+                        // Charge the declared call weight conservatively, but
+                        // defer the state mutation until PhaseFourTransition.
+                        consumed_inner = consumed_inner.saturating_add(declared);
+                        continue;
+                    }
                     let dispatch = if let Some(hash) = T::Dispatcher::authorize_upgrade_hash(&call)
                     {
                         T::Dispatcher::dispatch_authorize_upgrade_post_info(hash)
@@ -1548,6 +2256,15 @@ pub mod pallet {
             PreMigrationAnchor::<T>::kill();
             PendingAnchorCapture::<T>::put(true);
             ScheduledUpgrade::<T>::kill();
+            if matches!(
+                PhaseFourBridge::<T>::get(),
+                PhaseFourBridgeState::Scheduled { code_hash, .. } if code_hash == pending.hash
+            ) {
+                PhaseFourBridge::<T>::put(PhaseFourBridgeState::Consumed);
+            }
+            if RecoveryImage::<T>::get().is_some_and(|recovery| recovery.hash == pending.hash) {
+                Self::release_recovery_image()?;
+            }
             Self::persist(state)
         }
 
@@ -1566,6 +2283,15 @@ pub mod pallet {
             // boundary until completion or a valid recovery image applies.
             PendingAnchorCapture::<T>::kill();
             ScheduledUpgrade::<T>::kill();
+            if matches!(
+                PhaseFourBridge::<T>::get(),
+                PhaseFourBridgeState::Pending { code_hash, .. }
+                    | PhaseFourBridgeState::Scheduled { code_hash, .. }
+                    if code_hash == pending.hash
+            ) {
+                PhaseFourBridge::<T>::put(PhaseFourBridgeState::Unused);
+            }
+            Self::release_recovery_image()?;
             Self::deposit_event(Event::UpgradeAborted {
                 code_hash: pending.hash,
             });
@@ -1620,6 +2346,105 @@ pub mod pallet {
             Ok(())
         }
 
+        fn do_qualify_recovery_image(pid: ProposalId) -> DispatchResult {
+            ensure!(
+                !Queue::<T>::contains_key(pid),
+                Error::<T>::RecoveryImageInvalid
+            );
+            let (payload_hash, version_constraint) =
+                T::Epoch::recovery_qualification_context(pid).ok_or(Error::<T>::NotFound)?;
+            let payload_len = T::Preimages::len(payload_hash).ok_or(Error::<T>::BadPreimage)?;
+            ensure!(
+                payload_len <= MAX_PAYLOAD_BYTES,
+                Error::<T>::PayloadTooLarge
+            );
+            let payload =
+                T::Preimages::fetch(payload_hash, payload_len).ok_or(Error::<T>::BadPreimage)?;
+            ensure!(
+                u32::try_from(payload.len()).ok() == Some(payload_len)
+                    && Self::hash_bytes(&payload) == payload_hash,
+                Error::<T>::BadPreimage
+            );
+            let calls = Self::decode_batch(&payload)?;
+            let mut primary_hash = None;
+            let mut descriptor = None;
+            for call in &calls {
+                if let Some(hash) = T::Dispatcher::authorize_upgrade_hash(call) {
+                    ensure!(
+                        primary_hash.replace(hash).is_none(),
+                        Error::<T>::BadUpgradePayload
+                    );
+                }
+                if let Some(recovery) = T::Dispatcher::recovery_image_descriptor(call) {
+                    ensure!(
+                        descriptor.replace(recovery).is_none(),
+                        Error::<T>::BadUpgradePayload
+                    );
+                }
+            }
+            let primary_hash = primary_hash.ok_or(Error::<T>::RecoveryImageMissing)?;
+            let descriptor = descriptor.ok_or(Error::<T>::RecoveryImageMissing)?;
+            let current = Self::current_spec()?;
+            ensure!(version_constraint == current, Error::<T>::StaleQueue);
+            ensure!(
+                descriptor.hash != primary_hash
+                    && descriptor.len > 0
+                    && descriptor.len <= T::MaxRuntimeCodeBytes::get()
+                    && current.spec_version.checked_add(2) == Some(descriptor.target_spec_version),
+                Error::<T>::RecoveryImageInvalid
+            );
+            ensure!(
+                T::RecoveryImages::len(descriptor.hash) == Some(descriptor.len),
+                Error::<T>::BadPreimage
+            );
+            let recovery_code = T::RecoveryImages::fetch(descriptor.hash, descriptor.len)
+                .ok_or(Error::<T>::BadPreimage)?;
+            ensure!(
+                u32::try_from(recovery_code.len()).ok() == Some(descriptor.len)
+                    && Self::hash_bytes(&recovery_code) == descriptor.hash,
+                Error::<T>::BadPreimage
+            );
+            let observed = T::Dispatcher::observed_runtime_version(&recovery_code)
+                .ok_or(Error::<T>::UpgradeVersionMismatch)?;
+            ensure!(
+                observed.spec_name == current.spec_name
+                    && observed.spec_version == descriptor.target_spec_version,
+                Error::<T>::UpgradeVersionMismatch
+            );
+            ensure!(
+                T::RecoveryImages::preflight_qualifies(&recovery_code),
+                Error::<T>::RecoveryImageInvalid
+            );
+            ensure!(
+                T::Attestations::artifact_hash(descriptor.attestation_id) == Some(descriptor.hash)
+                    && T::Attestations::present_unrevoked_unchallenged(descriptor.attestation_id)
+                    && T::Attestations::has_quorum(pid, descriptor.hash),
+                Error::<T>::AttestationMissing
+            );
+            let qualified = QualifiedRecoveryImage {
+                payload_hash,
+                primary_hash,
+                version_constraint,
+                descriptor,
+            };
+            if let Some(existing) = QualifiedRecoveryImages::<T>::get(pid) {
+                ensure!(existing == qualified, Error::<T>::RecoveryImageInvalid);
+                return Ok(());
+            }
+            ensure!(
+                QualifiedRecoveryImages::<T>::count() < MAX_QUALIFIED_RECOVERY_IMAGES_BOUND,
+                Error::<T>::QueueFull
+            );
+            T::RecoveryImages::pin(descriptor.hash)?;
+            QualifiedRecoveryImages::<T>::insert(pid, qualified);
+            Self::deposit_event(Event::RecoveryImageQualified {
+                pid,
+                recovery_hash: descriptor.hash,
+                target_spec_version: descriptor.target_spec_version,
+            });
+            Ok(())
+        }
+
         fn do_reject_stale(pid: ProposalId) -> DispatchResult {
             ensure!(Queue::<T>::contains_key(pid), Error::<T>::NotFound);
             let reason = Self::queue_reject_reason(pid).ok_or(Error::<T>::StaleQueue)?;
@@ -1633,6 +2458,22 @@ pub mod pallet {
         }
 
         fn do_dequeue_terminal(pid: ProposalId) -> DispatchResult {
+            ensure!(
+                !(QueuedRecoveryImages::<T>::contains_key(pid)
+                    && RerunRecoveryPins::<T>::contains_key(pid))
+                    && !(QualifiedRecoveryImages::<T>::contains_key(pid)
+                        && (QueuedRecoveryImages::<T>::contains_key(pid)
+                            || RerunRecoveryPins::<T>::contains_key(pid))),
+                Error::<T>::RecoveryImageInvalid
+            );
+            if let Some(qualified) = QualifiedRecoveryImages::<T>::take(pid) {
+                T::RecoveryImages::unpin(qualified.descriptor.hash)?;
+            } else if let Some(recovery) = QueuedRecoveryImages::<T>::get(pid) {
+                T::RecoveryImages::unpin(recovery.hash)?;
+                QueuedRecoveryImages::<T>::remove(pid);
+            } else if let Some(recovery) = RerunRecoveryPins::<T>::take(pid) {
+                T::RecoveryImages::unpin(recovery.hash)?;
+            }
             if let Some(queued) = Queue::<T>::get(pid) {
                 let mut state = Self::load()?;
                 state.dequeue_terminal(pid);
@@ -1651,11 +2492,21 @@ pub mod pallet {
                 !RerunPins::<T>::contains_key(pid) && RerunPins::<T>::count() < MAX_QUEUE_BOUND,
                 Error::<T>::QueueFull
             );
+            if QueuedRecoveryImages::<T>::contains_key(pid) {
+                ensure!(
+                    !RerunRecoveryPins::<T>::contains_key(pid)
+                        && RerunRecoveryPins::<T>::count() < MAX_QUEUE_BOUND,
+                    Error::<T>::QueueFull
+                );
+            }
             let mut state = Self::load()?;
             state.dequeue_for_rerun(pid);
             Self::persist(state)?;
             Expedited::<T>::remove(pid);
             RerunPins::<T>::insert(pid, queued.payload_hash);
+            if let Some(recovery) = QueuedRecoveryImages::<T>::take(pid) {
+                RerunRecoveryPins::<T>::insert(pid, recovery);
+            }
             Ok(())
         }
 
@@ -1663,6 +2514,8 @@ pub mod pallet {
             Ratifications::<T>::remove(pid);
             Expedited::<T>::remove(pid);
             AttestationBindings::<T>::remove(pid);
+            QualifiedRecoveryImages::<T>::remove(pid);
+            QueuedRecoveryImages::<T>::remove(pid);
         }
 
         fn ratification_valid(queued: &StoredQueuedExecution) -> bool {
@@ -1954,9 +2807,51 @@ pub mod pallet {
                             "execution guard attestation binding is absent",
                         ));
                     }
+                    let payload = T::Preimages::fetch(queued.payload_hash, queued.payload_len)
+                        .ok_or(TryRuntimeError::Other(
+                            "execution guard queued upgrade payload is absent",
+                        ))?;
+                    let calls = Self::decode_batch(&payload).map_err(|_| {
+                        TryRuntimeError::Other(
+                            "execution guard queued upgrade payload is undecodable",
+                        )
+                    })?;
+                    let mut primary = None;
+                    let mut recovery = None;
+                    for call in &calls {
+                        if let Some(hash) = T::Dispatcher::authorize_upgrade_hash(call) {
+                            if primary.replace(hash).is_some() {
+                                return Err(TryRuntimeError::Other(
+                                    "execution guard queued upgrade has duplicate primary",
+                                ));
+                            }
+                        }
+                        if let Some(descriptor) = T::Dispatcher::recovery_image_descriptor(call) {
+                            if recovery.replace(descriptor).is_some() {
+                                return Err(TryRuntimeError::Other(
+                                    "execution guard queued upgrade has duplicate recovery",
+                                ));
+                            }
+                        }
+                    }
+                    let exact_pair = primary.zip(recovery).is_some_and(|(primary, recovery)| {
+                        primary != recovery.hash
+                            && queued.version_constraint.spec_version.checked_add(2)
+                                == Some(recovery.target_spec_version)
+                            && QueuedRecoveryImages::<T>::get(pid) == Some(recovery)
+                    });
+                    if !exact_pair {
+                        return Err(TryRuntimeError::Other(
+                            "execution guard queued upgrade recovery binding is invalid",
+                        ));
+                    }
                 } else if AttestationBindings::<T>::contains_key(pid) {
                     return Err(TryRuntimeError::Other(
                         "execution guard non-attested queue has a binding",
+                    ));
+                } else if QueuedRecoveryImages::<T>::contains_key(pid) {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard non-upgrade queue has a recovery image",
                     ));
                 }
             }
@@ -1991,6 +2886,88 @@ pub mod pallet {
                 if !Queue::<T>::contains_key(pid) {
                     return Err(TryRuntimeError::Other(
                         "execution guard orphan expedited marker",
+                    ));
+                }
+            }
+            if ExecutingUpgrade::<T>::exists() {
+                return Err(TryRuntimeError::Other(
+                    "execution guard transient upgrade context escaped dispatch",
+                ));
+            }
+            let qualified_recovery_count = QualifiedRecoveryImages::<T>::iter_keys().count();
+            if QualifiedRecoveryImages::<T>::count() > MAX_QUALIFIED_RECOVERY_IMAGES_BOUND
+                || usize::try_from(QualifiedRecoveryImages::<T>::count()).ok()
+                    != Some(qualified_recovery_count)
+            {
+                return Err(TryRuntimeError::Other(
+                    "execution guard qualified recovery-image bound exceeded",
+                ));
+            }
+            for (pid, qualified) in QualifiedRecoveryImages::<T>::iter() {
+                if Queue::<T>::contains_key(pid)
+                    || RerunRecoveryPins::<T>::contains_key(pid)
+                    || QueuedRecoveryImages::<T>::contains_key(pid)
+                    || T::Epoch::recovery_qualification_context(pid)
+                        != Some((qualified.payload_hash, qualified.version_constraint.clone()))
+                    || qualified.descriptor.hash == qualified.primary_hash
+                    || qualified.descriptor.len == 0
+                    || qualified.descriptor.len > T::MaxRuntimeCodeBytes::get()
+                    || !T::RecoveryImages::is_pinned(qualified.descriptor.hash)
+                    || qualified.version_constraint.spec_version.checked_add(2)
+                        != Some(qualified.descriptor.target_spec_version)
+                    || T::RecoveryImages::len(qualified.descriptor.hash)
+                        != Some(qualified.descriptor.len)
+                {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard qualified recovery image is invalid",
+                    ));
+                }
+            }
+            let queued_recovery_count = QueuedRecoveryImages::<T>::iter_keys().count();
+            if queued_recovery_count > MAX_QUEUE_BOUND as usize {
+                return Err(TryRuntimeError::Other(
+                    "execution guard queued recovery-image bound exceeded",
+                ));
+            }
+            for (pid, recovery) in QueuedRecoveryImages::<T>::iter() {
+                let Some(queued) = Queue::<T>::get(pid) else {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard orphan queued recovery image",
+                    ));
+                };
+                if !matches!(queued.class, ProposalClass::Code | ProposalClass::Meta)
+                    || recovery.len == 0
+                    || recovery.len > T::MaxRuntimeCodeBytes::get()
+                    || !T::RecoveryImages::is_pinned(recovery.hash)
+                    || T::RecoveryImages::len(recovery.hash) != Some(recovery.len)
+                    || queued.version_constraint.spec_version.checked_add(2)
+                        != Some(recovery.target_spec_version)
+                {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard queued recovery image is invalid",
+                    ));
+                }
+            }
+            let rerun_recovery_count = RerunRecoveryPins::<T>::iter_keys().count();
+            if RerunRecoveryPins::<T>::count() > MAX_QUEUE_BOUND
+                || usize::try_from(RerunRecoveryPins::<T>::count()).ok()
+                    != Some(rerun_recovery_count)
+            {
+                return Err(TryRuntimeError::Other(
+                    "execution guard rerun recovery-image bound exceeded",
+                ));
+            }
+            for (pid, recovery) in RerunRecoveryPins::<T>::iter() {
+                if Queue::<T>::contains_key(pid)
+                    || QueuedRecoveryImages::<T>::contains_key(pid)
+                    || !RerunPins::<T>::contains_key(pid)
+                    || recovery.len == 0
+                    || recovery.len > T::MaxRuntimeCodeBytes::get()
+                    || !T::RecoveryImages::is_pinned(recovery.hash)
+                    || T::RecoveryImages::len(recovery.hash) != Some(recovery.len)
+                {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard rerun recovery pin is orphaned",
                     ));
                 }
             }
@@ -2035,6 +3012,133 @@ pub mod pallet {
                     return Err(TryRuntimeError::Other(
                         "execution guard scheduled-upgrade identity is invalid",
                     ));
+                }
+            }
+            if let Some(recovery) = RecoveryImage::<T>::get() {
+                let target_matches = PendingUpgrade::<T>::get().map_or_else(
+                    || {
+                        Self::current_spec().is_ok_and(|current| {
+                            current
+                                .spec_version
+                                .checked_add(1)
+                                .is_some_and(|target| target == recovery.target_spec_version)
+                        })
+                    },
+                    |pending| {
+                        pending.hash == recovery.primary_hash
+                            && pending
+                                .target_spec_version
+                                .checked_add(1)
+                                .is_some_and(|target| target == recovery.target_spec_version)
+                    },
+                );
+                if recovery.len == 0
+                    || recovery.len > T::MaxRuntimeCodeBytes::get()
+                    || T::RecoveryImages::len(recovery.hash) != Some(recovery.len)
+                    || !T::RecoveryImages::is_pinned(recovery.hash)
+                    || recovery.hash == recovery.primary_hash
+                    || QueuedRecoveryImages::<T>::contains_key(recovery.pid)
+                    || !target_matches
+                {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard committed recovery image is invalid",
+                    ));
+                }
+            }
+            let migration = T::MigrationStatus::recovery_state();
+            if migration.bypass {
+                return Err(TryRuntimeError::Other(
+                    "execution guard recovery bypass escaped its storage transaction",
+                ));
+            }
+            if migration.lockdown {
+                let Some(recovery) = RecoveryImage::<T>::get() else {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard recovery lockdown has no commitment",
+                    ));
+                };
+                let cursor_cause = migration.retired_cursor;
+                let phase_cause = migration.phase_transition_lock;
+                if cursor_cause == phase_cause {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard recovery lockdown cause is not unique",
+                    ));
+                }
+                let valid = if migration.aborted {
+                    migration.scheduled_hash.is_none()
+                        && !migration.recovery_code_applied
+                        && ((cursor_cause && T::MigrationStatus::cursor_exists())
+                            || (phase_cause && !T::MigrationStatus::cursor_exists()))
+                } else {
+                    migration.scheduled_hash == Some(recovery.hash)
+                        && !T::MigrationStatus::cursor_exists()
+                };
+                if !valid {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard recovery lockdown shape is invalid",
+                    ));
+                }
+            } else if migration.retired_cursor
+                || migration.scheduled_hash.is_some()
+                || migration.aborted
+                || migration.recovery_code_applied
+            {
+                return Err(TryRuntimeError::Other(
+                    "execution guard orphan runtime recovery state",
+                ));
+            }
+            match PhaseFourBridge::<T>::get() {
+                PhaseFourBridgeState::Unused => {
+                    if migration.phase_transition_lock || migration.phase_transition_applied {
+                        return Err(TryRuntimeError::Other(
+                            "execution guard orphan Phase-4 transition lock",
+                        ));
+                    }
+                }
+                PhaseFourBridgeState::Pending {
+                    pid,
+                    code_hash,
+                    plan,
+                } => {
+                    if migration.phase_transition_lock
+                        || migration.phase_transition_applied
+                        || !T::PhaseState::exact_phase_three()
+                        || !T::PhaseState::phase_four_plan_valid(&plan)
+                        || PendingUpgrade::<T>::get()
+                            .is_none_or(|pending| pending.hash != code_hash)
+                        || RecoveryImage::<T>::get().is_none_or(|recovery| recovery.pid != pid)
+                    {
+                        return Err(TryRuntimeError::Other(
+                            "execution guard pending Phase-4 bridge is invalid",
+                        ));
+                    }
+                }
+                PhaseFourBridgeState::Scheduled {
+                    pid,
+                    code_hash,
+                    plan,
+                } => {
+                    if !migration.phase_transition_lock
+                        || !T::PhaseState::exact_phase_three()
+                        || !T::PhaseState::phase_four_plan_valid(&plan)
+                        || PendingUpgrade::<T>::get()
+                            .is_none_or(|pending| pending.hash != code_hash)
+                        || RecoveryImage::<T>::get().is_none_or(|recovery| recovery.pid != pid)
+                    {
+                        return Err(TryRuntimeError::Other(
+                            "execution guard scheduled Phase-4 bridge is invalid",
+                        ));
+                    }
+                }
+                PhaseFourBridgeState::Consumed => {
+                    if migration.phase_transition_lock
+                        || migration.phase_transition_applied
+                        || !T::PhaseState::post_sudo_phase()
+                    {
+                        return Err(TryRuntimeError::Other(
+                            "execution guard consumed Phase-4 bridge is invalid",
+                        ));
+                    }
                 }
             }
             if let Some(pending) = PendingUpgrade::<T>::get() {

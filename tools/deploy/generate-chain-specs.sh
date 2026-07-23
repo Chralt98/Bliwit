@@ -8,8 +8,20 @@ wasm="target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.w
 builder="target/tools/bin/chain-spec-builder"
 out="deploy/chain-specs/out"
 properties="tokenSymbol=VIT,tokenDecimals=12,ss58Format=7777"
+profile_tool="tools/release/runtime_profiles.py"
+requested_profile=${RUNTIME_PROFILE:-}
+profile_args=()
+if [[ -n "$requested_profile" ]]; then
+  profile_args=(--profile "$requested_profile")
+fi
+runtime_profile=$(python3 "$profile_tool" "${profile_args[@]}" --field name)
+runtime_features=$(python3 "$profile_tool" --profile "$runtime_profile" --field features)
 
-cargo build -p bleavit-runtime --release --features substrate-wasm-builder --locked
+# Use the same explicit, defaults-disabled feature product as the release
+# artifact. Rebuilding with Cargo defaults here would silently replace a
+# phase-four/recovery Wasm before embedding it into the generated chain specs.
+cargo build -p bleavit-runtime --release --no-default-features \
+  --features "$runtime_features" --locked
 
 # The pin is enforced by version, not mere presence: a stale binary left by an
 # earlier train's pin (developer worktree, restored CI cache) must not silently

@@ -169,6 +169,10 @@ pub trait ConstitutionAccess<AccountId> {
     /// Canonical CODE/META artifact commitment checked by attestors. `None`
     /// is an ambiguous payload and therefore blocks adoption.
     fn attestation_artifact(proposal: &Proposal<AccountId>) -> Option<H256>;
+    /// Optional companion artifact pinned for the full qualification era.
+    fn auxiliary_preimage(_proposal: &Proposal<AccountId>) -> Option<H256> {
+        None
+    }
 }
 
 /// Runtime-only 08 §4.4 funding projection. The epoch pallet remains treasury-
@@ -272,6 +276,9 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
         epoch: EpochId,
     ) -> Proposal<AccountId>;
     fn prime_decision(pid: ProposalId, epoch: EpochId, gates: bool) -> MarketSet;
+    /// Replace a benchmark proposal with a valid, cached CODE+recovery pair so
+    /// tick/decide measure the recovery qualification reads.
+    fn prime_recovery_qualification(_: &mut Proposal<AccountId>) {}
     /// Saturate the real execution-guard aggregate before a decision enqueues.
     fn prime_guard_enqueue(pid: ProposalId);
     fn prime_settlement(epoch: EpochId);
@@ -595,6 +602,10 @@ pub mod pallet {
     /// ownership proof once a rerun transfers the pin to the execution guard.
     #[pallet::storage]
     pub type QualificationPreimageRequests<T: Config> =
+        CountedStorageMap<_, Blake2_128Concat, ProposalId, H256, OptionQuery>;
+
+    #[pallet::storage]
+    pub type QualificationAuxiliaryPreimageRequests<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, ProposalId, H256, OptionQuery>;
 
     /// Internal bounded USDC escrow liabilities, one per admitted proposal.
@@ -1003,7 +1014,11 @@ pub mod pallet {
                         if proposal.state != ProposalState::Qualified
                             && state_after == ProposalState::Qualified
                         {
-                            Self::request_qualification_preimage(pid, proposal.payload_hash)?;
+                            Self::request_qualification_preimage(
+                                pid,
+                                proposal.payload_hash,
+                                T::Constitution::auxiliary_preimage(&proposal),
+                            )?;
                         } else if Self::is_terminal(state_after) {
                             Self::release_qualification_preimage(pid);
                         }
@@ -1778,6 +1793,7 @@ pub mod pallet {
         fn request_qualification_preimage(
             pid: ProposalId,
             payload_hash: H256,
+            auxiliary_hash: Option<H256>,
         ) -> Result<(), CoreError> {
             if QualificationPreimageRequests::<T>::contains_key(pid) {
                 return Err(CoreError::TryStateViolation);
@@ -1787,12 +1803,23 @@ pub mod pallet {
             }
             T::Preimage::request(payload_hash).map_err(|_| CoreError::BadDecisionInput)?;
             QualificationPreimageRequests::<T>::insert(pid, payload_hash);
+            if let Some(hash) = auxiliary_hash {
+                if QualificationAuxiliaryPreimageRequests::<T>::count() >= MAX_LIVE_PROPOSALS_BOUND
+                {
+                    return Err(CoreError::TooManyLiveProposals);
+                }
+                T::Preimage::request(hash).map_err(|_| CoreError::BadDecisionInput)?;
+                QualificationAuxiliaryPreimageRequests::<T>::insert(pid, hash);
+            }
             Ok(())
         }
 
         fn release_qualification_preimage(pid: ProposalId) {
             if let Some(payload_hash) = QualificationPreimageRequests::<T>::take(pid) {
                 T::Preimage::unrequest(payload_hash);
+            }
+            if let Some(hash) = QualificationAuxiliaryPreimageRequests::<T>::take(pid) {
+                T::Preimage::unrequest(hash);
             }
         }
 
@@ -2590,7 +2617,15 @@ pub mod pallet {
                     "epoch guardian-review deadline bound exceeded",
                 ));
             }
-            if QualificationPreimageRequests::<T>::count() > MAX_LIVE_PROPOSALS_BOUND {
+            let qualification_count = QualificationPreimageRequests::<T>::iter_keys().count();
+            let auxiliary_count = QualificationAuxiliaryPreimageRequests::<T>::iter_keys().count();
+            if QualificationPreimageRequests::<T>::count() > MAX_LIVE_PROPOSALS_BOUND
+                || QualificationAuxiliaryPreimageRequests::<T>::count() > MAX_LIVE_PROPOSALS_BOUND
+                || usize::try_from(QualificationPreimageRequests::<T>::count()).ok()
+                    != Some(qualification_count)
+                || usize::try_from(QualificationAuxiliaryPreimageRequests::<T>::count()).ok()
+                    != Some(auxiliary_count)
+            {
                 return Err(TryRuntimeError::Other(
                     "epoch qualification preimage-request bound exceeded",
                 ));
@@ -2607,6 +2642,28 @@ pub mod pallet {
                 }) {
                     return Err(TryRuntimeError::Other(
                         "epoch qualification preimage request is orphaned",
+                    ));
+                }
+            }
+            for (pid, hash) in QualificationAuxiliaryPreimageRequests::<T>::iter() {
+                if !QualificationPreimageRequests::<T>::contains_key(pid)
+                    || Proposals::<T>::get(pid).is_none_or(|proposal| {
+                        T::Constitution::auxiliary_preimage(&proposal) != Some(hash)
+                    })
+                {
+                    return Err(TryRuntimeError::Other(
+                        "epoch auxiliary preimage request is orphaned",
+                    ));
+                }
+            }
+            for (pid, proposal) in Proposals::<T>::iter() {
+                if matches!(
+                    proposal.state,
+                    ProposalState::Qualified | ProposalState::Trading | ProposalState::Extended
+                ) && QualificationPreimageRequests::<T>::get(pid) != Some(proposal.payload_hash)
+                {
+                    return Err(TryRuntimeError::Other(
+                        "epoch live qualified proposal has no exact preimage request",
                     ));
                 }
             }

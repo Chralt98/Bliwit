@@ -4,7 +4,7 @@
 
 **Boundary.** This document owns everything the chain and the canonical frontend must agree on byte-for-byte: shared SCALE types, the `FutarchyApi` runtime API and its view types, the frozen event schema, the storage items and names the frontend reads directly, chain identity constants, the constants-binding rules, the WSS bootnode chain-spec requirement, the backend-published test-artifact feed, and the `ReleaseChannel` raw storage key. It does **not** own the *semantics* behind these surfaces (ledger rules → [03](03-conditional-ledger.md), market mechanics → [04](04-markets-and-pricing.md), decision engine → [05](05-welfare-and-decision-engine.md), oracle game → [07](07-oracle-and-disputes.md), upgrade path → [09](09-execution-upgrades-and-rollout.md)) — but where a name or layout appears both here and there, **this document's spelling is canonical**. Normative language per RFC 2119.
 
-**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 8**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
+**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 9**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
 
 ---
 
@@ -124,7 +124,7 @@ The `MetricId` assignment registry is owned by [05](05-welfare-and-decision-engi
 
 Proposal positions MUST project a settled proposal vault as `ScalarSettled { winner, s }`; Baseline positions MUST project a settled epoch vault as `BaselineSettled { s }` and MUST NOT fabricate a proposal branch. `RatificationStatus::NoPassedRecord` means only that the execution guard has no passing ratification record. It is deliberately agnostic between no referendum, an in-flight referendum and a failed referendum; the frontend MUST derive that lifecycle from `pallet-referenda` ([06](06-governance-and-guardians.md) §2.2). `Pending` and `Failed` are removed because the guard cannot truthfully produce them in the deployed design. This `RatificationStatus` restructure is a pre-genesis contract-v6 repair; no deployed SCALE value requires migration.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 8`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
+The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 9`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
 
 ---
 
@@ -471,7 +471,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 8` (runtime constant) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 9` (runtime constant) |
 
 ---
 
@@ -515,7 +515,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 
 | Pallet | Constant name | Type | Value source |
 |---|---|---|---|
-| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 8) |
+| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 9) |
 | Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) |
 | Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) |
 | Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) |
@@ -540,7 +540,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Registry (each instance) | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` |
 | Registry (each instance) | `MaxFilingsPerEpoch` | `u32` | `kernel::REG_MAX_FILINGS_EPOCH` (= 64) |
 | Registry (each instance) | `MaxEvidenceLen` | `u32` | fixed `H256` evidence-hash width (= 32 bytes) |
-| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 8) |
+| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 9) |
 | ExecutionGuard | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | ExecutionGuard | `MaxExecutionRecords` | `u32` | `bounds::MAX_EXECUTION_RECORDS` (= 256) |
 | ExecutionGuard | `MaxCalls` | `u32` | `kernel::MAX_CALLS` (= 16) |
@@ -549,7 +549,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | ExecutionGuard | `MaxRuntimeCodeBytes` | `u32` | runtime `Config::MaxRuntimeCodeBytes` (`pallet_preimage::MAX_SIZE`) |
 | ExecutionGuard | `ExecutionTimelockFloor` | `[u32; 4]` | [13 §1](13-parameters.md) `exec.lock.*` K hard minima, `[14,400; 4]` blocks |
 | ExecutionGuard | `ExecutionGraceFloor` | `u32` | [13 §1](13-parameters.md) `exec.grace` K hard minimum (= 100,800 blocks) |
-| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 8) |
+| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 9) |
 | Epoch | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | Epoch | `MaxIntakeQueue` | `u32` | `bounds::INTAKE_QUEUE` (= 64) |
 | Epoch | `MaxNonTerminalCohorts` | `u32` | `bounds::MAX_NON_TERMINAL_COHORTS` (= 4) |
@@ -562,12 +562,12 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Epoch | `DecisionExtension` | `u32` | `kernel::DEC_EXTENSION_BLOCKS` (= 43,200) |
 | Epoch | `DecisionDeltaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.delta.*` K hard minima (= `[5,000,000; 4]`) |
 | Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) |
-| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 8) |
+| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 9) |
 | Welfare | `MaxMetricSpecs` | `u32` | `welfare_core::MAX_METRIC_SPECS` (= 16) |
 | Welfare | `MaxSnapshots` | `u32` | `welfare_core::MAX_SNAPSHOTS` (= 20) |
 | Welfare | `MaxGateFlags` | `u32` | `welfare_core::MAX_GATE_FLAGS` (= 20) |
 | Welfare | `MaxDailyGateSamples` | `u8` | `welfare_core::MAX_DAILY_GATE_SAMPLES` (= 64) |
-| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 8) |
+| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 9) |
 | FutarchyTreasury | `MaxStreams` | `u32` | `futarchy_treasury_core::MAX_STREAMS` (= 128) |
 | FutarchyTreasury | `MaxBudgetLines` | `u32` | `futarchy_treasury_core::MAX_BUDGET_LINES` (= 32) |
 | FutarchyTreasury | `MaxPolCommitments` | `u32` | `futarchy_treasury_core::MAX_POL_COMMITMENTS` (= 196) |
@@ -597,7 +597,7 @@ The frontend's compatibility controls are release-gated on backend-published inp
 
 | Artifact | Contents | Consumed by |
 |---|---|---|
-| Runtime Wasm + metadata | Reproducibly-built `runtime.wasm`, SCALE metadata blob, metadata hash, spec_name/spec_version | Descriptor regeneration + drift CI (FE §12.1-equivalent, [12](12-release-and-operations.md)) |
+| Runtime Wasm + metadata | Reproducibly-built primary `runtime.wasm`, SCALE metadata blob, metadata hash and spec_name/spec_version; for every primary, the same fields for its separately built, exact-next-version terminal-recovery runtime | Descriptor regeneration + drift CI for **both live-capable versions** (FE §12.1-equivalent, [12](12-release-and-operations.md)); a recovery image is ineligible until its descriptor is live |
 | Chopsticks environment | Forked-state config + fixture state snapshots for: upgrade transition, StaleQueue, VOID epoch, manufactured precondition failures | Nightly Chopsticks suites |
 | Zombienet environment | Relay+para topology files + genesis overrides matching the release | e2e suites driven through the FE data layer |
 | chainHead fixtures | Deterministic JSON-RPC transcripts for every screen store's read set | Mock-runtime PR suites |
@@ -650,6 +650,7 @@ No other origin can write the record. The layout MUST NEVER change except by app
 
 **Version history.**
 
+- **v9 (2026-07-23) — paired-recovery descriptor coverage (B16).** Section 11 extends the runtime-Wasm/metadata artifact row to the exact paired terminal-recovery runtime because that image becomes the live next `spec_version` after recovery. Backend release assembly MUST publish both metadata blobs and frontend descriptor generation/drift CI MUST cover both before the primary is eligible; recovery is no longer an operator-only metadata input. Recovery-only guard calls, internal storage and diagnostics remain outside the canonical frontend ingest set. No SCALE shape, runtime API, storage key, transaction validity or SDK transaction-version change is introduced. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-23, through the explicit B16 repair request and standing autonomous-resolution delegation.**
 - **v8 (2026-07-22) — active/retained market-capacity split and bounded reap isolation (SQ-483).** Section 7.4 separates the live/POL obligation envelope (`MaxLiveMarkets = 196`) from total readable book retention (`MaxStoredMarkets = 2,240`), and §9 adds the latter as an additive metadata constant. The retained bound is derived from the independent one-epoch creation maximum, the 14-day epoch floor, the one-year K ceiling on `ledger.archive`, and one boundary batch; terminal observation releases the live/POL slot and deletes auxiliary history while leaving the book readable until archive reap. Market reap is independent of the unbounded claimant-position backlog: at the delay boundary it atomically discards only its book/fee accounts across a fixed 28-cell proposal or four-cell Baseline universe before unregistering them, while ledger claimant cleanup may run before or after. To make that fixed inventory exhaustive, the existing `ledger.transfer` call now rejects every protocol-account recipient; only the `MarketAuthority` internal path may move inventory into protocol custody. Canonical book/fee addresses occupy a domain-separated `AccountId32` namespace classified as protocol custody before creation and after reap; `MarketProtocolAccounts` is ownership/refcount state only, and creation rejects a non-canonical pair before mutation. This is a pre-genesis validity correction: no deployed signed transaction was valid under the prior rule, so `transaction_version` remains at its initial value. The pallet error metadata gains only trailing `ProtocolDestination` / `UnreservedProtocolAccount` variants; no frozen event, API method, view type or storage-key shape changes. `ActiveMarketCount` is a new internal pre-genesis counter and no deployed state exists to migrate. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-22, under the standing autonomous-resolution delegation.**
 - **v7 (2026-07-22) — Baseline discovery retention and orphan-settlement liveness (SQ-66/SQ-320).** Section 7.4 replaces the stale ring-coupled `BaselineMarketOf` retention rule with the runtime's market-lifetime rule: the mapping remains present while its referenced Baseline book exists and is removed atomically only with successful book reap. This keeps strictly-past orphan epochs discoverable until their permissionless neutral settlement can write the market-side terminal latch, and it freezes the honest shared structural bound (`MaxLiveMarkets = 196`) instead of the unenforced ≤36 claim. No SCALE type, event, API method, storage key or transaction validity changes; this is a pre-genesis semantic correction to a frozen direct-read item, so no storage migration is required and `transaction_version` remains unchanged. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-22, under the standing autonomous-resolution delegation.**
 - **v6 (2026-07-21) — batch C, the contract-reconciliation revision.** Section 6 defines the exhaustive canonical-frontend ingest set (without claiming to exhaust pallet-local events) and adds the shipped epoch, execution-guard, guardian, registry and attestor event shapes. Section 2 appends branch-free `VaultState::BaselineSettled` and restructures `RatificationStatus` to `NotRequired` / `NoPassedRecord` / `Passed`; §§3–4 freeze the const-generic `futarchy_primitives::BoundedVec` API path, append the exact `ParamView` interval, `QuoteView.evaluable` and `WelfareView.active_spec_available`, and define `ParamView` raw units, `OracleRoundView.escalated` and finalized `decision_stats()` availability. Section 7 corrects `Markets` to `MarketBook<AccountId>`, adds `CumulativeDeposits`, and excludes unlisted raw storage from the contract. Section 9 adds the Phase-3 deposit-cap binding, removes the implementation-status column and completes the freeze with the 16 Welfare/FutarchyTreasury/Guardian/Attestor constants. Section 12 assigns exclusive guard ownership of the pending-upgrade bytes, requires merge-preserving `set_release_channel`, freezes current-not-target `spec_version` semantics and adds I-30; §13 declares the contract and transaction-version counters independent. **Pre-genesis revision** — no runtime is deployed, so no migration is required and §13's post-genesis append-only/migration clause (point 3) does not apply; the `RatificationStatus` restructure is taken under that allowance, as v3 and v4 took theirs. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-21, user-delegated batch.**

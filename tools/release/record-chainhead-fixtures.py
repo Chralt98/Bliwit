@@ -242,6 +242,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--metadata", type=Path, default=Path("release-work/runtime/metadata.scale")
     )
+    parser.add_argument(
+        "--recovery-metadata",
+        type=Path,
+        default=Path("release-work/runtime/recovery/metadata.scale"),
+    )
     parser.add_argument("--out-dir", type=Path, default=Path("release-work/chainhead"))
     parser.add_argument("--boot-timeout", type=float, default=120.0)
     parser.add_argument("--operation-timeout", type=float, default=120.0)
@@ -285,6 +290,37 @@ def metadata_status(
     if present and expected is not None:
         layout_matches, detail = compare_layout(rendered, expected)
     return present, detail, rendered, layout_matches
+
+
+def metadata_surface_coverage(
+    metadata: dict[str, Any], entries: list[dict[str, Any]]
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Check the frozen, metadata-dependent surface for one runtime image."""
+    recorded: list[str] = []
+    missing: list[dict[str, Any]] = []
+    for entry in entries:
+        if entry["kind"] in ("raw_storage", "properties"):
+            continue
+        present, detail, rendered_layout, layout_matches = metadata_status(
+            metadata, entry
+        )
+        if present and layout_matches is not False:
+            recorded.append(entry["id"])
+        else:
+            missing.append(
+                {
+                    "surface": entry["id"],
+                    "kind": entry["kind"],
+                    "required": entry["required"],
+                    "reason": (
+                        "layout mismatch" if layout_matches is False else detail
+                    ),
+                    "blocked_by": entry.get("blocked_by"),
+                    "rendered_layout": rendered_layout,
+                    "expected_layout": entry.get("layout"),
+                }
+            )
+    return sorted(recorded), sorted(missing, key=lambda item: item["surface"])
 
 
 def call_failure_reason(result: dict[str, Any], fallback: str) -> str:
@@ -599,6 +635,25 @@ def main() -> int:
         except MetadataDecodeError as error:
             metadata = {"version": None, "types": {}, "pallets": {}}
             metadata_error = str(error)
+        recovery_metadata_bytes = (
+            args.recovery_metadata.read_bytes()
+            if args.recovery_metadata.is_file()
+            else b""
+        )
+        try:
+            recovery_metadata = decode_metadata(recovery_metadata_bytes)
+            recovery_metadata_error = None
+        except MetadataDecodeError as error:
+            recovery_metadata = {
+                "version": None,
+                "types": {},
+                "pallets": {},
+                "apis": {},
+            }
+            recovery_metadata_error = str(error)
+        recovery_recorded, recovery_missing = metadata_surface_coverage(
+            recovery_metadata, entries
+        )
 
         budget = DeadlineBudget(args.recording_timeout)
         session: ChainHeadSession | None = None
@@ -661,14 +716,26 @@ def main() -> int:
                                 layout_matches,
                             )
                         )
-                    write_transcript(args.out_dir, entry, None, requests)
                     success = False
                     reason = "chainHead unavailable; classic-RPC-only degradation"
                 else:
                     requests, success, reason = record_surface(
                         entry, session, rpc, metadata, budget
                     )
-                    write_transcript(args.out_dir, entry, block_hash, requests)
+                if entry["kind"] not in ("raw_storage", "properties"):
+                    present, detail, rendered_layout, layout_matches = metadata_status(
+                        recovery_metadata, entry
+                    )
+                    request = metadata_request(
+                        entry,
+                        present,
+                        detail,
+                        rendered_layout,
+                        layout_matches,
+                    )
+                    request["method"] = "recovery_metadata_presence"
+                    requests.append(request)
+                write_transcript(args.out_dir, entry, block_hash, requests)
                 if success:
                     recorded.append(entry["id"])
                 else:
@@ -697,12 +764,20 @@ def main() -> int:
         "metadata_sha256": hashlib.sha256(metadata_bytes).hexdigest(),
         "metadata_version": metadata.get("version"),
         "metadata_error": metadata_error,
+        "recovery_metadata_sha256": hashlib.sha256(
+            recovery_metadata_bytes
+        ).hexdigest(),
+        "recovery_metadata_version": recovery_metadata.get("version"),
+        "recovery_metadata_error": recovery_metadata_error,
         "pinned_block": block_hash,
         "recorded": sorted(recorded),
         "missing": sorted(missing, key=lambda item: item["surface"]),
+        "recovery_recorded": recovery_recorded,
+        "recovery_missing": recovery_missing,
         "blocked_by": {key: sorted(value) for key, value in sorted(blocked_by.items())},
         "websocket_error": websocket_error,
-        "strict_ready": not any(item["required"] for item in missing),
+        "strict_ready": not any(item["required"] for item in missing)
+        and not any(item["required"] for item in recovery_missing),
     }
     write_json(args.out_dir / "fixtures-report.json", report)
     if not args.allow_missing and not report["strict_ready"]:

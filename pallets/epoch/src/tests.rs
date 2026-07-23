@@ -561,7 +561,7 @@ fn genesis_uses_the_frozen_three_field_epoch_shape() {
             <CurrentEpoch<Test> as frame_support::traits::Get<EpochId>>::get(),
             0
         );
-        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 8);
+        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 9);
         assert_ok!(Epoch::do_try_state());
     });
 }
@@ -3930,7 +3930,10 @@ fn recent_summary_ring_evicts_fifo_at_32() {
 #[test]
 fn try_state_covers_positive_and_corrupted_i16_paths() {
     new_test_ext().execute_with(|| {
-        assert_ok!(Epoch::seed(decision_state(1, ProposalClass::Param)));
+        let state = decision_state(1, ProposalClass::Param);
+        let request = [(1, state.proposals[0].payload_hash)];
+        assert_ok!(Epoch::seed(state));
+        install_qualification_requests(&request);
         assert_ok!(Epoch::do_try_state());
         ProposalSchedules::<Test>::mutate(1, |schedule| {
             if let Some(schedule) = schedule {

@@ -49,6 +49,10 @@ class AssembleReleaseTests(unittest.TestCase):
         (self.runtime / "runtime-info.json").write_text(
             json.dumps(
                 {
+                    "runtime_profile": "bootstrap",
+                    "metadata_pallets": ["Sudo"],
+                    "spec_name": "bleavit",
+                    "spec_version": 2,
                     "wasm_sha256": wasm_hash,
                     "wasm_file_sha256": wasm_hash,
                     "on_chain_wasm_sha256": wasm_hash,
@@ -58,13 +62,23 @@ class AssembleReleaseTests(unittest.TestCase):
             encoding="utf-8",
         )
         build_info = {
-            "schema": "bleavit.runtime-build.v1",
+            "schema": "bleavit.runtime-build.v2",
             "git_commit": "a" * 40,
             "toolchain": "1.89.0",
             "host_triple": "x86_64-unknown-linux-gnu",
             "cargo_version": "cargo 1.89.0",
             "rustc_version": "rustc 1.89.0",
-            "recipe": "cargo build --locked",
+            "runtime_profile": "bootstrap",
+            "base_profile": "bootstrap",
+            "recovery": False,
+            "cargo_default_features": False,
+            "cargo_features": ["std", "substrate-wasm-builder", "bootstrap"],
+            "multi_block_migrations": "normal",
+            "recipe": (
+                "cargo build -p bleavit-runtime --release --no-default-features "
+                "--features std,substrate-wasm-builder,bootstrap --locked"
+            ),
+            "profile_verification": None,
             "reproducibility_scope": "same toolchain + same source => same bytes",
             "wasm": {"sha256": wasm_hash, "size": wasm.stat().st_size},
         }
@@ -107,6 +121,7 @@ class AssembleReleaseTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+
         self.surface_manifest = self.root / "surface-manifest.json"
         self.surface_manifest.write_text(
             json.dumps(
@@ -159,6 +174,68 @@ class AssembleReleaseTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+
+    def install_recovery_pair(self) -> Path:
+        recovery = self.runtime / "recovery"
+        recovery.mkdir()
+        wasm = recovery / "runtime.wasm"
+        wasm.write_bytes(b"paired-terminal-recovery")
+        metadata = recovery / "metadata.scale"
+        metadata.write_bytes(b"recovery-metadata")
+        wasm_hash = sha256(wasm)
+        build_info = json.loads(
+            (self.runtime / "build-info.json").read_text(encoding="utf-8")
+        )
+        build_info.update(
+            {
+                "runtime_profile": "bootstrap-recovery",
+                "recovery": True,
+                "cargo_features": [
+                    "std",
+                    "substrate-wasm-builder",
+                    "bootstrap",
+                    "recovery",
+                ],
+                "multi_block_migrations": "disabled",
+                "profile_verification": {
+                    "command": "cargo test recovery_profile_has_zero_multi_block_migrations",
+                    "result": "passed",
+                    "test": "recovery_profile_has_zero_multi_block_migrations",
+                },
+                "wasm": {"sha256": wasm_hash, "size": wasm.stat().st_size},
+            }
+        )
+        (recovery / "build-info.json").write_text(
+            json.dumps(build_info), encoding="utf-8"
+        )
+        runtime_info = {
+            "runtime_profile": "bootstrap-recovery",
+            "metadata_pallets": ["Sudo"],
+            "spec_name": "bleavit",
+            "spec_version": 3,
+            "wasm_sha256": wasm_hash,
+            "wasm_file_sha256": wasm_hash,
+            "on_chain_wasm_sha256": wasm_hash,
+            "metadata_sha256": sha256(metadata),
+        }
+        (recovery / "runtime-info.json").write_text(
+            json.dumps(runtime_info), encoding="utf-8"
+        )
+        fixture_report_path = self.fixtures / "fixtures-report.json"
+        fixture_report = json.loads(
+            fixture_report_path.read_text(encoding="utf-8")
+        )
+        fixture_report.update(
+            {
+                "recovery_metadata_sha256": sha256(metadata),
+                "recovery_recorded": ["storage.constitution.phase_flags"],
+                "recovery_missing": [],
+            }
+        )
+        fixture_report_path.write_text(
+            json.dumps(fixture_report), encoding="utf-8"
+        )
+        return recovery
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -221,7 +298,88 @@ class AssembleReleaseTests(unittest.TestCase):
         gap_ids = {item["id"] for item in manifest["readiness"]["missing"]}
         self.assertIn("environments.zombienet", gap_ids)
         self.assertIn("environments.chopsticks", gap_ids)
+        self.assertIn("runtime.recovery.runtime.wasm", gap_ids)
         self.assertFalse(manifest["readiness"]["publishable"])
+
+    def test_paired_recovery_version_mismatch_is_corruption(self) -> None:
+        recovery = self.install_recovery_pair()
+        runtime_info = json.loads(
+            (recovery / "runtime-info.json").read_text(encoding="utf-8")
+        )
+        runtime_info["spec_version"] = 4
+        (recovery / "runtime-info.json").write_text(
+            json.dumps(runtime_info), encoding="utf-8"
+        )
+        output = self.root / "recovery-version-corrupt"
+        result = self.run_assemble(output, allow_missing=True)
+        self.assertNotEqual(result.returncode, 0)
+        manifest = json.loads((output / "release-manifest.json").read_text())
+        self.assertIn(
+            "runtime.recovery.version_binding",
+            {item["id"] for item in manifest["readiness"]["corruption"]},
+        )
+
+    def test_paired_recovery_commit_mismatch_is_corruption(self) -> None:
+        recovery = self.install_recovery_pair()
+        build_info = json.loads(
+            (recovery / "build-info.json").read_text(encoding="utf-8")
+        )
+        build_info["git_commit"] = "b" * 40
+        (recovery / "build-info.json").write_text(
+            json.dumps(build_info), encoding="utf-8"
+        )
+        output = self.root / "recovery-commit-corrupt"
+        result = self.run_assemble(output, allow_missing=False)
+        self.assertNotEqual(result.returncode, 0)
+        manifest = json.loads((output / "release-manifest.json").read_text())
+        self.assertIn(
+            "runtime.recovery.commit_binding",
+            {item["id"] for item in manifest["readiness"]["corruption"]},
+        )
+
+    def test_paired_recovery_fixture_metadata_mismatch_is_corruption(self) -> None:
+        self.install_recovery_pair()
+        fixture_report_path = self.fixtures / "fixtures-report.json"
+        fixture_report = json.loads(
+            fixture_report_path.read_text(encoding="utf-8")
+        )
+        fixture_report["recovery_metadata_sha256"] = "0" * 64
+        fixture_report_path.write_text(
+            json.dumps(fixture_report), encoding="utf-8"
+        )
+        output = self.root / "recovery-fixture-metadata-corrupt"
+        result = self.run_assemble(output, allow_missing=True)
+        self.assertNotEqual(result.returncode, 0)
+        manifest = json.loads((output / "release-manifest.json").read_text())
+        reasons = [
+            item["reason"] for item in manifest["readiness"]["corruption"]
+        ]
+        self.assertTrue(
+            any("recovery_metadata_sha256" in reason for reason in reasons),
+            reasons,
+        )
+
+    def test_paired_recovery_fixture_must_cover_frozen_surface(self) -> None:
+        self.install_recovery_pair()
+        fixture_report_path = self.fixtures / "fixtures-report.json"
+        fixture_report = json.loads(
+            fixture_report_path.read_text(encoding="utf-8")
+        )
+        fixture_report["recovery_recorded"] = []
+        fixture_report_path.write_text(
+            json.dumps(fixture_report), encoding="utf-8"
+        )
+        output = self.root / "recovery-fixture-surface-corrupt"
+        result = self.run_assemble(output, allow_missing=True)
+        self.assertNotEqual(result.returncode, 0)
+        manifest = json.loads((output / "release-manifest.json").read_text())
+        reasons = [
+            item["reason"] for item in manifest["readiness"]["corruption"]
+        ]
+        self.assertTrue(
+            any("full recovery metadata surface" in reason for reason in reasons),
+            reasons,
+        )
 
     def test_allow_missing_lists_gaps_and_hashes_content(self) -> None:
         output = self.root / "dry-run"
@@ -229,6 +387,22 @@ class AssembleReleaseTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         manifest = json.loads((output / "release-manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["schema"], "bleavit.release.v1")
+        self.assertEqual(
+            manifest["runtime_profile"],
+            {
+                "name": "bootstrap",
+                "base": "bootstrap",
+                "recovery": False,
+                "cargo_default_features": False,
+                "cargo_features": [
+                    "std",
+                    "substrate-wasm-builder",
+                    "bootstrap",
+                ],
+                "multi_block_migrations": "normal",
+                "profile_verification": None,
+            },
+        )
         self.assertEqual(manifest["readiness"]["mode"], "allow-missing")
         self.assertEqual(
             manifest["mirror"], {"required": True, "status": "pending", "evidence": None}
@@ -243,6 +417,12 @@ class AssembleReleaseTests(unittest.TestCase):
             self.assertEqual(sha256(path), artifact["sha256"])
             self.assertEqual(path.stat().st_size, artifact["size"])
         report = (output / "readiness-report.md").read_text(encoding="utf-8")
+        self.assertIn("Runtime profile: `bootstrap`", report)
+        self.assertIn(
+            "Cargo features: `std,substrate-wasm-builder,bootstrap` "
+            "(default features disabled)",
+            report,
+        )
         self.assertIn("environments.zombienet", report)
         self.assertIn("B7", report)
         for name in ("release-manifest.json", "readiness-report.md"):
@@ -448,6 +628,28 @@ class AssembleReleaseTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         manifest = json.loads((output / "release-manifest.json").read_text())
         self.assertEqual(manifest["readiness"]["corruption"][0]["id"], "runtime.wasm_binding")
+
+    def test_allow_missing_still_fails_on_runtime_profile_corruption(self) -> None:
+        build_info = json.loads(
+            (self.runtime / "build-info.json").read_text(encoding="utf-8")
+        )
+        build_info["cargo_features"].append("phase-four")
+        (self.runtime / "build-info.json").write_text(
+            json.dumps(build_info), encoding="utf-8"
+        )
+        output = self.root / "corrupt-profile"
+        result = self.run_assemble(output, allow_missing=True)
+        self.assertNotEqual(result.returncode, 0)
+        manifest = json.loads((output / "release-manifest.json").read_text())
+        corruptions = manifest["readiness"]["corruption"]
+        self.assertTrue(
+            any(
+                item["id"] == "runtime.profile_binding"
+                and "cargo_features" in item["reason"]
+                for item in corruptions
+            ),
+            corruptions,
+        )
 
     def test_allow_missing_still_fails_on_chain_spec_wasm_corruption(self) -> None:
         spec = self.specs / "bleavit-dev.json"

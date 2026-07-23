@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 8;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 9;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1189,10 +1189,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_version_is_v8() {
+    fn contract_version_is_v9() {
         // SQ-483 separates the active/POL and retained-book envelopes. A
         // frozen-contract change bumps this value again.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 8);
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 9);
     }
 
     #[test]

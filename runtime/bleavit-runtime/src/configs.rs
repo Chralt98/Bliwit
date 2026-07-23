@@ -78,10 +78,25 @@ parameter_types! {
 // `crate::migrations`. NB: `SingleBlockMigrations` runs inside `on_runtime_upgrade`
 // and creates **no** `pallet-migrations` cursor, so it never engages the
 // `OnlyInherents` multi-block-migration lockdown (09 §3.2).
+#[cfg(all(not(feature = "phase-four"), not(feature = "recovery")))]
 type SingleBlockMigrations = (
     crate::migrations::RetireB16State,
     crate::migrations::MigrateConstitutionReserveProbeV2,
     crate::migrations::MigrateOracleReserveProbeV1,
+);
+#[cfg(all(feature = "phase-four", not(feature = "recovery")))]
+type SingleBlockMigrations = (
+    crate::migrations::RetireB16State,
+    crate::migrations::MigrateConstitutionReserveProbeV2,
+    crate::migrations::MigrateOracleReserveProbeV1,
+    crate::migrations::PhaseFourTransition,
+);
+#[cfg(feature = "recovery")]
+type SingleBlockMigrations = (
+    crate::migrations::RetireB16State,
+    crate::migrations::MigrateConstitutionReserveProbeV2,
+    crate::migrations::MigrateOracleReserveProbeV1,
+    crate::migrations::TerminalRecoveryTransition,
 );
 
 #[derive_impl(frame_system::config_preludes::ParaChainDefaultConfig)]
@@ -102,7 +117,7 @@ impl frame_system::Config for Runtime {
     type OnSetCode = cumulus_pallet_parachain_system::ParachainSetCode<Self>;
     type MaxConsumers = ConstU32<16>;
     type SingleBlockMigrations = SingleBlockMigrations;
-    type MultiBlockMigrator = Migrations;
+    type MultiBlockMigrator = RecoveryAwareMigrations;
 }
 
 parameter_types! {
@@ -328,7 +343,7 @@ impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for InternalSchedulerOnl
     fn try_origin(origin: RuntimeOrigin) -> Result<(), RuntimeOrigin> {
         #[cfg(feature = "runtime-benchmarks")]
         {
-            return EnsureRoot::<AccountId>::try_origin(origin);
+            EnsureRoot::<AccountId>::try_origin(origin)
         }
         #[cfg(not(feature = "runtime-benchmarks"))]
         Err(origin)
@@ -460,6 +475,134 @@ pub type MigrationFailedStep = frame_support::storage::types::StorageValue<
     frame_support::pallet_prelude::OptionQuery,
 >;
 
+pub struct RecoveryLockdownStorage;
+impl StorageInstance for RecoveryLockdownStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryLockdown";
+}
+pub type RecoveryLockdown = frame_support::storage::types::StorageValue<
+    RecoveryLockdownStorage,
+    bool,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+pub struct RecoveryBypassStorage;
+impl StorageInstance for RecoveryBypassStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryBypass";
+}
+pub type RecoveryBypass = frame_support::storage::types::StorageValue<
+    RecoveryBypassStorage,
+    bool,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+pub struct RetiredMigrationCursorStorage;
+impl StorageInstance for RetiredMigrationCursorStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RetiredCursor";
+}
+pub type RetiredMigrationCursor = frame_support::storage::types::StorageValue<
+    RetiredMigrationCursorStorage,
+    pallet_migrations::CursorOf<Runtime>,
+    frame_support::pallet_prelude::OptionQuery,
+>;
+
+pub struct RecoveryScheduledHashStorage;
+impl StorageInstance for RecoveryScheduledHashStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryScheduledHash";
+}
+pub type RecoveryScheduledHash = frame_support::storage::types::StorageValue<
+    RecoveryScheduledHashStorage,
+    futarchy_primitives::H256,
+    frame_support::pallet_prelude::OptionQuery,
+>;
+
+pub struct RecoveryAbortedStorage;
+impl StorageInstance for RecoveryAbortedStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryAborted";
+}
+pub type RecoveryAborted = frame_support::storage::types::StorageValue<
+    RecoveryAbortedStorage,
+    bool,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+pub struct RecoveryCodeAppliedStorage;
+impl StorageInstance for RecoveryCodeAppliedStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "RecoveryCodeApplied";
+}
+pub type RecoveryCodeApplied = frame_support::storage::types::StorageValue<
+    RecoveryCodeAppliedStorage,
+    bool,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+pub struct PhaseTransitionLockStorage;
+impl StorageInstance for PhaseTransitionLockStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "PhaseTransitionLock";
+}
+pub type PhaseTransitionLock = frame_support::storage::types::StorageValue<
+    PhaseTransitionLockStorage,
+    bool,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+pub struct PhaseTransitionAppliedStorage;
+impl StorageInstance for PhaseTransitionAppliedStorage {
+    fn pallet_prefix() -> &'static str {
+        "BleavitRuntimeMigration"
+    }
+    const STORAGE_PREFIX: &'static str = "PhaseTransitionApplied";
+}
+pub type PhaseTransitionApplied = frame_support::storage::types::StorageValue<
+    PhaseTransitionAppliedStorage,
+    bool,
+    frame_support::pallet_prelude::ValueQuery,
+>;
+
+/// Keeps FRAME in `OnlyInherents` after the stuck cursor is transactionally
+/// retired for code scheduling and until relay GoAhead installs the recovery
+/// image. `RecoveryBypass` is scoped to the internal frame-system call only;
+/// it is never externally writable.
+pub struct RecoveryAwareMigrations;
+impl frame_support::migrations::MultiStepMigrator for RecoveryAwareMigrations {
+    fn ongoing() -> bool {
+        if RecoveryBypass::get() {
+            return false;
+        }
+        RecoveryLockdown::get()
+            || PhaseTransitionLock::get()
+            || <Migrations as frame_support::migrations::MultiStepMigrator>::ongoing()
+    }
+
+    fn step() -> Weight {
+        if RecoveryLockdown::get() || PhaseTransitionLock::get() {
+            Weight::zero()
+        } else {
+            <Migrations as frame_support::migrations::MultiStepMigrator>::step()
+        }
+    }
+}
+
 // The runtime stall-progress marker (`BleavitRuntimeMigration::ProgressMarker`)
 // and its blake2 cursor hash were retired by B16 (SQ-132): the stall predicate
 // now reads the SDK `cursor.started_at` directly (09 §3.2(d)(i)). The orphaned
@@ -493,6 +636,29 @@ fn set_migration_halt_source(source: u8) {
     }
 }
 
+#[cfg(any(feature = "phase-four", feature = "recovery"))]
+pub(crate) fn note_phase_transition_failure() {
+    set_migration_halt_source(APPLIED_DETECTION_HALT);
+}
+
+#[cfg(feature = "recovery")]
+pub(crate) fn complete_terminal_recovery_state() {
+    RecoveryScheduledHash::kill();
+    RetiredMigrationCursor::kill();
+    RecoveryLockdown::kill();
+    RecoveryAborted::kill();
+    RecoveryCodeApplied::kill();
+    PhaseTransitionLock::kill();
+    PhaseTransitionApplied::kill();
+    MigrationFailedStep::kill();
+    clear_migration_halt_sources(
+        MIGRATION_FAILURE_HALT
+            | MIGRATION_STALL_HALT
+            | APPLIED_DETECTION_HALT
+            | UPGRADE_ABORT_TRIGGER,
+    );
+}
+
 fn emit_migration_halted() {
     let cursor_bytes = pallet_migrations::Cursor::<Runtime>::get()
         .map(|cursor| cursor.encode())
@@ -510,21 +676,6 @@ fn clear_migration_halt_sources(mask: u8) {
         *sources
     });
     sync_execution_migration_halt(remaining);
-}
-
-pub(crate) fn retire_stuck_migration_cursor_for_remediation() -> bool {
-    let retire = match pallet_migrations::Cursor::<Runtime>::get() {
-        Some(pallet_migrations::MigrationCursor::Stuck) => true,
-        Some(pallet_migrations::MigrationCursor::Active(ref cursor)) => {
-            MigrationHaltSources::get() & (MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT) != 0
-                && active_migration_stall_is_live(cursor)
-        }
-        None => false,
-    };
-    if retire {
-        pallet_migrations::Cursor::<Runtime>::kill();
-    }
-    retire
 }
 
 pub(crate) fn active_migration_stall_is_live(
@@ -560,7 +711,7 @@ fn track_migration_progress() {
     }
 }
 
-fn migration_validation_hook_weight() -> Weight {
+pub(crate) fn migration_validation_hook_weight() -> Weight {
     // `remark_with_event` is the stable2606 benchmarked linear hash-of-bytes
     // path. Charge it at CursorMaxLen plus the hook's bounded worst-case
     // storage/proof work; this remains conservative until B5 benchmarking.
@@ -576,7 +727,7 @@ fn migration_validation_hook_weight() -> Weight {
     ))
 }
 
-fn dead_man_detector_hook_weight() -> Weight {
+pub(crate) fn dead_man_detector_hook_weight() -> Weight {
     // Worst case includes the one-time bounded MetricSpecs scan that seeds the
     // first schedule-derived deadline, plus the fixed relay/cause/flag writes.
     Weight::from_parts(50_000_000, 60_000)
@@ -624,6 +775,19 @@ impl pallet_execution_guard::MigrationStatusProvider for RuntimeMigrationStatus 
     fn cursor_exists() -> bool {
         pallet_migrations::Cursor::<Runtime>::exists()
     }
+
+    fn recovery_state() -> pallet_execution_guard::MigrationRecoveryState {
+        pallet_execution_guard::MigrationRecoveryState {
+            lockdown: RecoveryLockdown::get(),
+            bypass: RecoveryBypass::get(),
+            retired_cursor: RetiredMigrationCursor::exists(),
+            scheduled_hash: RecoveryScheduledHash::get(),
+            aborted: RecoveryAborted::get(),
+            recovery_code_applied: RecoveryCodeApplied::get(),
+            phase_transition_lock: PhaseTransitionLock::get(),
+            phase_transition_applied: PhaseTransitionApplied::get(),
+        }
+    }
 }
 
 impl pallet_migrations::Config for Runtime {
@@ -640,6 +804,7 @@ impl pallet_migrations::Config for Runtime {
     type WeightInfo = crate::weights::pallet_migrations::WeightInfo<Runtime>;
 }
 
+#[cfg(feature = "bootstrap")]
 impl pallet_sudo::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type RuntimeCall = RuntimeCall;
@@ -1456,6 +1621,7 @@ fn fixed_param_or(name: &[u8], default: u64) -> u64 {
 /// while any *large* default would widen step 9 — so an unpublished (or
 /// sub-minimum) read collapses to exactly the kernel minimum 7, the smallest
 /// admissible ceiling (08 §5.3; SQ-231).
+#[allow(dead_code)]
 pub(crate) fn sec_flow_cap_1e9() -> u64 {
     fixed_param(b"sec.flow_cap").max(kernel::SEC_FLOW_CAP_FLOOR_1E9)
 }
@@ -2778,7 +2944,7 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
         #[cfg(feature = "runtime-benchmarks")]
         {
             let _ = (market, end, class, params);
-            return pallet_epoch::WelfareGrade::Ok;
+            pallet_epoch::WelfareGrade::Ok
         }
         #[cfg(not(feature = "runtime-benchmarks"))]
         {
@@ -2846,7 +3012,7 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
         #[cfg(feature = "runtime-benchmarks")]
         {
             let _ = pid;
-            return Some(currency::USDC.saturating_mul(1_000_000));
+            Some(currency::USDC.saturating_mul(1_000_000))
         }
         // 05 §5.6 / 08 §5.2 (SQ-231): `L̂ = Σ pair POL depth +
         // min(min(contest_acc, contest_rej), sec.flow_cap · (b_acc + b_rej))`.
@@ -3074,11 +3240,17 @@ fn domains_admissible(
     class: futarchy_primitives::ProposalClass,
     calls: &pallet_execution_guard::pallet::RuntimeBatch<Runtime>,
 ) -> bool {
-    use pallet_execution_guard::BatchDispatcher;
+    use pallet_execution_guard::{BatchDispatcher, PhaseState};
+    let phase_four = crate::configs::RuntimePhaseState::exact_phase_three()
+        && crate::classifier::RuntimeDispatcher::phase_four_plan(class, calls).is_some();
     calls.iter().all(|call| {
         crate::classifier::RuntimeDispatcher::rederive_call(call).is_ok_and(|analysis| {
             analysis.domains.iter().all(|domain| {
-                pallet_execution_guard::domain_allowed(class, *domain)
+                (pallet_execution_guard::domain_allowed(class, *domain)
+                    || (phase_four
+                        && *domain == pallet_execution_guard::CallDomain::Code
+                        && crate::classifier::RuntimeDispatcher::recovery_image_descriptor(call)
+                            .is_some()))
                     && !matches!(
                         domain,
                         pallet_execution_guard::CallDomain::InternalRootApplyUpgrade
@@ -3197,8 +3369,9 @@ fn visit_runtime_leaves(call: &RuntimeCall, visit: &mut impl FnMut(&RuntimeCall)
         | RuntimeCall::Multisig(
             pallet_multisig::Call::as_multi { call, .. }
             | pallet_multisig::Call::as_multi_threshold_1 { call, .. },
-        )
-        | RuntimeCall::Sudo(
+        ) => visit_runtime_leaves(call, visit),
+        #[cfg(feature = "bootstrap")]
+        RuntimeCall::Sudo(
             pallet_sudo::Call::sudo { call }
             | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
         ) => visit_runtime_leaves(call, visit),
@@ -3379,6 +3552,44 @@ pub(crate) fn preview_batch_admission(
 }
 
 pub struct RuntimeConstitutionAccess;
+
+fn recovery_descriptor_for_calls(
+    calls: &[RuntimeCall],
+    current_spec_version: u32,
+) -> Result<Option<pallet_execution_guard::RecoveryImageDescriptor>, ()> {
+    use pallet_execution_guard::BatchDispatcher;
+    let mut primary = None;
+    let mut recovery = None;
+    for call in calls {
+        if let Some(hash) = crate::classifier::RuntimeDispatcher::authorize_upgrade_hash(call) {
+            if primary.replace(hash).is_some() {
+                return Err(());
+            }
+        }
+        if let Some(descriptor) =
+            crate::classifier::RuntimeDispatcher::recovery_image_descriptor(call)
+        {
+            if recovery.replace(descriptor).is_some() {
+                return Err(());
+            }
+        }
+    }
+    match (primary, recovery) {
+        (None, None) => Ok(None),
+        (Some(primary), Some(recovery))
+            if recovery.hash != primary
+                && recovery.len > 0
+                && recovery.len <= pallet_preimage::MAX_SIZE
+                && current_spec_version
+                    .checked_add(2)
+                    .is_some_and(|expected| recovery.target_spec_version == expected) =>
+        {
+            Ok(Some(recovery))
+        }
+        _ => Err(()),
+    }
+}
+
 pub(crate) fn required_proposal_bond(
     proposal: &futarchy_primitives::Proposal<AccountId>,
 ) -> Option<Balance> {
@@ -3405,7 +3616,7 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         proposal: &futarchy_primitives::Proposal<AccountId>,
     ) -> pallet_epoch::StaticCheckDisposition {
         use pallet_epoch::StaticCheckDisposition;
-        use pallet_execution_guard::Capabilities;
+        use pallet_execution_guard::{BatchDispatcher, Capabilities, RecoveryImages};
         let Some(bond_floor) = required_proposal_bond(proposal) else {
             return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
         };
@@ -3417,6 +3628,71 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         let Some(calls) = proposal_calls(proposal) else {
             return StaticCheckDisposition::Refund(futarchy_primitives::RejectReason::ProcessHold);
         };
+        let recovery = match recovery_descriptor_for_calls(
+            &calls,
+            proposal
+                .version_constraint
+                .as_ref()
+                .map(|version| version.spec_version)
+                .unwrap_or(u32::MAX),
+        ) {
+            Ok(recovery) => recovery,
+            Err(()) => {
+                return StaticCheckDisposition::Refund(
+                    futarchy_primitives::RejectReason::ProcessHold,
+                )
+            }
+        };
+        if let Some(recovery) = recovery {
+            let mut primary_hash = None;
+            for call in &calls {
+                if let Some(hash) =
+                    crate::classifier::RuntimeDispatcher::authorize_upgrade_hash(call)
+                {
+                    if primary_hash.replace(hash).is_some() {
+                        return StaticCheckDisposition::Refund(
+                            futarchy_primitives::RejectReason::ProcessHold,
+                        );
+                    }
+                }
+            }
+            let Some(primary_hash) = primary_hash else {
+                return StaticCheckDisposition::Refund(
+                    futarchy_primitives::RejectReason::ProcessHold,
+                );
+            };
+            let Some(version_constraint) = proposal.version_constraint.clone() else {
+                return StaticCheckDisposition::Refund(
+                    futarchy_primitives::RejectReason::ProcessHold,
+                );
+            };
+            let qualified =
+                pallet_execution_guard::QualifiedRecoveryImages::<Runtime>::get(proposal.id);
+            if <Preimage as QueryPreimage>::len(&Hash::from(recovery.hash)) != Some(recovery.len)
+                || !RuntimePreimages::is_pinned(recovery.hash)
+                || qualified
+                    != Some(pallet_execution_guard::QualifiedRecoveryImage {
+                        payload_hash: proposal.payload_hash,
+                        primary_hash,
+                        version_constraint,
+                        descriptor: recovery,
+                    })
+                || <RuntimeAttestations as pallet_execution_guard::Attestations>::artifact_hash(
+                    recovery.attestation_id,
+                ) != Some(recovery.hash)
+                || !<RuntimeAttestations as pallet_execution_guard::Attestations>::present_unrevoked_unchallenged(
+                    recovery.attestation_id,
+                )
+                || !<RuntimeEpochAttestation as pallet_epoch::AttestationAccess>::present_and_quorate(
+                    proposal.id,
+                    recovery.hash,
+                )
+            {
+                return StaticCheckDisposition::Refund(
+                    futarchy_primitives::RejectReason::ProcessHold,
+                );
+            }
+        }
         let footprint = crate::classifier::derive_resource_footprint(&calls);
         let footprint_failure = |error: crate::classifier::FootprintError| {
             if error == crate::classifier::FootprintError::Unclassifiable
@@ -3435,7 +3711,6 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         // but 06 §4 reserves confiscation for constitution violations and
         // false resource declarations. Cancel and refund them before slot or
         // market allocation instead of fabricating a proposal class.
-        use pallet_execution_guard::BatchDispatcher;
         let mut has_classifiable_domain = false;
         for call in &calls {
             let Ok(analysis) = crate::classifier::RuntimeDispatcher::rederive_call(call) else {
@@ -3451,9 +3726,12 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         if !has_classifiable_domain {
             return footprint_failure(crate::classifier::FootprintError::Unclassifiable);
         }
-        if !calls
-            .iter()
-            .all(|call| RuntimeCapabilities::call_enabled(proposal.class, call))
+        let phase_four_payload =
+            crate::classifier::RuntimeDispatcher::phase_four_plan(proposal.class, &calls).is_some();
+        if !phase_four_payload
+            && !calls
+                .iter()
+                .all(|call| RuntimeCapabilities::call_enabled(proposal.class, call))
         {
             return StaticCheckDisposition::SlashAll(
                 futarchy_primitives::RejectReason::ConstitutionViolation,
@@ -3551,6 +3829,16 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         }
     }
 
+    fn auxiliary_preimage(
+        _proposal: &futarchy_primitives::Proposal<AccountId>,
+    ) -> Option<futarchy_primitives::H256> {
+        // Full runtime images have a dedicated one-image qualification and
+        // ownership path in execution-guard. Epoch owns only the ≤64 KiB
+        // proposal payload pin; requesting the recovery image here would
+        // double-pin it and reintroduce batched PoV/accounting ambiguity.
+        None
+    }
+
     fn ledger_frozen() -> bool {
         Self::phase_flags() & pallet_constitution::PhaseFlagsValue::LEDGER_FROZEN != 0
     }
@@ -3596,7 +3884,7 @@ impl pallet_epoch::PolBudget<AccountId> for RuntimePolBudget {
     fn epoch_budget() -> Balance {
         #[cfg(feature = "runtime-benchmarks")]
         {
-            return Balance::MAX;
+            Balance::MAX
         }
         #[cfg(not(feature = "runtime-benchmarks"))]
         {
@@ -3830,6 +4118,7 @@ impl pallet_welfare::WelfareParamsProvider for WelfareParams {
         FixedU64(fixed_param(b"welfare.wA"))
     }
 }
+#[allow(dead_code)]
 fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
     let total = u128::from(counters.accepted)
         .saturating_add(u128::from(counters.failed))
@@ -3849,6 +4138,7 @@ fn xcm_health(counters: pallet_welfare::XcmTrafficCounters) -> FixedU64 {
     FixedU64(value)
 }
 
+#[allow(dead_code)]
 fn metric_components(
     epoch: EpochId,
     spec_version: u16,
@@ -3904,14 +4194,14 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
         };
         #[cfg(feature = "runtime-benchmarks")]
         {
-            return specs
+            specs
                 .iter()
                 .filter(|spec| spec.activation_epoch <= epoch)
                 .map(|spec| pallet_welfare::ComponentValue {
                     id: spec.id,
                     value: FixedU64(1_000_000_000),
                 })
-                .collect();
+                .collect()
         }
         #[cfg(not(feature = "runtime-benchmarks"))]
         {
@@ -3960,7 +4250,7 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
         #[cfg(feature = "runtime-benchmarks")]
         {
             let _ = day;
-            return pallet_welfare::MetricSpecs::<Runtime>::get(version)
+            pallet_welfare::MetricSpecs::<Runtime>::get(version)
                 .into_iter()
                 .flatten()
                 .filter(|spec| spec.activation_epoch <= epoch)
@@ -3968,7 +4258,7 @@ impl pallet_welfare::MetricInputs for RuntimeMetricInputs {
                     id: spec.id,
                     value: FixedU64(1_000_000_000),
                 })
-                .collect();
+                .collect()
         }
         #[cfg(not(feature = "runtime-benchmarks"))]
         metric_components(
@@ -4096,7 +4386,7 @@ impl pallet_oracle::ReportingContext for RuntimeReporting {
                 // strictly above the 10,000 `orc.bond_floor` — the variable
                 // bond path, not the floor knee — without overflowing the
                 // checked calculation.
-                return 500_000 * currency::USDC;
+                500_000 * currency::USDC
             }
             #[cfg(not(feature = "runtime-benchmarks"))]
             {
@@ -4671,7 +4961,7 @@ impl pallet_guardian::GuardianTriggers for RuntimeGuardianTriggers {
         let current_epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
         let gate_breach = pallet_welfare::GateBreachFlags::<Runtime>::get(current_epoch)
             .is_some_and(|flags| flags.s_breached || flags.c_breached);
-        #[allow(unused_mut)]
+        #[allow(unused_assignments, unused_mut)]
         let mut state = pallet_guardian::TriggerState {
             gate_breach,
             dead_man: phase_flags & pallet_constitution::PhaseFlagsValue::DEAD_MAN_ENGAGED != 0,
@@ -5064,6 +5354,26 @@ impl pallet_execution_guard::EpochHandoff for RuntimeEpochHandoff {
             .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
             .map(|proposal| proposal.payload_hash)
     }
+    fn recovery_qualification_context(
+        pid: futarchy_primitives::ProposalId,
+    ) -> Option<(
+        futarchy_primitives::H256,
+        futarchy_primitives::RuntimeVersionConstraint,
+    )> {
+        let proposal = pallet_epoch::IntakeProposals::<Runtime>::get(pid)
+            .or_else(|| pallet_epoch::Proposals::<Runtime>::get(pid))?;
+        matches!(
+            proposal.state,
+            futarchy_primitives::ProposalState::Submitted
+                | futarchy_primitives::ProposalState::Screening
+                | futarchy_primitives::ProposalState::Qualified
+                | futarchy_primitives::ProposalState::Trading
+                | futarchy_primitives::ProposalState::Extended
+        )
+        .then_some(proposal.version_constraint)
+        .flatten()
+        .map(|version| (proposal.payload_hash, version))
+    }
     fn mark_executed(pid: futarchy_primitives::ProposalId) -> DispatchResult {
         Epoch::mark_executed(RuntimeOrigin::signed(execution_guard_account()), pid)
     }
@@ -5346,6 +5656,12 @@ impl RuntimeCapabilities {
             RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
                 Self::enabled(class, pallet_constitution::Capability::AuthorizeUpgrade)
             }
+            RuntimeCall::ExecutionGuard(
+                pallet_execution_guard::Call::commit_recovery_image { .. },
+            ) => {
+                matches!(class, futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta)
+                    && Self::enabled(class, pallet_constitution::Capability::AuthorizeUpgrade)
+            }
             RuntimeCall::FutarchyTreasury(
                 pallet_futarchy_treasury::Call::fund_budget_line { .. }
                 | pallet_futarchy_treasury::Call::spend { .. }
@@ -5421,8 +5737,9 @@ impl pallet_execution_guard::Capabilities<RuntimeCall> for RuntimeCapabilities {
             | RuntimeCall::Multisig(
                 pallet_multisig::Call::as_multi { call, .. }
                 | pallet_multisig::Call::as_multi_threshold_1 { call, .. },
-            )
-            | RuntimeCall::Sudo(
+            ) => Self::call_enabled(class, call),
+            #[cfg(feature = "bootstrap")]
+            RuntimeCall::Sudo(
                 pallet_sudo::Call::sudo { call }
                 | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
             ) => Self::call_enabled(class, call),
@@ -5455,6 +5772,157 @@ impl pallet_execution_guard::Preimages for RuntimePreimages {
         }
         <Preimage as QueryPreimage>::unrequest(&hash);
         Ok(())
+    }
+}
+
+impl pallet_execution_guard::RecoveryImages for RuntimePreimages {
+    fn len(hash: futarchy_primitives::H256) -> Option<u32> {
+        <Preimage as QueryPreimage>::len(&Hash::from(hash))
+    }
+    fn fetch(hash: futarchy_primitives::H256, expected_len: u32) -> Option<Vec<u8>> {
+        if expected_len > pallet_preimage::MAX_SIZE {
+            return None;
+        }
+        <Preimage as QueryPreimage>::fetch(&Hash::from(hash), Some(expected_len))
+            .ok()
+            .map(Cow::into_owned)
+    }
+    fn is_pinned(hash: futarchy_primitives::H256) -> bool {
+        <Preimage as QueryPreimage>::is_requested(&Hash::from(hash))
+    }
+    fn preflight_qualifies(code: &[u8]) -> bool {
+        let Ok(code_len) = u32::try_from(code.len()) else {
+            return false;
+        };
+        cumulus_pallet_parachain_system::HostConfiguration::<Runtime>::get()
+            .is_some_and(|host| code_len <= host.max_code_size)
+    }
+    fn pin(hash: futarchy_primitives::H256) -> DispatchResult {
+        <Preimage as QueryPreimage>::request(&Hash::from(hash));
+        Ok(())
+    }
+    fn unpin(hash: futarchy_primitives::H256) -> DispatchResult {
+        let hash = Hash::from(hash);
+        if !<Preimage as QueryPreimage>::is_requested(&hash) {
+            return Err(DispatchError::Unavailable);
+        }
+        <Preimage as QueryPreimage>::unrequest(&hash);
+        Ok(())
+    }
+}
+
+pub struct RuntimePhaseState;
+
+fn sudo_key_storage_exists() -> bool {
+    let mut key = [0u8; 32];
+    key[..16].copy_from_slice(&sp_io::hashing::twox_128(b"Sudo"));
+    key[16..].copy_from_slice(&sp_io::hashing::twox_128(b"Key"));
+    sp_io::storage::exists(&key)
+}
+
+impl pallet_execution_guard::PhaseState for RuntimePhaseState {
+    fn exact_phase_three() -> bool {
+        #[cfg(not(feature = "bootstrap"))]
+        {
+            false
+        }
+        #[cfg(feature = "bootstrap")]
+        {
+            let expected = pallet_constitution::PhaseFlagsValue::SHADOW_MODE
+                | pallet_constitution::PhaseFlagsValue::SUDO_PRESENT;
+            pallet_constitution::PhaseFlags::<Runtime>::get() == expected
+                && pallet_sudo::Key::<Runtime>::get().is_some()
+        }
+    }
+    fn exact_phase_four() -> bool {
+        pallet_constitution::PhaseFlags::<Runtime>::get()
+            == pallet_constitution::PhaseFlagsValue::PARAM_ARMED
+            && !sudo_key_storage_exists()
+    }
+    fn post_sudo_phase() -> bool {
+        let flags = pallet_constitution::PhaseFlags::<Runtime>::get();
+        flags & pallet_constitution::PhaseFlagsValue::PARAM_ARMED != 0
+            && flags
+                & (pallet_constitution::PhaseFlagsValue::SHADOW_MODE
+                    | pallet_constitution::PhaseFlagsValue::SUDO_PRESENT)
+                == 0
+            && !sudo_key_storage_exists()
+    }
+
+    fn class_execution_enabled(class: futarchy_primitives::ProposalClass) -> bool {
+        let flags = pallet_constitution::PhaseFlags::<Runtime>::get();
+        match class {
+            futarchy_primitives::ProposalClass::Param => {
+                flags & pallet_constitution::PhaseFlagsValue::PARAM_ARMED != 0
+            }
+            futarchy_primitives::ProposalClass::Treasury => {
+                flags & pallet_constitution::PhaseFlagsValue::TREASURY_ARMED != 0
+            }
+            futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta => {
+                flags & pallet_constitution::PhaseFlagsValue::CODE_META_ARMED != 0
+            }
+            futarchy_primitives::ProposalClass::Constitutional => false,
+        }
+    }
+
+    fn phase_four_plan_valid(plan: &pallet_execution_guard::PhaseFourPlan) -> bool {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let now = System::block_number();
+        [
+            (
+                pallet_constitution::key16(b"phase3.tvl_cap"),
+                pallet_constitution::ParamValue::Balance(plan.tvl_cap),
+            ),
+            (
+                pallet_constitution::key16(b"phase3.dep_cap"),
+                pallet_constitution::ParamValue::Balance(plan.deposit_cap),
+            ),
+        ]
+        .into_iter()
+        .all(|(key, value)| {
+            pallet_constitution::Params::<Runtime>::get(key).is_some_and(|record| {
+                value.as_u128() > record.value.as_u128()
+                    && record.checked_update(value, epoch, now).is_ok()
+            })
+        })
+    }
+}
+
+pub struct EnsureCurrentSudoKey;
+impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureCurrentSudoKey {
+    type Success = AccountId;
+
+    fn try_origin(origin: RuntimeOrigin) -> Result<Self::Success, RuntimeOrigin> {
+        #[cfg(not(feature = "bootstrap"))]
+        {
+            Err(origin)
+        }
+        #[cfg(feature = "bootstrap")]
+        {
+            let raw: Result<frame_system::RawOrigin<AccountId>, RuntimeOrigin> = origin.into();
+            raw.and_then(|raw| match raw {
+                frame_system::RawOrigin::Signed(who)
+                    if pallet_sudo::Key::<Runtime>::get().as_ref() == Some(&who) =>
+                {
+                    Ok(who)
+                }
+                other => Err(RuntimeOrigin::from(other)),
+            })
+        }
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn try_successful_origin() -> Result<RuntimeOrigin, ()> {
+        #[cfg(not(feature = "bootstrap"))]
+        {
+            Err(())
+        }
+        #[cfg(feature = "bootstrap")]
+        {
+            pallet_sudo::Key::<Runtime>::get()
+                .map(RuntimeOrigin::signed)
+                .ok_or(())
+        }
     }
 }
 
@@ -5618,15 +6086,21 @@ pub(crate) fn direct_system_upgrade_allowed(code: &[u8]) -> bool {
         && parachain_upgrade_preflight(code).is_ok();
     #[cfg(feature = "runtime-benchmarks")]
     let preflight_passes = true;
-    version_matches && preflight_passes
+    let bridge_matches = match pallet_execution_guard::PhaseFourBridge::<Runtime>::get() {
+        pallet_execution_guard::PhaseFourBridgeState::Pending { code_hash, .. } => {
+            code_hash == pending.hash
+        }
+        pallet_execution_guard::PhaseFourBridgeState::Scheduled { .. } => false,
+        pallet_execution_guard::PhaseFourBridgeState::Unused
+        | pallet_execution_guard::PhaseFourBridgeState::Consumed => true,
+    };
+    version_matches && preflight_passes && bridge_matches
 }
 
-fn scheduled_upgrade_aborted() -> bool {
+fn scheduled_upgrade_abort_candidate() -> Option<futarchy_primitives::H256> {
     use cumulus_primitives_core::relay_chain::UpgradeGoAhead;
 
-    let Some(pending) = pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get() else {
-        return false;
-    };
+    let pending = pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get()?;
     if pallet_execution_guard::ScheduledUpgrade::<Runtime>::get() != Some(pending.hash)
         || !matches!(
             cumulus_pallet_parachain_system::UpgradeGoAhead::<Runtime>::get(),
@@ -5634,14 +6108,166 @@ fn scheduled_upgrade_aborted() -> bool {
         )
         || cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::exists()
     {
-        return false;
+        return None;
     }
-    // The scheduled latch surviving proves `on_validation_code_applied` did
-    // not complete. The installed-code comparison independently separates an
-    // Abort from the GoAhead path that consumed the same Cumulus pending key.
+    Some(pending.hash)
+}
+
+fn installed_code_differs(expected: futarchy_primitives::H256) -> bool {
     sp_io::storage::get(sp_core::storage::well_known_keys::CODE)
-        .map(|code| sp_io::hashing::blake2_256(&code) != pending.hash)
+        .map(|code| sp_io::hashing::blake2_256(&code) != expected)
         .unwrap_or(true)
+}
+
+enum RecoveryTrigger {
+    Cursor(pallet_migrations::CursorOf<Runtime>),
+    PhaseTransition,
+}
+
+fn recovery_trigger() -> Option<RecoveryTrigger> {
+    let sources = MigrationHaltSources::get();
+    match pallet_migrations::Cursor::<Runtime>::get() {
+        Some(cursor @ pallet_migrations::MigrationCursor::Stuck)
+            if sources & MIGRATION_FAILURE_HALT != 0 =>
+        {
+            Some(RecoveryTrigger::Cursor(cursor))
+        }
+        Some(pallet_migrations::MigrationCursor::Active(cursor)) => {
+            (active_migration_stall_is_live(&cursor) && sources & MIGRATION_STALL_HALT != 0)
+                .then_some(RecoveryTrigger::Cursor(
+                    pallet_migrations::MigrationCursor::Active(cursor),
+                ))
+        }
+        Some(_) => None,
+        None if PhaseTransitionLock::get()
+            && matches!(
+                pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
+                pallet_execution_guard::PhaseFourBridgeState::Scheduled { .. }
+            )
+            && sources & APPLIED_DETECTION_HALT != 0 =>
+        {
+            Some(RecoveryTrigger::PhaseTransition)
+        }
+        None => None,
+    }
+}
+
+pub(crate) fn recovery_hook_weight(bytes: u32) -> Weight {
+    // The recovery path performs the same bounded full-Wasm read, version
+    // inspection, hash and preimage bookkeeping as the generated recovery
+    // qualifier. Reuse that measured worst-case envelope so this mandatory
+    // hook moves with the committed benchmark artifact and its >10% regression
+    // gate instead of carrying an unmeasured runtime-local constant.
+    <crate::weights::pallet_execution_guard::WeightInfo<Runtime> as pallet_execution_guard::WeightInfo>::qualify_recovery_image(bytes)
+}
+
+pub(crate) fn recovery_schedule_hook_weight(bytes: u32) -> Weight {
+    // `schedule_committed_recovery_image` performs the full bounded
+    // qualification/preimage path, then FRAME authorization and Cumulus code
+    // scheduling, plus the runtime-local lockdown/cursor/receipt writes. The
+    // mandatory inherent must pre-charge all of it (I-20); charging only the
+    // qualifier undercounts a 4 MiB application by roughly an order of
+    // magnitude. The final term conservatively covers the additional fixed
+    // runtime-local reads/writes and the retired cursor proof not present in
+    // the generated dispatch weights.
+    recovery_hook_weight(bytes)
+        .saturating_add(
+            <<Runtime as frame_system::Config>::SystemWeightInfo as frame_system::WeightInfo>::authorize_upgrade(),
+        )
+        .saturating_add(
+            <<Runtime as frame_system::Config>::SystemWeightInfo as frame_system::WeightInfo>::apply_authorized_upgrade(),
+        )
+        .saturating_add(
+            <Runtime as frame_system::Config>::DbWeight::get().reads_writes(8, 8),
+        )
+        .saturating_add(Weight::from_parts(
+            0,
+            u64::from(bounds::MIGRATION_CURSOR_MAX_LEN),
+        ))
+}
+
+fn schedule_committed_recovery_image() -> DispatchResult {
+    if RecoveryLockdown::get() || RecoveryAborted::get() || RecoveryScheduledHash::exists() {
+        return Ok(());
+    }
+    frame_support::storage::with_storage_layer(|| {
+        let trigger = recovery_trigger().ok_or(DispatchError::Other("recovery trigger missing"))?;
+        let (recovery, code) = crate::ExecutionGuard::prepare_recovery_image()?;
+        parachain_upgrade_preflight(&code)?;
+
+        // From this write until GoAhead/Abort, the wrapper keeps FRAME in
+        // OnlyInherents even though frame-system requires the SDK cursor to be
+        // absent while applying the authorization.
+        RecoveryLockdown::put(true);
+        match trigger {
+            RecoveryTrigger::Cursor(cursor) => {
+                RetiredMigrationCursor::put(cursor);
+                pallet_migrations::Cursor::<Runtime>::kill();
+            }
+            RecoveryTrigger::PhaseTransition => {
+                frame_support::ensure!(
+                    !RetiredMigrationCursor::exists()
+                        && !pallet_migrations::Cursor::<Runtime>::exists(),
+                    DispatchError::Other("phase recovery cursor conflict")
+                );
+            }
+        }
+        RecoveryCodeApplied::kill();
+        RecoveryBypass::put(true);
+        let result = (|| {
+            RuntimeCall::System(frame_system::Call::authorize_upgrade {
+                code_hash: Hash::from(recovery.hash),
+            })
+            .dispatch_bypass_filter(RuntimeOrigin::root())
+            .map_err(|error| error.error)?;
+            RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code })
+                .dispatch_bypass_filter(RuntimeOrigin::none())
+                .map_err(|error| error.error)?;
+            crate::ExecutionGuard::recovery_scheduled(recovery.hash)?;
+            RecoveryScheduledHash::put(recovery.hash);
+            Ok(())
+        })();
+        RecoveryBypass::kill();
+        result
+    })
+}
+
+fn recovery_upgrade_abort_candidate() -> Option<futarchy_primitives::H256> {
+    use cumulus_primitives_core::relay_chain::UpgradeGoAhead;
+    let hash = RecoveryScheduledHash::get()?;
+    (matches!(
+        cumulus_pallet_parachain_system::UpgradeGoAhead::<Runtime>::get(),
+        Some(UpgradeGoAhead::Abort)
+    ) && !cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::exists())
+    .then_some(hash)
+}
+
+fn restore_recovery_cursor_after_abort() -> DispatchResult {
+    if let Some(cursor) = RetiredMigrationCursor::get() {
+        if pallet_migrations::Cursor::<Runtime>::exists() {
+            return Err(DispatchError::Other("recovery cursor already present"));
+        }
+        pallet_migrations::Cursor::<Runtime>::put(cursor);
+    } else if !PhaseTransitionLock::get() {
+        return Err(DispatchError::Other("recovery cause missing"));
+    }
+    RecoveryScheduledHash::kill();
+    RecoveryCodeApplied::kill();
+    RecoveryAborted::put(true);
+    // Keep RecoveryLockdown set: no ordinary call may observe the restored
+    // half-migrated layout, and a relay-rejected image is never auto-retried.
+    Ok(())
+}
+
+pub(crate) fn installed_code_identity() -> Option<(
+    futarchy_primitives::H256,
+    futarchy_primitives::RuntimeVersionConstraint,
+)> {
+    use pallet_execution_guard::BatchDispatcher;
+    let code = sp_io::storage::get(sp_core::storage::well_known_keys::CODE)?;
+    let hash = sp_io::hashing::blake2_256(&code);
+    let version = crate::classifier::RuntimeDispatcher::observed_runtime_version(&code)?;
+    Some((hash, version))
 }
 
 /// Cumulus calls this only after relay `GoAhead` has written the new `:code`.
@@ -5659,6 +6285,21 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
         // cursor's persisted start block is O(1) storage and bounded by
         // CursorMaxLen.
         track_migration_progress();
+        if let Some(expected) = recovery_upgrade_abort_candidate() {
+            // The cheap relay/pending-code predicate is true; register the
+            // full bounded `:code` read/hash before performing it.
+            frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
+                recovery_hook_weight(pallet_preimage::MAX_SIZE),
+                DispatchClass::Mandatory,
+            );
+            if installed_code_differs(expected) {
+                if restore_recovery_cursor_after_abort().is_err() {
+                    set_migration_halt_source(APPLIED_DETECTION_HALT);
+                }
+                set_migration_halt_source(UPGRADE_ABORT_TRIGGER);
+                return;
+            }
+        }
         let now = frame_system::Pallet::<Runtime>::block_number();
         let snapshot_overdue = pallet_welfare::Pallet::<Runtime>::snapshot_overdue(now)
             && !snapshot_close_blocked_by_pause();
@@ -5668,48 +6309,140 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
             data.relay_parent_number,
             snapshot_overdue,
         );
-        if scheduled_upgrade_aborted() {
-            if crate::ExecutionGuard::validation_code_aborted().is_ok() {
-                // Guardian-visible incident trigger, intentionally not an
-                // execution-queue halt: the relay preserved status quo and a
-                // fresh normal proposal must remain possible.
-                set_migration_halt_source(UPGRADE_ABORT_TRIGGER);
-            } else {
-                // A failed status-quo cleanup is itself a halt-worthy applied
-                // boundary mismatch; retain every pending record for review.
-                set_migration_halt_source(UPGRADE_ABORT_TRIGGER | APPLIED_DETECTION_HALT);
+        if let Some(expected) = scheduled_upgrade_abort_candidate() {
+            frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
+                recovery_hook_weight(pallet_preimage::MAX_SIZE),
+                DispatchClass::Mandatory,
+            );
+            if installed_code_differs(expected) {
+                let phase_transition = PhaseTransitionLock::get();
+                if crate::ExecutionGuard::validation_code_aborted().is_ok() {
+                    if phase_transition {
+                        PhaseTransitionLock::kill();
+                        PhaseTransitionApplied::kill();
+                    }
+                    // Guardian-visible incident trigger, intentionally not an
+                    // execution-queue halt: the relay preserved status quo and a
+                    // fresh normal proposal must remain possible.
+                    set_migration_halt_source(UPGRADE_ABORT_TRIGGER);
+                } else {
+                    // A failed status-quo cleanup is itself a halt-worthy applied
+                    // boundary mismatch; retain every pending record for review.
+                    set_migration_halt_source(UPGRADE_ABORT_TRIGGER | APPLIED_DETECTION_HALT);
+                }
+                return;
+            }
+        }
+        if let Some(recovery) = pallet_execution_guard::RecoveryImage::<Runtime>::get() {
+            if recovery_trigger().is_some() {
+                frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
+                    recovery_schedule_hook_weight(recovery.len.min(pallet_preimage::MAX_SIZE)),
+                    DispatchClass::Mandatory,
+                );
+                if schedule_committed_recovery_image().is_err() {
+                    // The original cursor/anchor/commitment remain byte-identical
+                    // because scheduling is one storage transaction.
+                    set_migration_halt_source(MIGRATION_FAILURE_HALT);
+                }
             }
         }
     }
     fn on_validation_code_applied() {
-        let valid =
-            sp_io::storage::get(sp_core::storage::well_known_keys::CODE).is_some_and(|code| {
-                let hash = sp_io::hashing::blake2_256(&code);
-                let observed =
-                    <crate::classifier::RuntimeDispatcher as pallet_execution_guard::BatchDispatcher<
-                        RuntimeCall,
-                    >>::observed_runtime_version(&code);
-                pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_some_and(
-                    |pending| {
-                        let current = pallet_execution_guard::CurrentSpecName::<Runtime>::get();
-                        hash == pending.hash
-                            && observed.is_some_and(|version| {
-                                current.is_some_and(|current| {
-                                    version.spec_name == current.spec_name
-                                        && version.spec_version == pending.target_spec_version
-                                })
-                            })
-                    },
-                )
+        // The callback's first proof is the installed `:code` identity. Charge
+        // its maximum bounded read/hash before touching the bytes.
+        frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
+            recovery_hook_weight(pallet_preimage::MAX_SIZE),
+            DispatchClass::Mandatory,
+        );
+        if let Some(hash) = RecoveryScheduledHash::get() {
+            let valid = installed_code_identity().is_some_and(|(installed_hash, version)| {
+                installed_hash == hash
+                    && pallet_execution_guard::RecoveryImage::<Runtime>::get().is_some_and(
+                        |recovery| {
+                            recovery.hash == hash
+                                && recovery.target_spec_version == version.spec_version
+                                && pallet_execution_guard::CurrentSpecName::<Runtime>::get()
+                                    .is_some_and(|current| current.spec_name == version.spec_name)
+                        },
+                    )
             });
+            if valid {
+                // Cumulus invokes this in the old runtime. The terminal
+                // recovery profile performs its bounded repair and atomic
+                // guard/channel finalization at the next block's
+                // `on_runtime_upgrade`; both locks remain active until then.
+                RecoveryCodeApplied::put(true);
+            } else {
+                set_migration_halt_source(APPLIED_DETECTION_HALT);
+            }
+            return;
+        }
+        let installed_identity = installed_code_identity();
+        let installed_hash = installed_identity.as_ref().map(|(hash, _)| *hash);
+        let valid = installed_identity.as_ref().is_some_and(|(hash, observed)| {
+            pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_some_and(
+                |pending| {
+                    let current = pallet_execution_guard::CurrentSpecName::<Runtime>::get();
+                    *hash == pending.hash
+                        && current.is_some_and(|current| {
+                            observed.spec_name == current.spec_name
+                                && observed.spec_version == pending.target_spec_version
+                        })
+                },
+            )
+        });
+        let bridge = pallet_execution_guard::PhaseFourBridge::<Runtime>::get();
+        if matches!(
+            bridge,
+            pallet_execution_guard::PhaseFourBridgeState::Pending { code_hash, .. }
+                if installed_hash == Some(code_hash)
+        ) {
+            if !valid
+                || frame_support::storage::with_storage_layer(|| {
+                    let hash = installed_hash
+                        .ok_or(DispatchError::Other("phase-four installed code missing"))?;
+                    crate::ExecutionGuard::phase_four_scheduled(hash)?;
+                    PhaseTransitionLock::put(true);
+                    PhaseTransitionApplied::put(true);
+                    Ok::<(), DispatchError>(())
+                })
+                .is_err()
+            {
+                set_migration_halt_source(APPLIED_DETECTION_HALT);
+            }
+            return;
+        }
+        if matches!(
+            bridge,
+            pallet_execution_guard::PhaseFourBridgeState::Scheduled { code_hash, .. }
+                if installed_hash == Some(code_hash)
+        ) || PhaseTransitionLock::get()
+        {
+            if valid && PhaseTransitionLock::get() {
+                // The no-Sudo image's one-shot migration runs only at the next
+                // block's `on_runtime_upgrade`, so preserve the OnlyInherents
+                // lock and leave guard pending state intact for that atomic
+                // transition.
+                PhaseTransitionApplied::put(true);
+            } else {
+                set_migration_halt_source(APPLIED_DETECTION_HALT);
+            }
+            return;
+        }
+        if matches!(
+            bridge,
+            pallet_execution_guard::PhaseFourBridgeState::Pending { .. }
+                | pallet_execution_guard::PhaseFourBridgeState::Scheduled { .. }
+        ) {
+            set_migration_halt_source(APPLIED_DETECTION_HALT);
+            return;
+        }
         if !valid || crate::ExecutionGuard::validation_code_applied().is_err() {
             set_migration_halt_source(APPLIED_DETECTION_HALT);
         } else {
             MigrationFailedStep::kill();
-            // A valid recovery image may intentionally carry zero MBMs, in
-            // which case `MigrationStatusHandler::completed()` never fires.
-            // Any MBM in the new image that later fails/stalls re-raises its
-            // own source through the normal handlers.
+            // A valid primary image may carry zero MBMs, in which case
+            // `MigrationStatusHandler::completed()` never fires.
             clear_migration_halt_sources(
                 MIGRATION_FAILURE_HALT
                     | MIGRATION_STALL_HALT
@@ -5747,8 +6480,15 @@ impl pallet_execution_guard::Config for Runtime {
     type UpgradeSchedule = RuntimeUpgradeSchedule;
     type MigrationStatus = RuntimeMigrationStatus;
     type Preimages = RuntimePreimages;
+    type RecoveryImages = RuntimePreimages;
     type ReleaseChannel = RuntimeReleaseChannel;
     type RatifyOrigin = EnsureValuesScoped<RatifyTrack>;
+    type RecoveryCommitOrigin = frame_support::traits::EitherOfDiverse<
+        pallet_origins::EnsureFutarchyCode,
+        pallet_origins::EnsureFutarchyMeta,
+    >;
+    type PhaseFourBridgeOrigin = EnsureCurrentSudoKey;
+    type PhaseState = RuntimePhaseState;
     type Dispatcher = crate::classifier::RuntimeDispatcher;
     type MaxRuntimeCodeBytes = ConstU32<{ pallet_preimage::MAX_SIZE }>;
     type WeightInfo = crate::weights::pallet_execution_guard::WeightInfo<Runtime>;
@@ -6063,6 +6803,15 @@ fn benchmark_fill_attestations(
     pid: futarchy_primitives::ProposalId,
     artifact_hash: futarchy_primitives::H256,
 ) {
+    benchmark_fill_upgrade_attestations(pid, artifact_hash, None);
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_fill_upgrade_attestations(
+    pid: futarchy_primitives::ProposalId,
+    primary_hash: futarchy_primitives::H256,
+    recovery_hash: Option<futarchy_primitives::H256>,
+) {
     let members = (0..pallet_attestor::MAX_ATTESTORS)
         .map(|index| pallet_attestor::AttestorInfo {
             account: [100u8.saturating_add(index as u8); 32],
@@ -6075,9 +6824,15 @@ fn benchmark_fill_attestations(
 
     let attestations = (0..pallet_attestor::MAX_ATTESTATIONS)
         .map(|id| {
-            let target = id
+            let primary = id
                 >= pallet_attestor::MAX_ATTESTATIONS
                     .saturating_sub(futarchy_primitives::kernel::ATT_QUORUM);
+            let recovery = recovery_hash.is_some()
+                && id
+                    >= pallet_attestor::MAX_ATTESTATIONS
+                        .saturating_sub(futarchy_primitives::kernel::ATT_QUORUM.saturating_mul(2))
+                && !primary;
+            let target = primary || recovery;
             pallet_attestor::Attestation {
                 id,
                 pid: if target {
@@ -6085,8 +6840,10 @@ fn benchmark_fill_attestations(
                 } else {
                     100_000u64.saturating_add(u64::from(id))
                 },
-                artifact_hash: if target {
-                    artifact_hash
+                artifact_hash: if primary {
+                    primary_hash
+                } else if recovery {
+                    recovery_hash.unwrap_or_default()
                 } else {
                     [id as u8; 32]
                 },
@@ -6463,6 +7220,61 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
         }
     }
 
+    fn prime_recovery_qualification(proposal: &mut futarchy_primitives::Proposal<AccountId>) {
+        use frame_support::traits::StorePreimage;
+
+        if pallet_execution_guard::CurrentSpecName::<Runtime>::get().is_none() {
+            pallet_execution_guard::CurrentSpecName::<Runtime>::put(benchmark_runtime_version());
+        }
+        let primary_hash = sp_io::hashing::blake2_256(&proposal.id.encode());
+        let Ok(recovery) = benchmark_recovery_image(proposal.id, primary_hash) else {
+            return;
+        };
+        let calls = alloc::vec![
+            RuntimeCall::System(frame_system::Call::authorize_upgrade {
+                code_hash: primary_hash.into(),
+            }),
+            RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::commit_recovery_image {
+                hash: recovery.hash,
+                len: recovery.len,
+                target_spec_version: recovery.target_spec_version,
+                attestation_id: recovery.attestation_id,
+            }),
+        ];
+        let Ok(batch) = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(calls)
+        else {
+            return;
+        };
+        let payload = batch.encode();
+        let Ok(payload_len) = u32::try_from(payload.len()) else {
+            return;
+        };
+        let Ok(payload_hash) = <Preimage as StorePreimage>::note(Cow::Owned(payload)) else {
+            return;
+        };
+        let qualification_context = benchmark_epoch_proposal(
+            proposal.id,
+            payload_hash.0,
+            payload_len,
+            futarchy_primitives::ProposalState::Submitted,
+        );
+        pallet_epoch::IntakeProposals::<Runtime>::insert(proposal.id, qualification_context);
+        let caller = AccountId32::new([249; 32]);
+        if crate::ExecutionGuard::qualify_recovery_image(RuntimeOrigin::signed(caller), proposal.id)
+            .is_err()
+        {
+            return;
+        }
+        proposal.class = futarchy_primitives::ProposalClass::Code;
+        proposal.payload_hash = payload_hash.0;
+        proposal.payload_len = payload_len;
+        proposal.bond = balance_param(b"prop.bond.code");
+        proposal.resources =
+            futarchy_primitives::BoundedVec::try_from(alloc::vec![[0x03, 0, 0, 0, 0, 0, 0, 0,]])
+                .unwrap_or_default();
+        proposal.version_constraint = pallet_execution_guard::CurrentSpecName::<Runtime>::get();
+    }
+
     fn prime_decision(
         pid: futarchy_primitives::ProposalId,
         epoch: EpochId,
@@ -6650,15 +7462,40 @@ fn benchmark_guard_enqueue_for_class(
     attestation_id: Option<u32>,
     ratified: bool,
 ) -> Result<BlockNumber, DispatchError> {
-    use frame_support::traits::StorePreimage;
+    benchmark_guard_enqueue_calls_for_class(
+        pid,
+        alloc::vec![call],
+        alloc::vec![domain],
+        class,
+        attestation_id,
+        ratified,
+    )
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_guard_enqueue_calls_for_class(
+    pid: futarchy_primitives::ProposalId,
+    calls: Vec<RuntimeCall>,
+    domains: Vec<pallet_execution_guard::CallDomain>,
+    class: futarchy_primitives::ProposalClass,
+    attestation_id: Option<u32>,
+    ratified: bool,
+) -> Result<BlockNumber, DispatchError> {
+    use frame_support::traits::{QueryPreimage, StorePreimage};
+    use pallet_execution_guard::BatchDispatcher;
 
     if pallet_execution_guard::CurrentSpecName::<Runtime>::get().is_none() {
         pallet_execution_guard::CurrentSpecName::<Runtime>::put(benchmark_runtime_version());
     }
 
-    let batch =
-        pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(alloc::vec![call])
-            .map_err(|_| DispatchError::Other("benchmark guard batch bound"))?;
+    let primary_hash = calls
+        .iter()
+        .find_map(crate::classifier::RuntimeDispatcher::authorize_upgrade_hash);
+    let recovery = calls
+        .iter()
+        .find_map(crate::classifier::RuntimeDispatcher::recovery_image_descriptor);
+    let batch = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(calls)
+        .map_err(|_| DispatchError::Other("benchmark guard batch bound"))?;
     let bytes = batch.encode();
     let payload_len = u32::try_from(bytes.len())
         .map_err(|_| DispatchError::Other("benchmark guard payload length"))?;
@@ -6678,9 +7515,20 @@ fn benchmark_guard_enqueue_for_class(
         ))?;
     let version_constraint = pallet_execution_guard::CurrentSpecName::<Runtime>::get()
         .ok_or(DispatchError::Other("benchmark guard current version"))?;
-    let declared_domains =
-        pallet_execution_guard::pallet::StoredDomains::try_from(alloc::vec![domain])
-            .map_err(|_| DispatchError::Other("benchmark guard domain bound"))?;
+    if let (Some(primary_hash), Some(descriptor)) = (primary_hash, recovery) {
+        <Preimage as QueryPreimage>::request(&Hash::from(descriptor.hash));
+        pallet_execution_guard::QualifiedRecoveryImages::<Runtime>::insert(
+            pid,
+            pallet_execution_guard::QualifiedRecoveryImage {
+                payload_hash: hash.0,
+                primary_hash,
+                version_constraint: version_constraint.clone(),
+                descriptor,
+            },
+        );
+    }
+    let declared_domains = pallet_execution_guard::pallet::StoredDomains::try_from(domains)
+        .map_err(|_| DispatchError::Other("benchmark guard domain bound"))?;
     benchmark_seed_epoch_queue(
         pid,
         hash.0,
@@ -6718,11 +7566,65 @@ fn benchmark_guard_enqueue_for_class(
 }
 
 #[cfg(feature = "runtime-benchmarks")]
+fn benchmark_recovery_image(
+    pid: futarchy_primitives::ProposalId,
+    primary_hash: futarchy_primitives::H256,
+) -> Result<pallet_execution_guard::RecoveryImageDescriptor, DispatchError> {
+    benchmark_recovery_image_sized(pid, primary_hash, 512)
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_recovery_image_sized(
+    pid: futarchy_primitives::ProposalId,
+    primary_hash: futarchy_primitives::H256,
+    bytes: u32,
+) -> Result<pallet_execution_guard::RecoveryImageDescriptor, DispatchError> {
+    use frame_support::traits::StorePreimage;
+
+    let current = pallet_execution_guard::CurrentSpecName::<Runtime>::get()
+        .unwrap_or_else(benchmark_runtime_version);
+    let target_spec_version =
+        current
+            .spec_version
+            .checked_add(2)
+            .ok_or(DispatchError::Arithmetic(
+                sp_runtime::ArithmeticError::Overflow,
+            ))?;
+    let code = benchmark_runtime_code_with_spec(bytes, target_spec_version);
+    ParachainSystem::initialize_for_set_code_benchmark(code.len() as u32);
+    let len =
+        u32::try_from(code.len()).map_err(|_| DispatchError::Other("benchmark recovery length"))?;
+    let hash = <Preimage as StorePreimage>::note(Cow::Owned(code))?.0;
+    let attestation_id = pallet_attestor::MAX_ATTESTATIONS
+        .saturating_sub(futarchy_primitives::kernel::ATT_QUORUM.saturating_mul(2));
+    benchmark_fill_upgrade_attestations(pid, primary_hash, Some(hash));
+    Ok(pallet_execution_guard::RecoveryImageDescriptor {
+        hash,
+        len,
+        target_spec_version,
+        attestation_id,
+    })
+}
+
+#[cfg(feature = "runtime-benchmarks")]
 impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
     benchmark_keeper_rebate_hooks!();
 
     fn ratify_origin() -> RuntimeOrigin {
         pallet_origins::Origin::ConstitutionalValues.into()
+    }
+    fn recovery_commit_origin() -> RuntimeOrigin {
+        pallet_origins::Origin::FutarchyCode.into()
+    }
+    fn phase_four_origin() -> RuntimeOrigin {
+        #[cfg(feature = "bootstrap")]
+        {
+            pallet_sudo::Key::<Runtime>::get()
+                .map(RuntimeOrigin::signed)
+                .unwrap_or_else(|| RuntimeOrigin::signed(AccountId32::new([0; 32])))
+        }
+        #[cfg(not(feature = "bootstrap"))]
+        RuntimeOrigin::signed(AccountId32::new([0; 32]))
     }
 
     fn prime_ratify(pid: futarchy_primitives::ProposalId, _: u32) {
@@ -6736,19 +7638,44 @@ impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmark
         pallet_epoch::IntakeProposals::<Runtime>::insert(pid, proposal);
     }
 
-    fn prime_execute(pid: futarchy_primitives::ProposalId, _: u32) {
+    fn prime_execute(pid: futarchy_primitives::ProposalId, calls: u32) {
         System::set_block_number(System::block_number().max(1));
+        pallet_constitution::PhaseFlags::<Runtime>::put(
+            pallet_constitution::PhaseFlagsValue::CODE_META_ARMED,
+        );
         let artifact = sp_io::hashing::blake2_256(&pid.encode());
-        benchmark_fill_attestations(pid, artifact);
+        let Ok(recovery) = benchmark_recovery_image(pid, artifact) else {
+            return;
+        };
         let attestation_id = pallet_attestor::MAX_ATTESTATIONS
             .saturating_sub(futarchy_primitives::kernel::ATT_QUORUM);
-        let call = RuntimeCall::System(frame_system::Call::authorize_upgrade {
-            code_hash: artifact.into(),
-        });
-        if let Ok(maturity) = benchmark_guard_enqueue_for_class(
-            pid,
-            call,
+        let mut batch = alloc::vec![
+            RuntimeCall::System(frame_system::Call::authorize_upgrade {
+                code_hash: artifact.into(),
+            }),
+            RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::commit_recovery_image {
+                hash: recovery.hash,
+                len: recovery.len,
+                target_spec_version: recovery.target_spec_version,
+                attestation_id: recovery.attestation_id,
+            },),
+        ];
+        batch.extend((2..calls).map(|index| {
+            RuntimeCall::System(frame_system::Call::remark {
+                remark: alloc::vec![index as u8; 32],
+            })
+        }));
+        let mut domains = alloc::vec![
             pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade,
+            pallet_execution_guard::CallDomain::Code,
+        ];
+        if calls > 2 {
+            domains.push(pallet_execution_guard::CallDomain::Public);
+        }
+        if let Ok(maturity) = benchmark_guard_enqueue_calls_for_class(
+            pid,
+            batch,
+            domains,
             futarchy_primitives::ProposalClass::Code,
             Some(attestation_id),
             true,
@@ -6756,8 +7683,153 @@ impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmark
             System::set_block_number(maturity);
         }
     }
+    fn prime_recovery_commit(
+        pid: futarchy_primitives::ProposalId,
+    ) -> pallet_execution_guard::RecoveryImageDescriptor {
+        benchmark_recovery_image(pid, [0x51; 32]).unwrap_or(
+            pallet_execution_guard::RecoveryImageDescriptor {
+                hash: [0x52; 32],
+                len: 512,
+                target_spec_version: VERSION.spec_version.saturating_add(2),
+                attestation_id: pallet_attestor::MAX_ATTESTATIONS
+                    .saturating_sub(futarchy_primitives::kernel::ATT_QUORUM.saturating_mul(2)),
+            },
+        )
+    }
+    fn prime_recovery_qualification(pid: futarchy_primitives::ProposalId, bytes: u32) {
+        use frame_support::traits::StorePreimage;
+
+        if pallet_execution_guard::CurrentSpecName::<Runtime>::get().is_none() {
+            pallet_execution_guard::CurrentSpecName::<Runtime>::put(benchmark_runtime_version());
+        }
+        let primary_hash = sp_io::hashing::blake2_256(&pid.encode());
+        let Ok(recovery) = benchmark_recovery_image_sized(pid, primary_hash, bytes) else {
+            return;
+        };
+        let mut batch = alloc::vec![
+            RuntimeCall::System(frame_system::Call::authorize_upgrade {
+                code_hash: primary_hash.into(),
+            }),
+            RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::commit_recovery_image {
+                hash: recovery.hash,
+                len: recovery.len,
+                target_spec_version: recovery.target_spec_version,
+                attestation_id: recovery.attestation_id,
+            }),
+            RuntimeCall::System(frame_system::Call::remark {
+                remark: alloc::vec![],
+            }),
+        ];
+        loop {
+            let encoded_len = batch.encode().len();
+            if encoded_len == futarchy_primitives::kernel::MAX_BYTES as usize {
+                break;
+            }
+            let RuntimeCall::System(frame_system::Call::remark { remark }) =
+                batch.last_mut().expect("qualifier benchmark has padding")
+            else {
+                return;
+            };
+            if encoded_len < futarchy_primitives::kernel::MAX_BYTES as usize {
+                remark.resize(
+                    remark.len().saturating_add(
+                        futarchy_primitives::kernel::MAX_BYTES as usize - encoded_len,
+                    ),
+                    0xff,
+                );
+            } else {
+                remark.truncate(
+                    remark.len().saturating_sub(
+                        encoded_len - futarchy_primitives::kernel::MAX_BYTES as usize,
+                    ),
+                );
+            }
+        }
+        let Ok(batch) = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(batch)
+        else {
+            return;
+        };
+        let payload = batch.encode();
+        let Ok(payload_len) = u32::try_from(payload.len()) else {
+            return;
+        };
+        let Ok(payload_hash) = <Preimage as StorePreimage>::note(Cow::Owned(payload)) else {
+            return;
+        };
+        let proposal = benchmark_epoch_proposal(
+            pid,
+            payload_hash.0,
+            payload_len,
+            futarchy_primitives::ProposalState::Submitted,
+        );
+        pallet_epoch::IntakeProposals::<Runtime>::insert(pid, proposal);
+    }
+    fn prime_phase_four(pid: futarchy_primitives::ProposalId) {
+        #[cfg(not(feature = "bootstrap"))]
+        {
+            let _ = pid;
+        }
+        #[cfg(feature = "bootstrap")]
+        {
+            System::set_block_number(System::block_number().max(1));
+            let artifact = sp_io::hashing::blake2_256(&pid.encode());
+            let Ok(recovery) = benchmark_recovery_image(pid, artifact) else {
+                return;
+            };
+            let tvl_key = pallet_constitution::key16(b"phase3.tvl_cap");
+            let deposit_key = pallet_constitution::key16(b"phase3.dep_cap");
+            let Some(tvl) = pallet_constitution::Params::<Runtime>::get(tvl_key) else {
+                return;
+            };
+            let Some(deposit) = pallet_constitution::Params::<Runtime>::get(deposit_key) else {
+                return;
+            };
+            let batch = alloc::vec![
+                RuntimeCall::System(frame_system::Call::authorize_upgrade {
+                    code_hash: artifact.into(),
+                }),
+                RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::commit_recovery_image {
+                    hash: recovery.hash,
+                    len: recovery.len,
+                    target_spec_version: recovery.target_spec_version,
+                    attestation_id: recovery.attestation_id,
+                },),
+                RuntimeCall::Constitution(pallet_constitution::Call::set_param {
+                    key: tvl_key,
+                    value: pallet_constitution::ParamValue::Balance(
+                        tvl.value.as_u128().saturating_add(1),
+                    ),
+                }),
+                RuntimeCall::Constitution(pallet_constitution::Call::set_param {
+                    key: deposit_key,
+                    value: pallet_constitution::ParamValue::Balance(
+                        deposit.value.as_u128().saturating_add(1),
+                    ),
+                }),
+            ];
+            let attestation_id = pallet_attestor::MAX_ATTESTATIONS
+                .saturating_sub(futarchy_primitives::kernel::ATT_QUORUM);
+            if let Ok(maturity) = benchmark_guard_enqueue_calls_for_class(
+                pid,
+                batch,
+                alloc::vec![
+                    pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade,
+                    pallet_execution_guard::CallDomain::Code,
+                    pallet_execution_guard::CallDomain::Meta,
+                ],
+                futarchy_primitives::ProposalClass::Meta,
+                Some(attestation_id),
+                true,
+            ) {
+                System::set_block_number(maturity);
+            }
+        }
+    }
 
     fn prime_failed(pid: futarchy_primitives::ProposalId) {
+        pallet_constitution::PhaseFlags::<Runtime>::put(
+            pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
+        );
         let call = RuntimeCall::System(frame_system::Call::remark_with_event {
             remark: b"guard-benchmark-failure".to_vec(),
         });
@@ -6780,24 +7852,34 @@ impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmark
     }
 
     fn prime_pending_upgrade(bytes: u32) -> Vec<u8> {
-        let code = benchmark_runtime_code(bytes);
+        pallet_constitution::PhaseFlags::<Runtime>::put(
+            pallet_constitution::PhaseFlagsValue::CODE_META_ARMED,
+        );
+        let target_spec_version = VERSION.spec_version.saturating_add(1);
+        let code = benchmark_runtime_code_with_spec(bytes, target_spec_version);
         let hash = sp_io::hashing::blake2_256(&code);
-        let now = System::block_number();
         ParachainSystem::initialize_for_set_code_benchmark(code.len() as u32);
-        let _ = System::authorize_upgrade(RuntimeOrigin::root(), Hash::from(hash));
+        let now = System::block_number().max(1);
+        System::set_block_number(now);
+        let _ = RuntimeCall::System(frame_system::Call::authorize_upgrade {
+            code_hash: hash.into(),
+        })
+        .dispatch_bypass_filter(RuntimeOrigin::root());
         pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::put(
             pallet_execution_guard::PendingUpgrade {
                 hash,
                 authorized_at: now,
-                applicable_at: now.saturating_add(pallet_execution_guard::DESCRIPTOR_LEAD_TIME),
-                target_spec_version: VERSION.spec_version,
+                applicable_at: now,
+                target_spec_version,
             },
         );
-        System::set_block_number(now.saturating_add(pallet_execution_guard::DESCRIPTOR_LEAD_TIME));
         code
     }
 
     fn prime_stale(pid: futarchy_primitives::ProposalId) {
+        pallet_constitution::PhaseFlags::<Runtime>::put(
+            pallet_constitution::PhaseFlagsValue::PARAM_ARMED,
+        );
         let key = pallet_constitution::key16(b"mkt.obs_interval");
         let Some(record) = pallet_constitution::Params::<Runtime>::get(key) else {
             return;
@@ -6845,13 +7927,15 @@ fn benchmark_custom_section(name: &[u8], payload: &[u8]) -> Vec<u8> {
 }
 
 #[cfg(feature = "runtime-benchmarks")]
-fn benchmark_runtime_code(target_code_bytes: u32) -> Vec<u8> {
+fn benchmark_runtime_code_with_spec(target_code_bytes: u32, spec_version: u32) -> Vec<u8> {
     const WASM_HEADER: [u8; 8] = [0, 97, 115, 109, 1, 0, 0, 0];
     const VERSION_SECTION: &[u8] = b"runtime_version";
     const PADDING_SECTION: &[u8] = b"benchmark_padding";
     let target = target_code_bytes as usize;
+    let mut version = VERSION;
+    version.spec_version = spec_version;
     let mut code = Vec::from(WASM_HEADER);
-    code.extend(benchmark_custom_section(VERSION_SECTION, &VERSION.encode()));
+    code.extend(benchmark_custom_section(VERSION_SECTION, &version.encode()));
     let mut padding_len = target.saturating_sub(code.len());
     loop {
         let section = benchmark_custom_section(PADDING_SECTION, &vec![0; padding_len]);

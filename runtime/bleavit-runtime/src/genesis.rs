@@ -9,12 +9,14 @@ use sp_genesis_builder::PresetId;
 use sp_runtime::traits::AccountIdConversion;
 use staging_xcm::latest::Location;
 
+#[cfg(feature = "bootstrap")]
+use crate::SudoConfig;
 use crate::{
     configs::{LedgerPalletId, TreasuryPalletId},
     usdc_location, AccountId, Balance, BalancesConfig, CollatorSelectionConfig, ConstitutionConfig,
     EpochConfig, ExecutionGuardConfig, ForeignAssetsConfig, FutarchyTreasuryConfig,
     ParachainInfoConfig, PolkadotXcmConfig, RuntimeGenesisConfig, SessionConfig, SessionKeys,
-    SudoConfig, VestingConfig, MILLISECS_PER_BLOCK,
+    VestingConfig, MILLISECS_PER_BLOCK,
 };
 
 const SAFE_XCM_VERSION: u32 = staging_xcm::prelude::XCM_VERSION;
@@ -23,8 +25,11 @@ const SAFE_XCM_VERSION: u32 = staging_xcm::prelude::XCM_VERSION;
 /// binds its persistent "bootstrap governance (sudo active)" banner to it
 /// (09 §5.2); leaving it clear would misrepresent sudo-era state as
 /// trust-equivalent to post-sudo state.
+#[cfg(feature = "bootstrap")]
 const BOOTSTRAP_PHASE_FLAGS: u32 = pallet_constitution::PhaseFlagsValue::SHADOW_MODE
     | pallet_constitution::PhaseFlagsValue::SUDO_PRESENT;
+#[cfg(not(feature = "bootstrap"))]
+const BOOTSTRAP_PHASE_FLAGS: u32 = pallet_constitution::PhaseFlagsValue::PARAM_ARMED;
 pub const ALICE_PUBLIC: [u8; 32] = [
     0xd4, 0x35, 0x93, 0xc7, 0x15, 0xfd, 0xd3, 0x1c, 0x61, 0x14, 0x1a, 0xbd, 0x04, 0xa9, 0x9f, 0xd6,
     0x82, 0x2c, 0x85, 0x58, 0x85, 0x4c, 0xcd, 0xe3, 0x9a, 0x56, 0x84, 0xe7, 0xa5, 0x6d, 0xa2, 0x7d,
@@ -127,7 +132,7 @@ fn testnet_genesis(
     let owner: AccountId = LedgerPalletId::get().into_account_truncating();
     let usdc_endowments = usdc_genesis_endowments();
 
-    build_struct_json_patch!(RuntimeGenesisConfig {
+    let patch = build_struct_json_patch!(RuntimeGenesisConfig {
         balances: BalancesConfig {
             balances: vec![
                 // 08 §2.1 ecosystem/ops fund: dev stand-ins for the ops multisig.
@@ -228,9 +233,23 @@ fn testnet_genesis(
         // Seeds CurrentSpecName from the live RuntimeVersion; all other guard
         // state is empty until the epoch lawfully enqueues a passed proposal.
         execution_guard: ExecutionGuardConfig::default(),
-
-        sudo: SudoConfig { key: Some(root) },
-    })
+    });
+    #[cfg(feature = "bootstrap")]
+    {
+        let mut patch = patch;
+        if let (Some(object), Ok(sudo)) = (
+            patch.as_object_mut(),
+            serde_json::to_value(SudoConfig { key: Some(root) }),
+        ) {
+            object.insert("sudo".into(), sudo);
+        }
+        patch
+    }
+    #[cfg(not(feature = "bootstrap"))]
+    {
+        let _ = root;
+        patch
+    }
 }
 
 fn genesis_release_channel() -> Vec<u8> {

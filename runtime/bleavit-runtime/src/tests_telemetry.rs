@@ -659,7 +659,7 @@ fn telemetry_migration_stall_reports_latched_and_live_detector_states() -> Resul
 #[test]
 fn telemetry_reserve_probe_line_matches_the_audited_treasury_line() {
     tests::development_ext().execute_with(|| {
-        crate::tests_treasury_health::fund_reserve_probe_line();
+        crate::tests::fund_reserve_probe_line();
         assert_eq!(
             crate::telemetry::reserve_probe_line_balance(),
             crate::FutarchyTreasury::line_balance(

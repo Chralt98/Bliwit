@@ -1,0 +1,56 @@
+{
+  "profiles": {
+    "bootstrap": {
+      "base": "bootstrap",
+      "cargo_features": [
+        "std",
+        "substrate-wasm-builder",
+        "bootstrap"
+      ],
+      "multi_block_migrations": "normal",
+      "recovery": false,
+      "recovery_profile": "bootstrap-recovery",
+      "sudo_in_metadata": true
+    },
+    "bootstrap-recovery": {
+      "base": "bootstrap",
+      "cargo_features": [
+        "std",
+        "substrate-wasm-builder",
+        "bootstrap",
+        "recovery"
+      ],
+      "multi_block_migrations": "disabled",
+      "primary_profile": "bootstrap",
+      "recovery": true,
+      "sudo_in_metadata": true
+    },
+    "phase-four": {
+      "base": "phase-four",
+      "cargo_features": [
+        "std",
+        "substrate-wasm-builder",
+        "phase-four"
+      ],
+      "multi_block_migrations": "normal",
+      "recovery": false,
+      "recovery_profile": "phase-four-recovery",
+      "sudo_in_metadata": false
+    },
+    "phase-four-recovery": {
+      "base": "phase-four",
+      "cargo_features": [
+        "std",
+        "substrate-wasm-builder",
+        "phase-four",
+        "recovery"
+      ],
+      "multi_block_migrations": "disabled",
+      "primary_profile": "phase-four",
+      "recovery": true,
+      "sudo_in_metadata": false
+    }
+  },
+  "release_default": "bootstrap",
+  "schema": "bleavit.runtime-profiles.v1"
+}

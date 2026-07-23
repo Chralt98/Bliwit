@@ -107,11 +107,37 @@ upload remains a non-public draft.
 
 ## Build and metadata-hash posture
 
-`build-runtime.sh` uses the toolchain pinned by `rust-toolchain.toml` and the
-exact recipe:
+`runtime-profiles.json` is the reviewed profile product and the single source
+for release-build feature sets:
+
+| Profile | Base | Recovery | Sudo in metadata | Multi-block migrations |
+|---|---|---:|---:|---:|
+| `bootstrap` | `bootstrap` | no | yes | normal |
+| `phase-four` | `phase-four` | no | no | normal |
+| `bootstrap-recovery` | `bootstrap` | yes | yes | **disabled** |
+| `phase-four-recovery` | `phase-four` | yes | no | **disabled** |
+
+Every row selects exactly one base (`bootstrap` xor `phase-four`) and may add
+`recovery`; the validator rejects any other feature product. The build always
+uses `--no-default-features`, then passes the row's complete ordered feature
+list explicitly. `release_default` is the reviewed tag-build selection.
+A manual workflow chooses one of the two primary profiles; CI automatically
+builds its required paired recovery profile. `normal` means the base runtime's
+ordinary migration registration applies, but the current integrity gate still
+requires that registration to be empty until a release-specific cutpoint-total
+repair exists.
+
+Assembly requires all four files for both halves (`runtime.wasm`,
+`metadata.scale`, `runtime-info.json`, `build-info.json`). Both Wasm files are
+boot-bound to `:code`, both build records bind the release commit, the profiles
+must share one base and `spec_name`, and recovery `spec_version` must equal
+primary + 1.
+
+For example, the bootstrap recipe is:
 
 ```sh
-cargo build -p bleavit-runtime --release --features substrate-wasm-builder --locked
+cargo build -p bleavit-runtime --release --no-default-features \
+  --features std,substrate-wasm-builder,bootstrap --locked
 ```
 
 It fixes `SOURCE_DATE_EPOCH` to the source commit time unless supplied, sets
@@ -119,6 +145,17 @@ It fixes `SOURCE_DATE_EPOCH` to the source commit time unless supplied, sets
 Those are the environment inputs that can otherwise leak time, locale, or
 incremental state into the builder. `build-info.json` records them with the
 toolchain, host triple, Cargo/rustc versions, source commit, and Wasm hash.
+It also records the profile name, base, complete Cargo feature list, disabled
+default-feature posture, recovery bit, and multi-block-migration posture.
+
+A recovery build runs
+`recovery_profile_has_zero_multi_block_migrations` under the exact same
+base+recovery feature set before copying the Wasm, and refuses to emit
+`build-info.json` unless exactly one such test passes. Assembly re-validates
+that proof record and the canonical recipe. Metadata extraction records the
+complete pallet-name set; assembly requires `Sudo` for bootstrap profiles and
+rejects it for phase-four profiles. A profile/feature/proof/metadata mismatch
+is integrity corruption even in `--allow-missing` mode.
 
 The honest claim is recipe reproducibility: same source and same pinned
 toolchain should produce the same bytes. The host image is not yet pinned by
@@ -239,8 +276,10 @@ From the repository root:
 
 ```sh
 python3 -m pip install websockets==15.0.1
+export RUNTIME_PROFILE=bootstrap
 tools/deploy/generate-chain-specs.sh
 cargo build -p bleavit-node --release --locked
+# Unset RUNTIME_PROFILE to use runtime-profiles.json's release_default.
 tools/release/build-runtime.sh release-work/runtime
 tools/ci/supply-chain-gates.sh --summary-out release-work/supply-chain-summary.json
 python3 tools/release/extract-metadata.py \
@@ -278,4 +317,5 @@ Offline tooling checks are:
 python3 -m unittest discover -s tools/release/tests
 python3 -m py_compile tools/release/*.py tools/release/tests/*.py
 bash -n tools/release/*.sh
+python3 tools/release/runtime_profiles.py
 ```

@@ -2,6 +2,11 @@
 #![deny(unsafe_code)]
 #![recursion_limit = "512"]
 
+#[cfg(all(feature = "bootstrap", feature = "phase-four"))]
+compile_error!("bootstrap and phase-four runtime profiles are mutually exclusive");
+#[cfg(not(any(feature = "bootstrap", feature = "phase-four")))]
+compile_error!("exactly one base runtime profile is required: bootstrap or phase-four");
+
 extern crate alloc;
 
 /// B5 (15 §4.5): the runtime-level benchmark registry — every runtime pallet
@@ -15,42 +20,51 @@ extern crate alloc;
 /// calls; their tx-extension costs are carried by the extrinsic base weight).
 #[cfg(feature = "runtime-benchmarks")]
 mod benches {
-    frame_benchmarking::define_benchmarks!(
-        // Substrate/system set.
-        [frame_system, SystemBench::<Runtime>]
-        [pallet_balances, Balances]
-        [pallet_timestamp, Timestamp]
-        [pallet_assets, ForeignAssets]
-        [pallet_utility, Utility]
-        [pallet_proxy, Proxy]
-        [pallet_multisig, Multisig]
-        [pallet_preimage, Preimage]
-        [pallet_scheduler, Scheduler]
-        [pallet_referenda, Referenda]
-        [pallet_conviction_voting, ConvictionVoting]
-        [pallet_sudo, Sudo]
-        [pallet_migrations, Migrations]
-        // Parachain set.
-        [pallet_session, SessionBench::<Runtime>]
-        [pallet_collator_selection, CollatorSelection]
-        [pallet_message_queue, MessageQueue]
-        [cumulus_pallet_parachain_system, ParachainSystem]
-        [cumulus_pallet_xcmp_queue, XcmpQueue]
-        // Futarchy pallets (Track A).
-        [pallet_origins, Origins]
-        [pallet_constitution, Constitution]
-        [pallet_conditional_ledger, ConditionalLedger]
-        [pallet_market, Market]
-        [pallet_welfare, Welfare]
-        [pallet_oracle, Oracle]
-        [pallet_registry, IncidentRegistry]
-        [pallet_registry, MilestoneRegistry]
-        [pallet_futarchy_treasury, FutarchyTreasury]
-        [pallet_guardian, Guardian]
-        [pallet_attestor, Attestor]
-        [pallet_epoch, Epoch]
-        [pallet_execution_guard, ExecutionGuard]
-    );
+    macro_rules! define_runtime_benchmarks {
+        ($($sudo:tt)*) => {
+            frame_benchmarking::define_benchmarks!(
+                // Substrate/system set.
+                [frame_system, SystemBench::<Runtime>]
+                [pallet_balances, Balances]
+                [pallet_timestamp, Timestamp]
+                [pallet_assets, ForeignAssets]
+                [pallet_utility, Utility]
+                [pallet_proxy, Proxy]
+                [pallet_multisig, Multisig]
+                [pallet_preimage, Preimage]
+                [pallet_scheduler, Scheduler]
+                [pallet_referenda, Referenda]
+                [pallet_conviction_voting, ConvictionVoting]
+                $($sudo)*
+                [pallet_migrations, Migrations]
+                // Parachain set.
+                [pallet_session, SessionBench::<Runtime>]
+                [pallet_collator_selection, CollatorSelection]
+                [pallet_message_queue, MessageQueue]
+                [cumulus_pallet_parachain_system, ParachainSystem]
+                [cumulus_pallet_xcmp_queue, XcmpQueue]
+                // Futarchy pallets (Track A).
+                [pallet_origins, Origins]
+                [pallet_constitution, Constitution]
+                [pallet_conditional_ledger, ConditionalLedger]
+                [pallet_market, Market]
+                [pallet_welfare, Welfare]
+                [pallet_oracle, Oracle]
+                [pallet_registry, IncidentRegistry]
+                [pallet_registry, MilestoneRegistry]
+                [pallet_futarchy_treasury, FutarchyTreasury]
+                [pallet_guardian, Guardian]
+                [pallet_attestor, Attestor]
+                [pallet_epoch, Epoch]
+                [pallet_execution_guard, ExecutionGuard]
+            );
+        };
+    }
+
+    #[cfg(feature = "bootstrap")]
+    define_runtime_benchmarks!([pallet_sudo, Sudo]);
+    #[cfg(feature = "phase-four")]
+    define_runtime_benchmarks!();
 }
 
 mod apis;
@@ -73,11 +87,11 @@ mod tests_constitution_params;
 mod tests_migration_guard;
 #[cfg(test)]
 mod tests_s5;
-#[cfg(test)]
+#[cfg(all(test, feature = "bootstrap"))]
 mod tests_s5_behavior;
 #[cfg(test)]
 mod tests_telemetry;
-#[cfg(test)]
+#[cfg(all(test, feature = "bootstrap"))]
 mod tests_treasury_health;
 #[cfg(test)]
 mod tests_welfare_inputs;
@@ -119,9 +133,12 @@ pub const MILLISECS_PER_BLOCK: u64 = kernel::MILLISECS_PER_BLOCK;
 pub const SS58_PREFIX: u16 = chain_identity::SS58_PREFIX;
 pub const RUNTIME_SPEC_NAME: &[u8] = b"bleavit";
 pub const RUNTIME_IMPL_NAME: &[u8] = b"bleavit-runtime";
-pub const RUNTIME_SPEC_VERSION: u32 = 1;
+#[cfg(not(feature = "recovery"))]
+pub const RUNTIME_SPEC_VERSION: u32 = 2;
+#[cfg(feature = "recovery")]
+pub const RUNTIME_SPEC_VERSION: u32 = 3;
 /// SDK dispatchable-compatibility counter, deliberately **independent** of
-/// `INTEGRATION_CONTRACT_VERSION` (02 §13; SQ-102, currently contract v8). It denotes
+/// `INTEGRATION_CONTRACT_VERSION` (02 §13; SQ-102, currently contract v9). It denotes
 /// compatibility of existing dispatchables as embedded in signed-transaction
 /// validity, so an additive contract bump MUST NOT move it. Re-baselined to 1
 /// pre-genesis; the SDK forbids this counter ever decreasing after genesis.
@@ -129,17 +146,31 @@ pub const TRANSACTION_VERSION: u32 = 1;
 pub const VIT_DECIMALS: u8 = currency::VIT_DECIMALS;
 pub const USDC_DECIMALS: u8 = currency::USDC_DECIMALS;
 
+#[cfg(not(feature = "recovery"))]
 #[sp_version::runtime_version]
 pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: Cow::Borrowed("bleavit"),
     impl_name: Cow::Borrowed("bleavit-runtime"),
     authoring_version: 1,
-    spec_version: 1,
+    spec_version: 2,
     impl_version: 0,
     apis: apis::RUNTIME_API_VERSIONS,
     // `runtime_version` requires a literal; an identity test pins this to
     // `TRANSACTION_VERSION` and asserts it is independent of the contract
     // version (02 §13; SQ-102).
+    transaction_version: 1,
+    system_version: 1,
+};
+
+#[cfg(feature = "recovery")]
+#[sp_version::runtime_version]
+pub const VERSION: RuntimeVersion = RuntimeVersion {
+    spec_name: Cow::Borrowed("bleavit"),
+    impl_name: Cow::Borrowed("bleavit-runtime"),
+    authoring_version: 1,
+    spec_version: 3,
+    impl_version: 0,
+    apis: apis::RUNTIME_API_VERSIONS,
     transaction_version: 1,
     system_version: 1,
 };
@@ -218,6 +249,7 @@ construct_runtime!(
         Proxy: pallet_proxy = 25,
         Multisig: pallet_multisig = 26,
         Migrations: pallet_migrations = 27,
+        #[cfg(feature = "bootstrap")]
         Sudo: pallet_sudo = 28,
 
         XcmpQueue: cumulus_pallet_xcmp_queue = 30,
