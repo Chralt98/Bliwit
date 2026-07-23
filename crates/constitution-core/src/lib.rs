@@ -424,6 +424,9 @@ pub enum Capability {
     SetReleaseChannel,
     AuthorizeUpgrade,
     TreasurySpend,
+    /// Move protocol INSURANCE custody back into MAIN without granting the
+    /// broader treasury outflow surface (08 §1.2/§1.4; SQ-384).
+    InsuranceSweep,
     OracleConfig,
     MarketTemplate,
 }
@@ -1019,6 +1022,11 @@ pub fn genesis_capabilities() -> Vec<CapabilityRecord> {
         CapabilityRecord {
             class: ProposalClass::Treasury,
             capability: Capability::TreasurySpend,
+            enabled: true
+        },
+        CapabilityRecord {
+            class: ProposalClass::Treasury,
+            capability: Capability::InsuranceSweep,
             enabled: true
         },
     ]

@@ -6299,11 +6299,14 @@ impl RuntimeCapabilities {
             RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
                 Self::enabled(class, pallet_constitution::Capability::AuthorizeUpgrade)
             }
-            RuntimeCall::ExecutionGuard(
-                pallet_execution_guard::Call::commit_recovery_image { .. },
-            ) => {
-                matches!(class, futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta)
-                    && Self::enabled(class, pallet_constitution::Capability::AuthorizeUpgrade)
+            RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::commit_recovery_image {
+                ..
+            }) => {
+                matches!(
+                    class,
+                    futarchy_primitives::ProposalClass::Code
+                        | futarchy_primitives::ProposalClass::Meta
+                ) && Self::enabled(class, pallet_constitution::Capability::AuthorizeUpgrade)
             }
             RuntimeCall::FutarchyTreasury(
                 pallet_futarchy_treasury::Call::create_community_schedule { .. },
@@ -6315,14 +6318,15 @@ impl RuntimeCapabilities {
                 | pallet_futarchy_treasury::Call::cancel_stream { .. }
                 | pallet_futarchy_treasury::Call::issue_vit { .. }
                 | pallet_futarchy_treasury::Call::recover_foreign { .. }
-                | pallet_futarchy_treasury::Call::set_coretime_authority { .. }
-                // 08 §1.2/§1.4 (SQ-207): the INSURANCE sweep is a TREASURY-class
-                // decision like every other treasury act. Omitting it here made
-                // `call_enabled` fall to the fail-closed `_` arm, which for
-                // `CallDomain::Treasury` is `SlashAll(ConstitutionViolation)` —
-                // a lawful sweep would have confiscated the whole intake bond.
-                | pallet_futarchy_treasury::Call::sweep_insurance { .. },
+                | pallet_futarchy_treasury::Call::set_coretime_authority { .. },
             ) => Self::enabled(class, pallet_constitution::Capability::TreasurySpend),
+            // INSURANCE → MAIN is a Treasury-domain call, but it is an inflow
+            // that cannot spend any budget line. Keep it behind its own narrow
+            // capability so granting ordinary treasury outflows never silently
+            // grants custody recovery as well (08 §1.2/§1.4; SQ-384).
+            RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::sweep_insurance {
+                ..
+            }) => Self::enabled(class, pallet_constitution::Capability::InsuranceSweep),
             // 05 §1.4 class safety (SQ-244/SQ-316): the base call-filter projection
             // of `claim_assets` stays **Public** — a Signed origin reclaiming its own
             // self-keyed trap is 09 §6.1's ordinary path and must not need governance.
