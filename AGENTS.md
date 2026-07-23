@@ -97,6 +97,16 @@ Read this file first. Then read `PLAN.md`. Then work.
   (2026-07-13). Enforced in Claude Code by a Stop hook (`guard-readme.sh`); Codex
   has no hook equivalent, so its playbooks restate this rule explicitly
   (`.codex/README.md`).
+- **R-12 — Do not idle on redundant CI.** Mark a PR ready for review and continue
+  with the next logical work once the implementation has sufficient local
+  verification or a green CI run on the same significant code state. A later
+  documentation-only/status-only commit (for example, the final `PLAN.md` closure)
+  does not require the session to wait for an identical exhaustive CI rerun before
+  moving on. This is a handoff rule, not a gate waiver: meaningful code, build,
+  workflow, dependency, generated-artifact, or test changes still require their
+  appropriate fresh evidence, and any observed failure must be investigated. When
+  CI polling is useful, poll no more than once every five minutes. Standing user
+  instruction (2026-07-23).
 
 ## Session protocol
 
@@ -110,6 +120,8 @@ Read this file first. Then read `PLAN.md`. Then work.
    compliance review to the `spec-reviewer` agent.
 5. **Verify** — run the quality gates; fix or honestly report.
 6. **Close** — update the living documents (R-3), report results, suggest the commit.
+   Apply R-12 at PR handoff: do not block the next logical work on a redundant
+   exhaustive rerun caused only by a final documentation/status commit.
 
 The `/implement` skill (Claude Code) and `.codex/prompts/implement-next.md` (Codex)
 encode this loop verbatim.
