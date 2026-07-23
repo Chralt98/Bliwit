@@ -228,8 +228,10 @@ resolves deterministic disputes mechanically. Evidence is content-addressed
 - **Upgrades**: `Executed` ⇒ `UpgradeAuthorized { hash, authorized_at }` → 72 h
   `DescriptorLeadTime` countdown → anyone submits `system.apply_authorized_upgrade(code)`
   (the FE's upgrade crank fetches the Wasm from the Arweave release artifact and
-  hash-verifies before submission). Migration failure ⇒ PB-MIGRATION halt → retry (≤ 2) or
-  rollback via the expedited CODE lane (72 h gate market + 3-day fast ratify).
+  hash-verifies before submission). Every primary carries a separately built,
+  attested N+2 terminal image that is qualified and pinned before screening.
+  Migration/Phase-transition failure ⇒ PB-MIGRATION halt → mandatory inherent
+  schedules only that committed image while ordinary extrinsics remain disabled.
 - **`ReleaseChannel`** (raw key readable by stranded apps): canonical release semver,
   manifest TXID, `min_supported_version`, `pending_authorized_at`, SECURITY / EXPEDITED /
   URGENT_UPGRADE flags — drives the "newer release exists" banner.

@@ -5,6 +5,14 @@ on:
     tags: ['v*']
   workflow_dispatch:
     inputs:
+      runtime_profile:
+        description: Explicit runtime release profile (tag builds use the checked-in release_default)
+        required: true
+        type: choice
+        default: bootstrap
+        options:
+          - bootstrap
+          - phase-four
       dry_run:
         description: Build a readiness bundle without publishing and tolerate known missing B2/B7/A8/A11 legs
         required: true
@@ -96,6 +104,7 @@ jobs:
     env:
       RELEASE_WORK: release-work
       CARGO_INCREMENTAL: 0
+      RUNTIME_PROFILE: ${{ github.event_name == 'workflow_dispatch' && inputs.runtime_profile || '' }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -127,8 +136,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
       - name: Install pinned release tooling dependencies
         run: python3 -m pip install pyyaml==6.0.2 websockets==15.0.1
-      - name: Build reproducible runtime input
-        run: tools/release/build-runtime.sh "$RELEASE_WORK/runtime"
+      - name: Build reproducible primary and terminal-recovery runtime inputs
+        run: |
+          requested_profile=${RUNTIME_PROFILE:-$(python3 tools/release/runtime_profiles.py --field name)}
+          primary_profile=$(python3 tools/release/runtime_profiles.py --profile "$requested_profile" --field primary_profile)
+          recovery_profile=$(python3 tools/release/runtime_profiles.py --profile "$primary_profile" --field recovery_profile)
+          tools/release/build-runtime.sh "$RELEASE_WORK/runtime" "$primary_profile"
+          tools/release/build-runtime.sh "$RELEASE_WORK/runtime/recovery" "$recovery_profile"
       - name: Generate and validate chain specs
         run: tools/deploy/generate-chain-specs.sh
       - name: Build the release node
@@ -157,6 +171,10 @@ jobs:
           python3 tools/release/extract-metadata.py \
             --wasm "$RELEASE_WORK/runtime/runtime.wasm" \
             --out-dir "$RELEASE_WORK/runtime"
+          python3 tools/release/extract-metadata.py \
+            --wasm "$RELEASE_WORK/runtime/recovery/runtime.wasm" \
+            --out-dir "$RELEASE_WORK/runtime/recovery" \
+            --embed-wasm
       - name: Record critical-surface chainHead fixtures
         env:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}

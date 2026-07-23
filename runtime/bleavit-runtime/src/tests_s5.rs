@@ -9,6 +9,12 @@ use scale_info::{form::PortableForm, PortableRegistry, TypeDef, TypeDefPrimitive
 
 use crate::{Runtime, RuntimeCall};
 
+fn active_inventory() -> impl Iterator<Item = &'static InventoryRow> {
+    INVENTORY
+        .iter()
+        .filter(|row| cfg!(feature = "bootstrap") || row.pallet != "Sudo")
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ConditionalKind {
     ParamKeyClass,
@@ -77,6 +83,9 @@ macro_rules! treatment {
     };
     (leaf treasury) => {
         ExpectedTreatment::Leaf(CallDomain::Treasury)
+    };
+    (leaf code) => {
+        ExpectedTreatment::Leaf(CallDomain::Code)
     };
     (leaf meta) => {
         ExpectedTreatment::Leaf(CallDomain::Meta)
@@ -252,7 +261,8 @@ inventory! {
     }
     "ExecutionGuard" {
         leaf values => ["ratify"];
-        leaf public => ["execute", "apply_authorized_upgrade", "expire_failed_execution", "reject_stale"];
+        leaf code => ["commit_recovery_image"];
+        leaf public => ["execute", "apply_authorized_upgrade", "expire_failed_execution", "reject_stale", "authorize_phase_four", "qualify_recovery_image"];
     }
 }
 
@@ -409,6 +419,7 @@ impl RuntimeMetadataModel {
         call
     }
 
+    #[cfg(feature = "bootstrap")]
     pub(crate) fn call_name(&self, call: &RuntimeCall) -> (String, String) {
         let encoded = call.encode();
         let pallet_index = *encoded
@@ -725,7 +736,7 @@ fn metadata_call_inventory_is_bidirectionally_exhaustive() {
         }
 
         let mut pinned = BTreeSet::new();
-        for row in INVENTORY {
+        for row in active_inventory() {
             assert!(
                 pinned.insert((String::from(row.pallet), String::from(row.call))),
                 "duplicate S5 inventory row: {}.{}",
@@ -753,8 +764,7 @@ fn metadata_call_inventory_is_bidirectionally_exhaustive() {
 fn metadata_call_carriers_equal_the_pinned_closed_wrapper_set() {
     with_metadata(|metadata| {
         let detected = metadata.call_carrying_variants();
-        let mut pinned: BTreeSet<_> = INVENTORY
-            .iter()
+        let mut pinned: BTreeSet<_> = active_inventory()
             .filter_map(|row| match row.expected {
                 ExpectedTreatment::Wrapper(shape) if shape.carries_call() => {
                     Some((String::from(row.pallet), String::from(row.call)))
@@ -839,7 +849,7 @@ fn metadata_call_carriers_equal_the_pinned_closed_wrapper_set() {
 #[test]
 fn every_inventory_row_materializes_as_a_real_runtime_call() {
     with_metadata(|metadata| {
-        for row in INVENTORY {
+        for row in active_inventory() {
             let _ = metadata.materialize(row);
         }
     });

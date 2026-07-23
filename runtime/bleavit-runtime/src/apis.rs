@@ -353,6 +353,7 @@ impl_runtime_apis! {
             use frame_support::traits::{TrackedStorageKey, WhitelistedStorageKeys};
             use frame_system_benchmarking::Pallet as SystemBench;
 
+            #[allow(non_local_definitions)]
             impl frame_system_benchmarking::Config for Runtime {
                 fn setup_set_code_requirements(
                     code: &Vec<u8>,
@@ -367,6 +368,7 @@ impl_runtime_apis! {
                     );
                 }
             }
+            #[allow(non_local_definitions)]
             impl cumulus_pallet_session_benchmarking::Config for Runtime {
                 fn generate_session_keys_and_proof(
                     owner: Self::AccountId,

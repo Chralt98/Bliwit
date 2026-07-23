@@ -18,9 +18,8 @@ spec_refs:
 
 This runbook is the operational face of `PB-MIGRATION`. It covers a multi-block
 migration cursor that has exceeded its declared time budget or entered `Stuck`:
-the affected surface must
-fail-stop while block production and unaffected work continue, and recovery is a
-bounded retry or a rollback implemented as a forward upgrade
+the affected surface must fail-stop while block production continues. Recovery
+uses the immutable terminal image committed and qualified with the primary
 ([09 §2/§3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md)).
 
 ## Alerts
@@ -79,16 +78,16 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
    usable, while the affected transaction surface, execution queue, and new
    ledger/market inflows fail-stop. Any half-migrated layout exposed to user calls
    is a separate invariant breach.
-6. Classify the fault from evidence: resource-bounded overrun/transient host
-   failure versus logic fault, storage-shape mismatch, or failed retry. Compare
-   halted-state writes with the reconstructed anchor; do not infer the class from an error
-   string alone.
-7. Check release coupling. From `UpgradeAuthorized`, compare `applicable_at`, the
-   covering production descriptor release, `ReleaseChannel`, and the committed
-   metadata/artifact hashes. A repair or rollback-forward artifact still follows
-   the descriptor pipeline and release train
-   ([09 §2.2](../../docs/architecture/09-execution-upgrades-and-rollout.md),
-   [12 §1](../../docs/architecture/12-release-and-operations.md)).
+6. Read the committed recovery descriptor, qualification cache/queue transfer,
+   preimage request, paired build records, and both boot-extracted runtime
+   identities. Require one source commit/base/spec name and recovery version
+   exactly primary + 1. After primary application, attestor roster or challenge
+   changes do not alter this frozen terminal eligibility.
+7. During recovery, verify the exact cursor moved to
+   `RetiredMigrationCursor`, lockdown stayed active, and Cumulus scheduled only
+   the committed recovery hash. On relay Abort the same cursor must be restored
+   byte-for-byte; on GoAhead the installed `:code` identity must match before
+   the terminal transition runs.
 
 ## Remediation
 
@@ -102,15 +101,15 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
    `force_onboard_mbms`, or `clear_historic`; the runtime classifier denies these
    calls and [09 §3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md)
    forbids set-storage-class recovery.
-3. Prepare a retry only for the resource-bounded classes and within the attempt
-   rule owned by [09 §3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md).
-   Re-benchmark the step and run `try-runtime`/`try-state` against the halted
-   snapshot before proposing continuation. The exact upstream control surface is
-   still a spec `[VERIFY]`; never improvise a force call.
-4. For every other class, or an exhausted retry path, prepare rollback as a
-   forward CODE upgrade restoring the pre-migration-anchor semantics for the affected keys.
-   Build, attest, ratify, and descriptor-cover it through the expedited lane that
-   the active migration halt makes admissible.
+3. Do not select or submit new recovery bytes after lockdown. The mandatory
+   inherent owns scheduling of the precommitted terminal image; ordinary,
+   guardian, sudo and expedited-CODE extrinsics cannot execute in
+   `OnlyInherents`.
+4. If the paired image is absent, mismatched, relay-aborted, or its
+   release-specific repair fails, preserve the locks and escalate. Never clear
+   the cursor or substitute a generic repair. Current production profiles
+   prohibit ordinary MBMs; a cursor therefore proves a release-gate bypass
+   unless its release carried exhaustive cutpoint-repair evidence.
 
 ### Privileged
 
@@ -128,26 +127,13 @@ rewrite, or a rollback to old bytes ([12 §6.3](../../docs/architecture/12-relea
    gap. The accountability trail is the automatic `MigrationHalt` halt-source
    bridge, the first `MigrationHalted {cursor, failed_step}` event, and the raw
    state proof; capture all three.
-3. Decide retry versus rollback within the deadline in [09 §3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md);
-   inaction defaults to rollback initiation. Guardians cannot install code, and
-   on stable2606 they have **no in-framework retry either**: `pallet-migrations`'
-   continuation controls are Root-only and filtered to the D-13 "nobody" row, so
-   both retry and rollback ride the expedited-CODE lane (SQ-274).
-   **⚠ Know before you plan the repair: while any `Migrations::Cursor` exists the
-   chain is inherent-only.** `MultiStepMigrator::ongoing()` is `Cursor::exists()`
-   and `frame-executive` then rejects every non-inherent extrinsic, so the
-   expedited-CODE lane named above — and `execute(pid)`, guardian calls, and sudo
-   with it — **cannot be included in a block** until the cursor is gone. SQ-309 is
-   ruled but its pre-authorized inherent-applied recovery image is not yet
-   implemented, so production builds prohibit registering any multi-block
-   migration. A live cursor therefore indicates a non-production build or a
-   bypass of that integrity lock: escalate to the guardian council and release
-   lead immediately. Do not attempt an on-chain extrinsic repair that cannot be
-   submitted; relay `force_set_current_code` remains break-glass only.
-4. A rollback is a forward upgrade through the normal execution guard, using the
-   migration-halt-gated expedited CODE lane. Full attestation, ratification,
-   payload checks, and `DescriptorLeadTime` still apply; no privileged shortcut
-   exists ([09 §3.1](../../docs/architecture/09-execution-upgrades-and-rollout.md)).
+3. Guardians cannot install, replace, accelerate, or cancel the terminal image.
+   Confirm that the inherent attempt is advancing and that the paired recovery
+   artifact is the release-published one. Relay `force_set_current_code` remains
+   break-glass only and is not a protocol recovery step.
+4. Any follow-up CODE proposal is possible only after successful terminal
+   recovery has restored ordinary inclusion. It follows the normal guard,
+   attestation, ratification and descriptor rules.
 5. Lift the **guardian playbook freeze** only after migration completion and a
    green `try-state` run — that precondition binds the operator freeze, not the
    on-chain flag, because `try-state` never runs in production block execution
@@ -166,13 +152,13 @@ responder is paged by the alert itself
 [09 §3.2](../../docs/architecture/09-execution-upgrades-and-rollout.md)). Widen
 to the Release operations lead, Infrastructure coordinator, guardian council,
 and the owners of the affected pallet once the halt is confirmed. The
-release team owns the covering descriptors and repair train. Guardians own no
-`PB-MIGRATION` activation at all on stable2606 (step 2): their role here is to
-initiate the expedited-CODE repair lane, which the halt makes admissible. The
+release team owns the paired artifact evidence and recovery audit. Guardians own
+no `PB-MIGRATION` activation at all on stable2606 (step 2) and cannot initiate a
+code path while the chain is inherent-only. The
 retrospective-`ratify` review and the unratified-activation bond consequence of
 [06 §5.4](../../docs/architecture/06-governance-and-guardians.md) attach to
-guardian actions that actually dispatch — so they attach to that lane's guardian
-steps, not to a `PB-MIGRATION` activation that cannot occur.
+guardian actions that actually dispatch, not to a `PB-MIGRATION` activation that
+cannot occur.
 If descriptor coverage is consuming the lead-time margin, invoke RB-RELEASE's
 descriptor-release leg; never apply code before the on-chain lead-time gate.
 

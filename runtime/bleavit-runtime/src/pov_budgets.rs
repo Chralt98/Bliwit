@@ -37,14 +37,21 @@ const MAX_LIVE_VAULTS: usize = 52;
 const SPEC_TWAP_CHECKPOINTS_BYTES: usize = 8 * (4 + 32) + 1;
 /// The benchmark fixture ceiling for `apply_authorized_upgrade` code blobs
 /// (`BENCHMARK_RUNTIME_CODE_BYTES_BOUND` in the execution-guard benchmarks;
-/// benchmark-cfg'd, so restated here): 2 MiB.
-const RUNTIME_CODE_BYTES_BOUND: u32 = 2_097_152;
+/// benchmark-cfg'd, so restated here): 4 MiB.
+const RUNTIME_CODE_BYTES_BOUND: u32 = 4_194_304;
 
 /// The normal-class total budget: 75 % of the relay `MAX_POV_SIZE` /
 /// 2-second ref-time block (`configs::MAXIMUM_BLOCK_WEIGHT`).
 fn normal_class_budget() -> Weight {
     RuntimeBlockWeights::get()
         .get(DispatchClass::Normal)
+        .max_total
+        .unwrap_or_else(|| RuntimeBlockWeights::get().max_block)
+}
+
+fn operational_class_budget() -> Weight {
+    RuntimeBlockWeights::get()
+        .get(DispatchClass::Operational)
         .max_total
         .unwrap_or_else(|| RuntimeBlockWeights::get().max_block)
 }
@@ -225,6 +232,7 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
             ratify, reject_stale, expire_failed_execution,
             execute(MAX_CALLS_BOUND),
             apply_authorized_upgrade(RUNTIME_CODE_BYTES_BOUND),
+            commit_recovery_image, authorize_phase_four,
         }),
     );
     all
@@ -242,9 +250,43 @@ fn every_futarchy_call_and_hook_fits_the_normal_class() {
     // Exact count of the 12 futarchy pallets' WeightInfo functions — update
     // in lockstep when a trait gains or loses a function, so a silently
     // dropped inventory entry cannot pass.
-    assert_eq!(all.len(), 105, "call inventory drifted");
+    assert_eq!(all.len(), 107, "call inventory drifted");
     for (name, w) in all {
         assert_fits(name, w);
+    }
+}
+
+#[test]
+fn recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets() {
+    let qualifier =
+        <crate::weights::pallet_execution_guard::WeightInfo<Runtime> as pallet_execution_guard::WeightInfo>::qualify_recovery_image(
+            RUNTIME_CODE_BYTES_BOUND,
+        );
+    let operational = operational_class_budget();
+    assert!(
+        qualifier.all_lte(operational),
+        "recovery qualifier {qualifier:?} exceeds Operational {operational:?}",
+    );
+
+    let mandatory = RuntimeBlockWeights::get().max_block;
+    for (name, weight) in [
+        (
+            "recovery validation-data hook",
+            crate::configs::recovery_hook_weight(RUNTIME_CODE_BYTES_BOUND),
+        ),
+        (
+            "phase-four transition",
+            crate::migrations::phase_four_transition_weight(),
+        ),
+        (
+            "terminal recovery transition",
+            crate::migrations::terminal_recovery_transition_weight(),
+        ),
+    ] {
+        assert!(
+            weight.all_lte(mandatory),
+            "{name} {weight:?} exceeds mandatory block budget {mandatory:?}",
+        );
     }
 }
 

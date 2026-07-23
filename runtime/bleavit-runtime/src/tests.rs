@@ -2,7 +2,8 @@
 
 #![allow(clippy::assertions_on_constants, clippy::manual_unwrap_or_default)]
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec, vec::Vec};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use bleavit_xcm::{
     caps::InflowCaps as XcmInflowCaps,
@@ -53,11 +54,14 @@ use crate::{
     CumulusXcm, Epoch, ExecutionGuard, ForeignAssets, FutarchyTreasury, Guardian, IncidentRegistry,
     InflowCaps, Market, MessageQueue, Migrations, MilestoneRegistry, Multisig, Oracle, Origins,
     PalletInfo as RuntimePalletInfo, ParachainInfo, ParachainSystem, PolkadotXcm, Preimage, Proxy,
-    Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin, Scheduler, Session, Sudo,
+    Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig, RuntimeOrigin, Scheduler, Session,
     System, Timestamp, TrackOrigins, TransactionPayment, TxExtension, UncheckedExtrinsic, Utility,
     Vesting, Welfare, XcmpQueue, FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX,
     TRANSACTION_VERSION, USDC_DECIMALS, USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
 };
+
+#[cfg(feature = "bootstrap")]
+use crate::Sudo;
 
 trait SameType<Rhs> {}
 impl<T> SameType<T> for T {}
@@ -140,26 +144,67 @@ pub(crate) fn development_ext() -> sp_io::TestExternalities {
     sp_io::TestExternalities::new(storage)
 }
 
-struct CandidateRuntimeVersion(Vec<u8>);
+struct CandidateRuntimeVersion {
+    fallback: Vec<u8>,
+    artifacts: Vec<(Vec<u8>, Vec<u8>)>,
+    reads: Arc<AtomicUsize>,
+}
 
 impl sp_core::traits::ReadRuntimeVersion for CandidateRuntimeVersion {
     fn read_runtime_version(
         &self,
-        _: &[u8],
+        code: &[u8],
         _: &mut dyn sp_externalities::Externalities,
     ) -> Result<Vec<u8>, String> {
-        Ok(self.0.clone())
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        Ok(self
+            .artifacts
+            .iter()
+            .find_map(|(artifact, version)| (artifact.as_slice() == code).then(|| version.clone()))
+            .unwrap_or_else(|| self.fallback.clone()))
     }
 }
 
 pub(crate) fn upgrade_ext() -> sp_io::TestExternalities {
+    let mut ext = upgrade_ext_with_artifact_versions(Vec::new());
+    ext.execute_with(arm_all_classes_for_tests);
+    ext
+}
+
+fn arm_all_classes_for_tests() {
+    pallet_constitution::PhaseFlags::<Runtime>::put(
+        pallet_constitution::PhaseFlagsValue::PARAM_ARMED
+            | pallet_constitution::PhaseFlagsValue::TREASURY_ARMED
+            | pallet_constitution::PhaseFlagsValue::CODE_META_ARMED,
+    );
+    #[cfg(feature = "bootstrap")]
+    pallet_sudo::Key::<Runtime>::kill();
+}
+
+pub(crate) fn upgrade_ext_with_artifact_versions(
+    artifacts: Vec<(Vec<u8>, sp_version::RuntimeVersion)>,
+) -> sp_io::TestExternalities {
+    upgrade_ext_with_artifact_versions_and_counter(artifacts).0
+}
+
+pub(crate) fn upgrade_ext_with_artifact_versions_and_counter(
+    artifacts: Vec<(Vec<u8>, sp_version::RuntimeVersion)>,
+) -> (sp_io::TestExternalities, Arc<AtomicUsize>) {
     let mut version = VERSION;
     version.spec_version = version.spec_version.saturating_add(1);
     let mut ext = development_ext();
+    let reads = Arc::new(AtomicUsize::new(0));
     ext.register_extension(sp_core::traits::ReadRuntimeVersionExt::new(
-        CandidateRuntimeVersion(version.encode()),
+        CandidateRuntimeVersion {
+            fallback: version.encode(),
+            artifacts: artifacts
+                .into_iter()
+                .map(|(artifact, version)| (artifact, version.encode()))
+                .collect(),
+            reads: Arc::clone(&reads),
+        },
     ));
-    ext
+    (ext, reads)
 }
 
 fn release_channel_raw() -> Option<Vec<u8>> {
@@ -628,25 +673,61 @@ fn enqueue_attested_code_upgrade_pending_ratification(
         members.to_vec(),
     ));
     let artifact = H256::from(sp_io::hashing::blake2_256(candidate));
-    for (member, statement) in members.iter().take(2).zip([101u8, 102u8]) {
-        assert_ok!(Attestor::attest(
-            RuntimeOrigin::signed(member.clone()),
-            pid,
-            artifact.0,
-            [statement; 32],
-        ));
+    let mut recovery = candidate.to_vec();
+    recovery.extend_from_slice(b"-terminal-recovery");
+    let recovery_hash = H256::from(sp_io::hashing::blake2_256(&recovery));
+    for (hash, statements) in [(artifact, [101u8, 102u8]), (recovery_hash, [103u8, 104u8])] {
+        for (member, statement) in members.iter().take(2).zip(statements) {
+            assert_ok!(Attestor::attest(
+                RuntimeOrigin::signed(member.clone()),
+                pid,
+                hash.0,
+                [statement; 32],
+            ));
+        }
     }
-    let first = pallet_attestor::Attestations::<Runtime>::get()
+    let attestations = pallet_attestor::Attestations::<Runtime>::get();
+    let first = attestations
+        .iter()
+        .find(|record| record.pid == pid && record.artifact_hash == artifact.0)?
+        .clone();
+    let recovery_attestation = attestations
         .into_iter()
-        .find(|record| record.pid == pid && record.artifact_hash == artifact.0)?;
-    System::set_block_number(first.challenge_deadline.saturating_add(1));
+        .find(|record| record.pid == pid && record.artifact_hash == recovery_hash.0)?;
+    System::set_block_number(
+        first
+            .challenge_deadline
+            .max(recovery_attestation.challenge_deadline)
+            .saturating_add(1),
+    );
     assert!(Attestor::has_quorum(pid, artifact.0));
+    assert!(Attestor::has_quorum(pid, recovery_hash.0));
 
-    let call = RuntimeCall::System(frame_system::Call::authorize_upgrade {
-        code_hash: artifact,
-    });
-    let batch =
-        pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![call]).ok()?;
+    let current = pallet_execution_guard::CurrentSpecName::<Runtime>::get()?;
+    let recovery_len = u32::try_from(recovery.len()).ok()?;
+    let noted_recovery = <Preimage as StorePreimage>::note(recovery.into()).ok()?;
+    if noted_recovery != recovery_hash {
+        return None;
+    }
+    <Preimage as QueryPreimage>::request(&recovery_hash);
+    let recovery_descriptor = pallet_execution_guard::RecoveryImageDescriptor {
+        hash: recovery_hash.0,
+        len: recovery_len,
+        target_spec_version: current.spec_version.checked_add(2)?,
+        attestation_id: recovery_attestation.id,
+    };
+    let batch = pallet_execution_guard::pallet::RuntimeBatch::<Runtime>::try_from(vec![
+        RuntimeCall::System(frame_system::Call::authorize_upgrade {
+            code_hash: artifact,
+        }),
+        RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::commit_recovery_image {
+            hash: recovery_descriptor.hash,
+            len: recovery_descriptor.len,
+            target_spec_version: recovery_descriptor.target_spec_version,
+            attestation_id: recovery_descriptor.attestation_id,
+        }),
+    ])
+    .ok()?;
     let bytes = batch.encode();
     let payload_len = u32::try_from(bytes.len()).ok()?;
     let payload_hash = <Preimage as StorePreimage>::note(bytes.into()).ok()?;
@@ -661,9 +742,19 @@ fn enqueue_attested_code_upgrade_pending_ratification(
             ProposalClass::Code,
         ),
     )?;
-    let version_constraint = pallet_execution_guard::CurrentSpecName::<Runtime>::get()?;
+    let version_constraint = current;
+    pallet_execution_guard::QualifiedRecoveryImages::<Runtime>::insert(
+        pid,
+        pallet_execution_guard::QualifiedRecoveryImage {
+            payload_hash: payload_hash.0,
+            primary_hash: artifact.0,
+            version_constraint: version_constraint.clone(),
+            descriptor: recovery_descriptor,
+        },
+    );
     let declared_domains = pallet_execution_guard::pallet::StoredDomains::try_from(vec![
         pallet_execution_guard::CallDomain::InternalRootAuthorizeUpgrade,
+        pallet_execution_guard::CallDomain::Code,
     ])
     .ok()?;
     seed_queued_epoch_proposal(
@@ -1176,7 +1267,7 @@ fn enqueue_treasury_call(
 fn enqueue_treasury_bytes(
     pid: futarchy_primitives::ProposalId,
     bytes: Vec<u8>,
-) -> Option<BlockNumber> {
+) -> Option<(BlockNumber, frame_support::dispatch::DispatchResult)> {
     let payload_len = u32::try_from(bytes.len()).ok()?;
     let payload_hash = <Preimage as StorePreimage>::note(bytes.into()).ok()?;
     let now = System::block_number();
@@ -1205,7 +1296,7 @@ fn enqueue_treasury_bytes(
         version_constraint.clone(),
     )
     .ok()?;
-    assert_ok!(ExecutionGuard::enqueue(
+    let result = ExecutionGuard::enqueue(
         RuntimeOrigin::signed(crate::configs::epoch_account()),
         pallet_execution_guard::pallet::StoredQueuedExecution {
             pid,
@@ -1225,8 +1316,8 @@ fn enqueue_treasury_bytes(
             failed_at: None,
         },
         false,
-    ));
-    Some(maturity)
+    );
+    Some((maturity, result))
 }
 
 pub(crate) fn seed_parachain_upgrade_boundary(candidate_len: usize) {
@@ -1348,6 +1439,7 @@ pub(crate) fn set_pending_upgrade(applicable_at: Option<BlockNumber>) {
     }
 }
 
+#[cfg(feature = "bootstrap")]
 pub(crate) fn nobody_system_calls() -> Vec<RuntimeCall> {
     vec![
         RuntimeCall::System(frame_system::Call::set_heap_pages { pages: 64 }),
@@ -1376,7 +1468,7 @@ pub(crate) fn closed_wrappers(call: RuntimeCall) -> Vec<RuntimeCall> {
     let who = account(7);
     let signed_origin: <RuntimeOrigin as frame_support::traits::OriginTrait>::PalletsOrigin =
         frame_system::RawOrigin::Signed(who.clone()).into();
-    vec![
+    let wrappers = vec![
         RuntimeCall::Utility(pallet_utility::Call::batch {
             calls: vec![call.clone()],
         }),
@@ -1432,18 +1524,26 @@ pub(crate) fn closed_wrappers(call: RuntimeCall) -> Vec<RuntimeCall> {
             other_signatories: vec![who.clone()],
             call: Box::new(call.clone()),
         }),
-        RuntimeCall::Sudo(pallet_sudo::Call::sudo {
-            call: Box::new(call.clone()),
-        }),
-        RuntimeCall::Sudo(pallet_sudo::Call::sudo_unchecked_weight {
-            call: Box::new(call.clone()),
-            weight: Weight::zero(),
-        }),
-        RuntimeCall::Sudo(pallet_sudo::Call::sudo_as {
-            who: MultiAddress::Id(who),
-            call: Box::new(call),
-        }),
-    ]
+    ];
+    #[cfg(feature = "bootstrap")]
+    let wrappers = {
+        let mut wrappers = wrappers;
+        wrappers.extend([
+            RuntimeCall::Sudo(pallet_sudo::Call::sudo {
+                call: Box::new(call.clone()),
+            }),
+            RuntimeCall::Sudo(pallet_sudo::Call::sudo_unchecked_weight {
+                call: Box::new(call.clone()),
+                weight: Weight::zero(),
+            }),
+            RuntimeCall::Sudo(pallet_sudo::Call::sudo_as {
+                who: MultiAddress::Id(who),
+                call: Box::new(call),
+            }),
+        ]);
+        wrappers
+    };
+    wrappers
 }
 
 fn signed_vit_transfer(destination: AccountId, amount: crate::Balance) -> UncheckedExtrinsic {
@@ -1573,6 +1673,7 @@ fn composition_contains_all_wired_pallets_at_their_frozen_indices() {
     assert_pallet!(Proxy, 25, "Proxy");
     assert_pallet!(Multisig, 26, "Multisig");
     assert_pallet!(Migrations, 27, "Migrations");
+    #[cfg(feature = "bootstrap")]
     assert_pallet!(Sudo, 28, "Sudo");
     assert_pallet!(XcmpQueue, 30, "XcmpQueue");
     assert_pallet!(MessageQueue, 31, "MessageQueue");
@@ -1598,9 +1699,15 @@ fn composition_contains_all_wired_pallets_at_their_frozen_indices() {
     assert_pallet!(ExecutionGuard, 62, "ExecutionGuard");
     assert_pallet!(InflowCaps, 63, "InflowCaps");
     assert_pallet!(TrackOrigins, 64, "TrackOrigins");
+    #[cfg(feature = "bootstrap")]
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
         42
+    );
+    #[cfg(not(feature = "bootstrap"))]
+    assert_eq!(
+        <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
+        41
     );
 }
 
@@ -1815,7 +1922,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     assert_eq!(FEE_VIT_USDC_RATE_KEY, *b"fee.vit_usdc\0\0\0\0");
     assert_eq!(VERSION.spec_name.as_ref(), "bleavit");
     assert_eq!(VERSION.impl_name.as_ref(), "bleavit-runtime");
-    assert_eq!(VERSION.spec_version, 1);
+    assert_eq!(VERSION.spec_version, crate::RUNTIME_SPEC_VERSION);
     // 02 §13: `transaction_version` and `INTEGRATION_CONTRACT_VERSION` are
     // **independent** counters (SQ-102, contract v6). The SDK field denotes
     // dispatchable compatibility embedded in signed-transaction validity, so an
@@ -5293,6 +5400,7 @@ fn metadata_exposes_only_allowed_attestor_and_guardian_constants() {
     });
 }
 
+#[cfg(feature = "bootstrap")]
 #[test]
 fn d13_system_calls_are_denied_bare_and_through_every_closed_wrapper() {
     let calls = nobody_system_calls();
@@ -5421,23 +5529,19 @@ fn deep_preimage_batch_decode_fails_closed_at_the_depth_limit() {
     );
 
     // (b) The PRODUCTION wiring (PR #92 bot P2): drive the same over-deep
-    // preimage through the guard's real `execute` → `decode_batch` path and
-    // assert it fails closed to `BadPreimage`. Treasury needs no
-    // ratification/attestation, so `decode_batch` is the operative gate here —
-    // this pins that `decode_batch` USES the depth limit (a revert to unbounded
-    // `Decode` would abort this test on the native stack instead of passing).
+    // preimage through the guard's real enqueue path and assert it fails closed
+    // to `BadPreimage`. Enqueue now mirrors static screening and decodes before
+    // writing the queue, so the malformed payload never reaches execute.
     upgrade_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 9_256;
-        let maturity = enqueue_treasury_bytes(PID, deep_bytes.clone())
-            .expect("over-deep treasury payload enqueues (not decoded at enqueue time)");
-        System::set_block_number(maturity);
-        let execute_error = ExecutionGuard::execute(RuntimeOrigin::signed(account(92)), PID)
-            .expect_err("guard execute must reject the over-deep preimage");
+        let (_, enqueue_result) = enqueue_treasury_bytes(PID, deep_bytes.clone())
+            .expect("over-deep treasury payload fixture is constructible");
         assert_eq!(
-            execute_error.error,
-            pallet_execution_guard::Error::<Runtime>::BadPreimage.into(),
-            "the guard's decode_batch must fail closed on an over-deep preimage"
+            enqueue_result,
+            Err(pallet_execution_guard::Error::<Runtime>::BadPreimage.into()),
+            "enqueue must fail closed on an over-deep preimage"
         );
+        assert!(!pallet_execution_guard::Queue::<Runtime>::contains_key(PID));
     });
 }
 
@@ -6302,7 +6406,7 @@ fn system_authorization_survives_cumulus_overlap_preflight_rejection() {
 }
 
 #[test]
-fn migration_halt_keeps_forward_remediation_upgrade_applicable() {
+fn migration_halt_blocks_generic_remediation_without_a_cutpoint_repair() {
     use frame_support::migrations::FailedMigrationHandler;
 
     upgrade_ext().execute_with(|| {
@@ -6345,16 +6449,15 @@ fn migration_halt_keeps_forward_remediation_upgrade_applicable() {
                 return;
             }
         };
-        assert_ok!(ExecutionGuard::apply_authorized_upgrade(
-            RuntimeOrigin::signed(account(84)),
-            bounded,
-        ));
-        assert_eq!(
-            cumulus_pallet_parachain_system::PendingValidationCode::<Runtime>::get(),
-            candidate
+        assert_noop!(
+            ExecutionGuard::apply_authorized_upgrade(RuntimeOrigin::signed(account(84)), bounded),
+            frame_system::Error::<Runtime>::MultiBlockMigrationsOngoing,
         );
-        assert!(System::authorized_upgrade().is_none());
-        assert!(pallet_migrations::Cursor::<Runtime>::get().is_none());
+        assert!(System::authorized_upgrade().is_some());
+        assert_eq!(
+            pallet_migrations::Cursor::<Runtime>::get(),
+            Some(pallet_migrations::MigrationCursor::Stuck),
+        );
         assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
         assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_some());
     });
@@ -6730,6 +6833,7 @@ fn live_treasury_capability_disables_queued_call_without_state_change_then_reena
 #[test]
 fn execute_under_constitution_dead_man_reports_freeze_active_and_preserves_queue() {
     development_ext().execute_with(|| {
+        arm_all_classes_for_tests();
         const PID: futarchy_primitives::ProposalId = 6_010;
         let call =
             RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::fund_budget_line {
@@ -9622,6 +9726,7 @@ fn ratified_prequeue_trading_reject_releases_epoch_pin_and_ratification() {
 #[test]
 fn i9_epoch_enqueue_guard_execute_and_epoch_callback_are_real_and_origin_narrow() {
     development_ext().execute_with(|| {
+        arm_all_classes_for_tests();
         const PID: futarchy_primitives::ProposalId = 8_001;
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| state.main_usdc = 10);
         assert_ok!(Constitution::set_capability(
@@ -9918,6 +10023,7 @@ fn queued_treasury_outflows_mirror_enqueue_execute_and_terminal_dequeue() {
     use pallet_epoch::ExecutionGuardAccess;
 
     development_ext().execute_with(|| {
+        arm_all_classes_for_tests();
         use pallet_futarchy_treasury::BudgetLine;
 
         assert_ok!(Constitution::set_capability(
@@ -10980,6 +11086,7 @@ fn epoch_length_change_is_a_values_track_leaf_with_an_independent_pallet_origin_
     });
 }
 
+#[cfg(feature = "bootstrap")]
 #[test]
 fn classifier_sweeps_every_callable_pallet_and_every_closed_wrapper_shape() {
     let who = account(31);
@@ -13038,6 +13145,7 @@ fn qualified_real_payload_passes_guard_domain_rederivation_and_executes() {
     use pallet_epoch::ExecutionGuardAccess;
 
     development_ext().execute_with(|| {
+        arm_all_classes_for_tests();
         assert!(install_single_active_metric_spec(28).is_some());
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| state.main_usdc = 10);
         let line = pallet_futarchy_treasury::BudgetLine::Pol;
@@ -13531,6 +13639,7 @@ fn try_runtime_api_executes_genesis_upgrade_and_try_state_checks() {
 
 // --- Post-authoring review regressions (session fixes over the Codex draft) ---
 
+#[cfg(feature = "bootstrap")]
 #[test]
 fn ump_send_and_balances_force_calls_are_nobody_even_under_sudo() {
     let mut calls = vec![
@@ -13760,6 +13869,7 @@ fn deferred_metric_input_incident_multiplier_uses_the_neutral_identity() {
     });
 }
 
+#[cfg(feature = "bootstrap")]
 #[test]
 fn sudo_as_is_denied_so_the_founding_multisig_cannot_impersonate_accounts() {
     // P1 (Codex adversarial review): `sudo_as(who, call)` dispatches as
@@ -13839,6 +13949,7 @@ fn const_and_entrenched_set_param_are_enactable_by_constitutional_values() {
     });
 }
 
+#[cfg(feature = "bootstrap")]
 #[test]
 fn genesis_phase_flags_advertise_sudo_present_alongside_the_sudo_key() {
     // P2#7: the preset installs a sudo key, so bit 4 (SUDO_PRESENT) MUST be set
@@ -16192,6 +16303,7 @@ fn trap_recovery_payload_screens_qualifies_and_executes_end_to_end() {
     use pallet_epoch::ExecutionGuardAccess;
 
     development_ext().execute_with(|| {
+        arm_all_classes_for_tests();
         assert!(install_single_active_metric_spec(28).is_some());
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| state.main_usdc = 10);
         let protocol = crate::configs::treasury_protocol_account();
@@ -16511,9 +16623,10 @@ fn screening_refuses_payloads_the_guard_enqueue_would_reject() {
 }
 
 #[test]
-fn top_level_authorize_upgrade_still_screens_and_enqueues() {
-    // The mirror must not over-reject: the canonical CODE upgrade payload, and a
-    // multi-item batch of *top-level* calls (09 §2.1), stay admissible.
+fn top_level_authorize_upgrade_without_recovery_is_refunded() {
+    // B16 makes the paired recovery commitment mandatory. A bare top-level
+    // authorization remains classifiable but is no longer an eligible CODE
+    // payload.
     development_ext().execute_with(|| {
         let Some((payload_hash, payload_len)) = note_runtime_batch(vec![RuntimeCall::System(
             frame_system::Call::authorize_upgrade {
@@ -16541,9 +16654,10 @@ fn top_level_authorize_upgrade_still_screens_and_enqueues() {
             <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
                 AccountId,
             >>::static_check(&submitted);
-        assert!(
-            matches!(disposition, pallet_epoch::StaticCheckDisposition::Eligible),
-            "the canonical top-level upgrade payload must stay eligible: {disposition:?}",
+        assert_eq!(
+            disposition,
+            pallet_epoch::StaticCheckDisposition::Refund(RejectReason::ProcessHold),
+            "an unpaired top-level upgrade must fail static screening",
         );
     });
 }

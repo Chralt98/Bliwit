@@ -5,7 +5,20 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
 out_dir=${1:-release-work/runtime}
+requested_profile=${2:-${RUNTIME_PROFILE:-}}
 wasm_source="target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
+profile_tool="tools/release/runtime_profiles.py"
+profile_args=()
+if [[ -n "$requested_profile" ]]; then
+  profile_args=(--profile "$requested_profile")
+fi
+profile=$(python3 "$profile_tool" "${profile_args[@]}" --field name)
+base_profile=$(python3 "$profile_tool" --profile "$profile" --field base)
+features=$(python3 "$profile_tool" --profile "$profile" --field features)
+recovery=$(python3 "$profile_tool" --profile "$profile" --field recovery)
+multi_block_migrations=$(python3 "$profile_tool" --profile "$profile" --field multi_block_migrations)
+recipe=$(python3 "$profile_tool" --profile "$profile" --field recipe)
+recovery_test_recipe=$(python3 "$profile_tool" --profile "$profile" --field recovery_test_recipe)
 toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
 if [[ -z "$toolchain" ]]; then
   echo "rust-toolchain.toml does not declare a channel" >&2
@@ -22,7 +35,26 @@ export LC_ALL=C.UTF-8
 export CARGO_INCREMENTAL=0
 export CARGO_TERM_COLOR=never
 
-cargo build -p bleavit-runtime --release --features substrate-wasm-builder --locked
+cargo build -p bleavit-runtime --release --no-default-features --features "$features" --locked
+
+# A recovery artifact is admissible only after the runtime proves that the
+# exact same base+recovery feature set registers zero multi-block migrations.
+# Cargo returns success for a filter that runs zero tests, so also require the
+# harness summary to report one passing test.
+profile_verification_result=""
+if [[ "$recovery" == "true" ]]; then
+  test_features=${features/,substrate-wasm-builder/}
+  verification_log=$(mktemp)
+  trap 'rm -f "$verification_log"' EXIT
+  cargo test -p bleavit-runtime --no-default-features --features "$test_features" \
+    --locked recovery_profile_has_zero_multi_block_migrations 2>&1 | tee "$verification_log"
+  passing_summaries=$(grep -Ec 'test result: ok\. 1 passed; 0 failed;' "$verification_log" || true)
+  if [[ "$passing_summaries" != "1" ]]; then
+    echo "recovery profile did not execute exactly one zero-MBM proof test" >&2
+    exit 1
+  fi
+  profile_verification_result="passed"
+fi
 
 if [[ ! -f "$wasm_source" ]]; then
   echo "runtime wasm was not produced at $wasm_source" >&2
@@ -32,7 +64,11 @@ fi
 mkdir -p "$out_dir"
 cp "$wasm_source" "$out_dir/runtime.wasm"
 
-TOOLCHAIN="$toolchain" OUT_DIR="$out_dir" python3 - <<'PY'
+TOOLCHAIN="$toolchain" OUT_DIR="$out_dir" RUNTIME_PROFILE="$profile" \
+BASE_PROFILE="$base_profile" CARGO_FEATURES="$features" RECOVERY="$recovery" \
+MULTI_BLOCK_MIGRATIONS="$multi_block_migrations" RECIPE="$recipe" \
+RECOVERY_TEST_RECIPE="$recovery_test_recipe" \
+PROFILE_VERIFICATION_RESULT="$profile_verification_result" python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -54,7 +90,7 @@ host = next(
 commit = command("git", "rev-parse", "HEAD")
 digest = hashlib.sha256(wasm.read_bytes()).hexdigest()
 info = {
-    "schema": "bleavit.runtime-build.v1",
+    "schema": "bleavit.runtime-build.v2",
     "git_commit": commit,
     "source_date_epoch": int(os.environ["SOURCE_DATE_EPOCH"]),
     "toolchain": os.environ["TOOLCHAIN"],
@@ -67,7 +103,22 @@ info = {
         "sha256": digest,
         "size": wasm.stat().st_size,
     },
-    "recipe": "cargo build -p bleavit-runtime --release --features substrate-wasm-builder --locked",
+    "runtime_profile": os.environ["RUNTIME_PROFILE"],
+    "base_profile": os.environ["BASE_PROFILE"],
+    "recovery": os.environ["RECOVERY"] == "true",
+    "cargo_default_features": False,
+    "cargo_features": os.environ["CARGO_FEATURES"].split(","),
+    "multi_block_migrations": os.environ["MULTI_BLOCK_MIGRATIONS"],
+    "recipe": os.environ["RECIPE"],
+    "profile_verification": (
+        {
+            "command": os.environ["RECOVERY_TEST_RECIPE"],
+            "result": os.environ["PROFILE_VERIFICATION_RESULT"],
+            "test": "recovery_profile_has_zero_multi_block_migrations",
+        }
+        if os.environ["RECOVERY"] == "true"
+        else None
+    ),
     "normalized_environment": {
         "CARGO_INCREMENTAL": os.environ["CARGO_INCREMENTAL"],
         "CARGO_TERM_COLOR": os.environ["CARGO_TERM_COLOR"],
@@ -87,5 +138,4 @@ info = {
 )
 PY
 
-echo "runtime release inputs written to $out_dir"
-
+echo "runtime release inputs for profile $profile written to $out_dir"

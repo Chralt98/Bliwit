@@ -25,6 +25,7 @@ from release_common import (
     source_date_epoch,
     write_json,
 )
+from runtime_profiles import select_profile, validate_build_profile, validate_metadata_profile
 
 
 @dataclass(frozen=True)
@@ -571,6 +572,8 @@ def readiness_markdown(
     gaps: list[dict[str, str]],
     corruptions: list[dict[str, str]],
     artifacts: list[dict[str, Any]],
+    runtime_profile: str,
+    cargo_features: list[str],
 ) -> str:
     lines = [
         "# Bleavit release readiness",
@@ -578,6 +581,10 @@ def readiness_markdown(
         f"- Mode: {'dry-run / allow-missing' if allow_missing else 'strict release'}",
         f"- Publishable: {'yes' if ready else 'no'}",
         f"- Content-addressed artifacts assembled: {len(artifacts)}",
+        f"- Runtime profile: `{runtime_profile}`",
+        "- Cargo features: `"
+        + ",".join(str(feature) for feature in cargo_features)
+        + "` (default features disabled)",
         "",
     ]
     failures = [*corruptions, *gaps]
@@ -647,6 +654,10 @@ def main() -> int:
                     build_info = value
                     for error in validate_build_info(value):
                         add_gap(gaps, "runtime.build_info", "B8", error)
+                    for error in validate_build_profile(value):
+                        add_corruption(
+                            corruptions, "runtime.profile_binding", error
+                        )
                 else:
                     runtime_info = value
             except (OSError, ValueError, json.JSONDecodeError) as error:
@@ -656,6 +667,120 @@ def main() -> int:
     )
     for error in binding_errors:
         add_corruption(corruptions, "runtime.wasm_binding", error)
+    if (
+        build_info
+        and runtime_info
+        and not validate_build_profile(build_info)
+    ):
+        for error in validate_metadata_profile(build_info, runtime_info):
+            add_corruption(corruptions, "runtime.profile_binding", error)
+    recovery_dir = args.runtime_dir / "recovery"
+    recovery_build_info: dict[str, Any] = {}
+    recovery_runtime_info: dict[str, Any] = {}
+    for name in ("runtime.wasm", "metadata.scale", "runtime-info.json", "build-info.json"):
+        path = recovery_dir / name
+        if path.is_file():
+            candidates.append(Candidate("runtime-recovery", path, str(path)))
+        else:
+            add_gap(
+                gaps,
+                f"runtime.recovery.{name}",
+                "B16",
+                f"missing paired terminal-recovery artifact {path}",
+            )
+    recovery_info_path = recovery_dir / "build-info.json"
+    if recovery_info_path.is_file():
+        try:
+            recovery_build_info = load_json(recovery_info_path)
+            for error in validate_build_info(recovery_build_info):
+                add_gap(gaps, "runtime.recovery.build_info", "B16", error)
+            for error in validate_build_profile(recovery_build_info):
+                add_corruption(corruptions, "runtime.recovery.profile_binding", error)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            add_corruption(
+                corruptions,
+                "runtime.recovery.profile_binding",
+                f"invalid recovery build-info.json: {error}",
+            )
+    recovery_runtime_info_path = recovery_dir / "runtime-info.json"
+    if recovery_runtime_info_path.is_file():
+        try:
+            recovery_runtime_info = load_json(recovery_runtime_info_path)
+        except (OSError, ValueError, json.JSONDecodeError) as error:
+            add_corruption(
+                corruptions,
+                "runtime.recovery.wasm_binding",
+                f"invalid recovery runtime-info.json: {error}",
+            )
+    if recovery_build_info and recovery_runtime_info:
+        _, recovery_binding_errors = validate_runtime_binding(
+            recovery_dir, recovery_build_info, recovery_runtime_info
+        )
+        for error in recovery_binding_errors:
+            add_corruption(corruptions, "runtime.recovery.wasm_binding", error)
+        for error in validate_metadata_profile(
+            recovery_build_info, recovery_runtime_info
+        ):
+            add_corruption(
+                corruptions, "runtime.recovery.profile_binding", error
+            )
+    recovery_wasm = recovery_dir / "runtime.wasm"
+    if recovery_build_info and recovery_wasm.is_file():
+        actual_recovery_hash = sha256_file(recovery_wasm)
+        recorded_recovery_hash = recovery_build_info.get("wasm", {}).get("sha256")
+        primary_profile = build_info.get("runtime_profile")
+        expected_recovery_profile = None
+        try:
+            _, primary_row = select_profile(
+                primary_profile if isinstance(primary_profile, str) else None
+            )
+            expected_recovery_profile = primary_row.get("recovery_profile")
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        if recovery_build_info.get("recovery") is not True:
+            add_corruption(
+                corruptions,
+                "runtime.recovery.profile_binding",
+                "paired terminal-recovery artifact must use a recovery profile",
+            )
+        if recovery_build_info.get("runtime_profile") != expected_recovery_profile:
+            add_corruption(
+                corruptions,
+                "runtime.recovery.profile_binding",
+                "paired recovery profile does not match the primary profile",
+            )
+        if recovery_build_info.get("base_profile") != build_info.get("base_profile"):
+            add_corruption(
+                corruptions,
+                "runtime.recovery.profile_binding",
+                "primary and recovery artifacts must share one base profile",
+            )
+        if recorded_recovery_hash != actual_recovery_hash:
+            add_corruption(
+                corruptions,
+                "runtime.recovery.wasm_binding",
+                "recovery build-info hash does not match recovery/runtime.wasm",
+            )
+        if recovery_runtime_info:
+            primary_spec_name = runtime_info.get("spec_name")
+            recovery_spec_name = recovery_runtime_info.get("spec_name")
+            primary_spec_version = runtime_info.get("spec_version")
+            recovery_spec_version = recovery_runtime_info.get("spec_version")
+            if recovery_spec_name != primary_spec_name:
+                add_corruption(
+                    corruptions,
+                    "runtime.recovery.version_binding",
+                    "primary and recovery artifacts must share one spec_name",
+                )
+            if (
+                not isinstance(primary_spec_version, int)
+                or recovery_spec_version != primary_spec_version + 1
+            ):
+                add_corruption(
+                    corruptions,
+                    "runtime.recovery.version_binding",
+                    "paired recovery spec_version must be exactly primary spec_version + 1",
+                )
     commit = args.commit or git_value(root, "rev-parse", "HEAD")
     built_commit = build_info.get("git_commit")
     if built_commit and built_commit != commit:
@@ -667,6 +792,16 @@ def main() -> int:
             add_gap(gaps, "runtime.commit_binding", "B8", reason)
         else:
             add_corruption(corruptions, "runtime.commit_binding", reason)
+    recovery_built_commit = recovery_build_info.get("git_commit")
+    if recovery_built_commit and recovery_built_commit != commit:
+        reason = (
+            f"recovery build-info.git_commit {recovery_built_commit} does not match "
+            f"the release commit {commit}"
+        )
+        if args.allow_missing:
+            add_gap(gaps, "runtime.recovery.commit_binding", "B16", reason)
+        else:
+            add_corruption(corruptions, "runtime.recovery.commit_binding", reason)
 
     inventory: dict[str, Any] = {}
     try:
@@ -828,6 +963,17 @@ def main() -> int:
         "tag": tag,
         "toolchain": build_info.get("toolchain", "unknown"),
         "source_date_epoch": epoch,
+        "runtime_profile": {
+            "name": build_info.get("runtime_profile", "unknown"),
+            "base": build_info.get("base_profile", "unknown"),
+            "recovery": build_info.get("recovery"),
+            "cargo_default_features": build_info.get("cargo_default_features"),
+            "cargo_features": build_info.get("cargo_features", []),
+            "multi_block_migrations": build_info.get(
+                "multi_block_migrations", "unknown"
+            ),
+            "profile_verification": build_info.get("profile_verification"),
+        },
         "artifacts": artifact_entries,
         "readiness": {
             "publishable": ready,
@@ -847,7 +993,19 @@ def main() -> int:
     report_path = args.output_dir / "readiness-report.md"
     write_json(manifest_path, manifest)
     report_path.write_text(
-        readiness_markdown(ready, args.allow_missing, gaps, corruptions, artifact_entries),
+        readiness_markdown(
+            ready,
+            args.allow_missing,
+            gaps,
+            corruptions,
+            artifact_entries,
+            str(build_info.get("runtime_profile", "unknown")),
+            (
+                build_info.get("cargo_features")
+                if isinstance(build_info.get("cargo_features"), list)
+                else []
+            ),
+        ),
         encoding="utf-8",
     )
     for path in (manifest_path, report_path):

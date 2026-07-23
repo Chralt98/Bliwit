@@ -7,12 +7,14 @@ import argparse
 import hashlib
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from node_boot import JsonRpcHttp, NodeProcess
 from release_common import write_json
+from runtime_profiles import validate_build_profile
 from scale_metadata import MetadataDecodeError, decode_metadata
 
 
@@ -29,6 +31,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--out-dir", type=Path, default=Path("release-work/runtime"))
     parser.add_argument("--boot-timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--embed-wasm",
+        action="store_true",
+        help="boot a temporary copy of the plain chain spec with --wasm as genesis :code",
+    )
     return parser.parse_args()
 
 
@@ -58,17 +65,44 @@ def main() -> int:
     args = parse_args()
     if not args.wasm.is_file():
         raise FileNotFoundError(f"runtime wasm not found: {args.wasm}")
+    build_info_path = args.out_dir / "build-info.json"
+    if not build_info_path.is_file():
+        raise FileNotFoundError(
+            f"profile-bound build information not found: {build_info_path}"
+        )
+    build_info = json.loads(build_info_path.read_text(encoding="utf-8"))
+    build_errors = validate_build_profile(build_info)
+    if build_errors:
+        raise ValueError("invalid build profile: " + "; ".join(build_errors))
     wasm_bytes = args.wasm.read_bytes()
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    with NodeProcess(
-        args.node, args.chain_spec, boot_timeout=args.boot_timeout
-    ) as node:
-        rpc = JsonRpcHttp(node.http_url)
-        metadata = decode_hex(rpc.call("state_getMetadata"), "state_getMetadata")
-        runtime_version = rpc.call("state_getRuntimeVersion")
-        properties = rpc.call("system_properties")
-        on_chain_code = rpc.call("state_getStorage", ["0x3a636f6465"])
+    chain_spec = args.chain_spec
+    temporary_spec: tempfile.TemporaryDirectory[str] | None = None
+    if args.embed_wasm:
+        spec = json.loads(args.chain_spec.read_text(encoding="utf-8"))
+        runtime_genesis = spec.get("genesis", {}).get("runtimeGenesis")
+        if not isinstance(runtime_genesis, dict) or not isinstance(
+            runtime_genesis.get("code"), str
+        ):
+            raise ValueError("--embed-wasm requires a plain runtimeGenesis chain spec")
+        runtime_genesis["code"] = "0x" + wasm_bytes.hex()
+        temporary_spec = tempfile.TemporaryDirectory()
+        chain_spec = Path(temporary_spec.name) / args.chain_spec.name
+        chain_spec.write_text(json.dumps(spec), encoding="utf-8")
+
+    try:
+        with NodeProcess(
+            args.node, chain_spec, boot_timeout=args.boot_timeout
+        ) as node:
+            rpc = JsonRpcHttp(node.http_url)
+            metadata = decode_hex(rpc.call("state_getMetadata"), "state_getMetadata")
+            runtime_version = rpc.call("state_getRuntimeVersion")
+            properties = rpc.call("system_properties")
+            on_chain_code = rpc.call("state_getStorage", ["0x3a636f6465"])
+    finally:
+        if temporary_spec is not None:
+            temporary_spec.cleanup()
 
     wasm_file_sha256, on_chain_wasm_sha256 = bound_wasm_hashes(
         wasm_bytes, on_chain_code
@@ -81,9 +115,11 @@ def main() -> int:
     contract_version = None
     contract_status = "not found in decoded metadata constants"
     metadata_version = None
+    metadata_pallets: list[str] = []
     try:
         decoded = decode_metadata(metadata)
         metadata_version = decoded["version"]
+        metadata_pallets = sorted(decoded["pallets"])
         constant = (
             decoded["pallets"]
             .get("Constitution", {})
@@ -98,6 +134,8 @@ def main() -> int:
 
     info = {
         "schema": "bleavit.runtime-info.v1",
+        "runtime_profile": build_info["runtime_profile"],
+        "metadata_pallets": metadata_pallets,
         "spec_name": runtime_version.get("specName"),
         "spec_version": runtime_version.get("specVersion"),
         "impl_name": runtime_version.get("implName"),

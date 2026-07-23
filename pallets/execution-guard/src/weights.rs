@@ -21,6 +21,9 @@ pub trait WeightInfo {
     fn expire_failed_execution() -> Weight;
     fn ratify() -> Weight;
     fn reject_stale() -> Weight;
+    fn commit_recovery_image() -> Weight;
+    fn authorize_phase_four() -> Weight;
+    fn qualify_recovery_image(bytes: u32) -> Weight;
 }
 
 const STATE_POV: u64 = 96_000;
@@ -44,6 +47,16 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     }
     fn reject_stale() -> Weight {
         base::<T>(105_000_000, 26, 18)
+    }
+    fn commit_recovery_image() -> Weight {
+        base::<T>(90_000_000, 8, 4)
+    }
+    fn authorize_phase_four() -> Weight {
+        base::<T>(20_000_000, 3, 2)
+    }
+    fn qualify_recovery_image(bytes: u32) -> Weight {
+        base::<T>(180_000_000, 16, 3)
+            .saturating_add(Weight::from_parts(2_000, 1).saturating_mul(bytes.into()))
     }
 }
 
@@ -70,6 +83,16 @@ impl WeightInfo for () {
     }
     fn reject_stale() -> Weight {
         rocks(105_000_000, 26, 18)
+    }
+    fn commit_recovery_image() -> Weight {
+        rocks(90_000_000, 8, 4)
+    }
+    fn authorize_phase_four() -> Weight {
+        rocks(20_000_000, 3, 2)
+    }
+    fn qualify_recovery_image(bytes: u32) -> Weight {
+        rocks(180_000_000, 16, 3)
+            .saturating_add(Weight::from_parts(2_000, 1).saturating_mul(bytes.into()))
     }
 }
 

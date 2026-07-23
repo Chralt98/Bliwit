@@ -420,6 +420,26 @@ fn plan_execution(
     if !enabled(config, Role::Execute) {
         return;
     }
+    if snapshot.has_call("ExecutionGuard", "qualify_recovery_image") {
+        for proposal in &snapshot.proposals {
+            if matches!(
+                proposal.state.as_str(),
+                "Submitted" | "Screening" | "Qualified" | "Trading" | "Extended"
+            ) && matches!(proposal.class.as_str(), "Code" | "Meta")
+                && !snapshot
+                    .qualified_recovery_proposals
+                    .contains(&proposal.proposal_id)
+            {
+                cranks.push(crank(
+                    Role::Execute,
+                    "ExecutionGuard",
+                    "qualify_recovery_image",
+                    [("pid", number(proposal.proposal_id))],
+                    PRIORITY_EXECUTE,
+                ));
+            }
+        }
+    }
     for item in &snapshot.execution_queue {
         if item.cancelled || item.maturity.is_none_or(|at| snapshot.current_block < at) {
             continue;
@@ -737,6 +757,7 @@ mod tests {
                 "ConditionalLedger.sweep_dust_baseline",
                 "ExecutionGuard.execute",
                 "ExecutionGuard.expire_failed_execution",
+                "ExecutionGuard.qualify_recovery_image",
                 "FutarchyTreasury.execute_coretime_renewal",
                 "FutarchyTreasury.prune_coretime_quote",
                 "Welfare.record_snapshot",
@@ -767,6 +788,7 @@ mod tests {
             }],
             proposals: vec![crate::snapshot::ProposalSnapshot {
                 proposal_id: 3,
+                class: "Param".to_owned(),
                 state: "Trading".to_owned(),
                 epoch: Some(5),
                 decide_at: Some(999),
@@ -813,6 +835,7 @@ mod tests {
                 failed_at: None,
                 cancelled: false,
             }],
+            qualified_recovery_proposals: BTreeSet::new(),
             coretime: Some(CoretimeSnapshot {
                 quotes: vec![CoretimeQuoteSnapshot {
                     period_index: 12,
@@ -973,6 +996,7 @@ mod tests {
         snapshot.proposals = (1..=12)
             .map(|proposal_id| ProposalSnapshot {
                 proposal_id,
+                class: "Param".to_owned(),
                 state: "Submitted".to_owned(),
                 epoch: Some(5),
                 decide_at: None,
@@ -1338,6 +1362,28 @@ mod tests {
         let expiry = plan(&snapshot, &config_for(Role::Execute));
         assert_eq!(expiry.len(), 1);
         assert_eq!(expiry[0].call, "expire_failed_execution");
+    }
+
+    #[test]
+    fn upgrade_recovery_qualification_is_planned_once_before_screening() {
+        let mut snapshot = snapshot();
+        snapshot.execution_queue.clear();
+        snapshot.proposals = vec![ProposalSnapshot {
+            proposal_id: 44,
+            class: "Meta".to_owned(),
+            state: "Submitted".to_owned(),
+            epoch: Some(5),
+            decide_at: None,
+            maturity: None,
+            grace_end: None,
+            market_ids: Vec::new(),
+        }];
+        let planned = plan(&snapshot, &config_for(Role::Execute));
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].call, "qualify_recovery_image");
+
+        snapshot.qualified_recovery_proposals.insert(44);
+        assert!(plan(&snapshot, &config_for(Role::Execute)).is_empty());
     }
 
     #[test]

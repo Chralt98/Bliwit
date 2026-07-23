@@ -54,6 +54,7 @@ pub struct ChainSnapshot {
     pub reserve_health: Option<ReserveHealthSnapshot>,
     pub registry_epochs: Vec<RegistryEpochSnapshot>,
     pub execution_queue: Vec<ExecutionSnapshot>,
+    pub qualified_recovery_proposals: BTreeSet<u64>,
     pub coretime: Option<CoretimeSnapshot>,
     pub market_reaps: Vec<ReapSnapshot>,
     pub proposal_dust: Vec<ReapSnapshot>,
@@ -108,6 +109,7 @@ pub struct BookSnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProposalSnapshot {
     pub proposal_id: u64,
+    pub class: String,
     pub state: String,
     pub epoch: Option<u64>,
     pub decide_at: Option<u64>,
@@ -279,7 +281,12 @@ impl SnapshotExtractor {
             ),
             capability(
                 Role::Execute,
-                ["execute", "expire_failed_execution", "reject_stale"]
+                [
+                    "execute",
+                    "expire_failed_execution",
+                    "reject_stale",
+                    "qualify_recovery_image",
+                ]
                     .iter()
                     .any(|call| has_call("ExecutionGuard", call)),
                 "ExecutionGuard keeper calls absent",
@@ -403,6 +410,12 @@ impl SnapshotExtractor {
             reserve_health: self.extract_reserve_health(&at_block).await,
             registry_epochs,
             execution_queue: self.extract_execution_queue(&at_block).await,
+            qualified_recovery_proposals: self
+                .iter_values(&at_block, "ExecutionGuard", "QualifiedRecoveryImages")
+                .await
+                .into_iter()
+                .filter_map(|(keys, _)| keys.first().and_then(as_u64))
+                .collect(),
             coretime: self.extract_coretime(&at_block).await,
             market_reaps: self
                 .extract_reaps(&at_block, "Market", "SettlementObservedAt", market_archive)
@@ -1166,6 +1179,7 @@ fn decode_proposal_entry(keys: &[Value<()>], value: &Value<()>) -> Option<Propos
         .and_then(as_u64)
         .or_else(|| keys.first().and_then(as_u64))?;
     let state = value.at("state").and_then(variant_name)?.to_owned();
+    let class = value.at("class").and_then(variant_name)?.to_owned();
     // Baseline finalization is absence-dependent: without the proposal's
     // epoch the keeper cannot prove that this entry belongs to some other
     // epoch. Treat a missing or undecodable epoch as an incomplete snapshot.
@@ -1177,6 +1191,7 @@ fn decode_proposal_entry(keys: &[Value<()>], value: &Value<()>) -> Option<Propos
         .unwrap_or_default();
     Some(ProposalSnapshot {
         proposal_id,
+        class,
         state,
         epoch: Some(epoch),
         decide_at: nonzero(value.at("decide_at").and_then(as_u64)),
@@ -1492,6 +1507,7 @@ mod tests {
     fn proposal_value(proposal_id: u64, state: &str, epoch: u64, decide_at: u64) -> Value<()> {
         Value::named_composite([
             ("id", Value::u128(u128::from(proposal_id))),
+            ("class", Value::unnamed_variant("Param", [])),
             ("state", Value::unnamed_variant(state, [])),
             ("epoch", Value::u128(u128::from(epoch))),
             ("decide_at", Value::u128(u128::from(decide_at))),
@@ -1556,6 +1572,7 @@ mod tests {
             proposals,
             vec![ProposalSnapshot {
                 proposal_id: 11,
+                class: "Param".to_owned(),
                 state: "Trading".to_owned(),
                 epoch: Some(3),
                 decide_at: Some(75),

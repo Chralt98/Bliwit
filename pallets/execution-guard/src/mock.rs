@@ -5,7 +5,7 @@ use crate as pallet_execution_guard;
 use crate::*;
 use frame_support::{
     derive_impl, parameter_types,
-    traits::{EnsureOrigin, IsSubType, UnfilteredDispatchable},
+    traits::{EitherOfDiverse, EnsureOrigin, IsSubType, UnfilteredDispatchable},
 };
 use futarchy_primitives::{
     keeper::{CrankClass, KeeperRebateSink},
@@ -265,8 +265,11 @@ parameter_types! {
     pub static EpochPayloads: Vec<(ProposalId, H256)> = Vec::new();
     pub static PreimageData: Vec<(H256, Vec<u8>)> = Vec::new();
     pub static PreimageFetchRequests: Vec<(H256, u32)> = Vec::new();
+    pub static RecoveryPins: Vec<H256> = Vec::new();
+    pub static PhaseFourPlanValid: bool = true;
     pub static Unpinned: Vec<H256> = Vec::new();
     pub static AttestationArtifact: Option<(u32, H256)> = None;
+    pub static RecoveryAttestationArtifact: Option<(u32, H256)> = None;
     pub static AttestationPresent: bool = true;
     pub static AttestationQuorum: bool = true;
     pub static GuardianHeld: Vec<ProposalId> = Vec::new();
@@ -280,9 +283,12 @@ parameter_types! {
     pub static ReleaseRefuses: bool = false;
     pub static ObservedSpecVersion: Option<u32> = Some(2);
     pub static ObservedSpecName: Vec<u8> = b"test".to_vec();
+    pub static ObservedArtifactVersions: Vec<(H256, RuntimeVersionConstraint)> = Vec::new();
     pub static MigrationCursorExists: bool = false;
     pub static UpgradeDispatchOrigins: Vec<UpgradeDispatchOrigin> = Vec::new();
     pub static UpgradeSchedulingPerformed: bool = false;
+    pub static ExactPhaseThree: bool = false;
+    pub static ExactPhaseFour: bool = false;
     /// Disabled by default, so the mock behaves like the `()` sink unless a
     /// keeper-rebate regression explicitly enables recording.
     pub static RecordKeeperRebates: bool = false;
@@ -331,6 +337,9 @@ impl EpochHandoff for TestEpoch {
         EpochPayloads::get()
             .into_iter()
             .find_map(|(candidate, hash)| (candidate == pid).then_some(hash))
+    }
+    fn recovery_qualification_context(pid: ProposalId) -> Option<(H256, RuntimeVersionConstraint)> {
+        Self::payload_hash(pid).zip(CurrentSpecName::<Test>::get())
     }
 
     fn mark_executed(pid: ProposalId) -> frame_support::dispatch::DispatchResult {
@@ -415,18 +424,73 @@ impl Preimages for TestPreimages {
     }
 }
 
+impl RecoveryImages for TestPreimages {
+    fn len(hash: H256) -> Option<u32> {
+        PreimageData::get()
+            .into_iter()
+            .find_map(|(candidate, bytes)| {
+                (candidate == hash)
+                    .then(|| u32::try_from(bytes.len()).ok())
+                    .flatten()
+            })
+    }
+    fn fetch(hash: H256, expected_len: u32) -> Option<Vec<u8>> {
+        PreimageFetchRequests::mutate(|requests| requests.push((hash, expected_len)));
+        PreimageData::get()
+            .into_iter()
+            .find_map(|(candidate, bytes)| {
+                (candidate == hash && bytes.len() == expected_len as usize).then_some(bytes)
+            })
+    }
+    fn is_pinned(hash: H256) -> bool {
+        RecoveryPins::get().contains(&hash)
+    }
+    fn pin(hash: H256) -> frame_support::dispatch::DispatchResult {
+        RecoveryPins::mutate(|pins| pins.push(hash));
+        Ok(())
+    }
+    fn unpin(hash: H256) -> frame_support::dispatch::DispatchResult {
+        RecoveryPins::mutate(|pins| pins.retain(|candidate| *candidate != hash));
+        PreimageData::mutate(|items| items.retain(|(candidate, _)| *candidate != hash));
+        Unpinned::mutate(|items| items.push(hash));
+        Ok(())
+    }
+}
+
+pub struct TestPhaseState;
+impl PhaseState for TestPhaseState {
+    fn exact_phase_three() -> bool {
+        ExactPhaseThree::get()
+    }
+    fn exact_phase_four() -> bool {
+        ExactPhaseFour::get()
+    }
+    fn class_execution_enabled(_class: ProposalClass) -> bool {
+        !ExactPhaseThree::get()
+    }
+    fn phase_four_plan_valid(_plan: &PhaseFourPlan) -> bool {
+        PhaseFourPlanValid::get()
+    }
+}
+
 pub struct TestAttestations;
 
 impl Attestations for TestAttestations {
     fn artifact_hash(attestation_id: u32) -> Option<H256> {
-        AttestationArtifact::get().and_then(|(id, hash)| (id == attestation_id).then_some(hash))
+        AttestationArtifact::get()
+            .into_iter()
+            .chain(RecoveryAttestationArtifact::get())
+            .find_map(|(id, hash)| (id == attestation_id).then_some(hash))
     }
     fn present_unrevoked_unchallenged(_attestation_id: u32) -> bool {
         AttestationPresent::get()
     }
     fn has_quorum(_pid: ProposalId, artifact_hash: H256) -> bool {
         AttestationQuorum::get()
-            && AttestationArtifact::get().is_some_and(|(_, hash)| hash == artifact_hash)
+            && AttestationArtifact::get()
+                .into_iter()
+                .chain(RecoveryAttestationArtifact::get())
+                .any(|(_, hash)| hash == artifact_hash)
     }
 }
 
@@ -572,6 +636,9 @@ impl pallet_origins::SafetyClassifier for MockClassifier {
             RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { .. }) => {
                 FilterCall::Leaf(pallet_origins::CallDomain::InternalRoot)
             }
+            RuntimeCall::ExecutionGuard(Call::commit_recovery_image { .. }) => {
+                FilterCall::Leaf(pallet_origins::CallDomain::Code)
+            }
             RuntimeCall::ExecutionGuard(_) => FilterCall::Leaf(pallet_origins::CallDomain::Public),
             _ => FilterCall::Leaf(pallet_origins::CallDomain::Nobody),
         }
@@ -688,6 +755,41 @@ impl BatchDispatcher<RuntimeCall> for TestDispatcher {
         }
     }
 
+    fn recovery_image_descriptor(call: &RuntimeCall) -> Option<RecoveryImageDescriptor> {
+        match call {
+            RuntimeCall::ExecutionGuard(Call::commit_recovery_image {
+                hash,
+                len,
+                target_spec_version,
+                attestation_id,
+            }) => Some(RecoveryImageDescriptor {
+                hash: *hash,
+                len: *len,
+                target_spec_version: *target_spec_version,
+                attestation_id: *attestation_id,
+            }),
+            _ => None,
+        }
+    }
+
+    fn phase_four_plan(class: ProposalClass, calls: &[RuntimeCall]) -> Option<PhaseFourPlan> {
+        (matches!(class, ProposalClass::Code | ProposalClass::Meta)
+            && calls
+                .iter()
+                .filter(|call| Self::authorize_upgrade_hash(call).is_some())
+                .count()
+                == 1
+            && calls
+                .iter()
+                .filter(|call| Self::recovery_image_descriptor(call).is_some())
+                .count()
+                == 1)
+            .then_some(PhaseFourPlan {
+                tvl_cap: 1,
+                deposit_cap: 1,
+            })
+    }
+
     fn dispatch_with_class_origin(
         call: RuntimeCall,
         class: ProposalClass,
@@ -727,7 +829,14 @@ impl BatchDispatcher<RuntimeCall> for TestDispatcher {
             .map_err(|error| error.error)
     }
 
-    fn observed_runtime_version(_code: &[u8]) -> Option<RuntimeVersionConstraint> {
+    fn observed_runtime_version(code: &[u8]) -> Option<RuntimeVersionConstraint> {
+        let code_hash = sp_io::hashing::blake2_256(code);
+        if let Some((_, version)) = ObservedArtifactVersions::get()
+            .into_iter()
+            .find(|(hash, _)| *hash == code_hash)
+        {
+            return Some(version);
+        }
         let spec_version = ObservedSpecVersion::get()?;
         let spec_name = PrimitiveBoundedVec::try_from(ObservedSpecName::get()).ok()?;
         Some(RuntimeVersionConstraint {
@@ -773,6 +882,25 @@ fn benchmark_enqueue(
 ) -> H256 {
     let (payload_hash, payload_len) = put_preimage(&calls);
     commit_payload(pid, payload_hash);
+    let primary_hash = calls
+        .iter()
+        .find_map(TestDispatcher::authorize_upgrade_hash);
+    let recovery = calls
+        .iter()
+        .find_map(TestDispatcher::recovery_image_descriptor);
+    if let (Some(primary_hash), Some(descriptor), Some(version_constraint)) =
+        (primary_hash, recovery, CurrentSpecName::<Test>::get())
+    {
+        QualifiedRecoveryImages::<Test>::insert(
+            pid,
+            QualifiedRecoveryImage {
+                payload_hash,
+                primary_hash,
+                version_constraint,
+                descriptor,
+            },
+        );
+    }
     let mut item = queued_item(pid, class, payload_hash, payload_len, domains);
     item.meters_declared = benchmark_meters(pid);
     item.attestation_id = attestation_id;
@@ -860,13 +988,22 @@ fn benchmark_fill_ratifications() {
 
 #[cfg(feature = "runtime-benchmarks")]
 fn benchmark_execute_calls(artifact: H256, call_count: u32) -> Vec<RuntimeCall> {
-    let mut calls = vec![authorize_call(artifact)];
-    calls.extend((1..call_count).map(|index| {
+    let descriptor = benchmark_recovery_descriptor(1, artifact);
+    let mut calls = vec![
+        authorize_call(artifact),
+        RuntimeCall::ExecutionGuard(Call::commit_recovery_image {
+            hash: descriptor.hash,
+            len: descriptor.len,
+            target_spec_version: descriptor.target_spec_version,
+            attestation_id: descriptor.attestation_id,
+        }),
+    ];
+    calls.extend((2..call_count).map(|index| {
         let mut remark = vec![index as u8; 4_000];
         remark[0] = 0xb5;
         RuntimeCall::System(frame_system::Call::remark { remark })
     }));
-    if call_count > 1 {
+    if call_count > 2 {
         let target = MAX_PAYLOAD_BYTES as usize;
         loop {
             let encoded_len = calls.encode().len();
@@ -897,19 +1034,53 @@ fn benchmark_execute_calls(artifact: H256, call_count: u32) -> Vec<RuntimeCall> 
 }
 
 #[cfg(feature = "runtime-benchmarks")]
+fn benchmark_recovery_descriptor(pid: ProposalId, primary_hash: H256) -> RecoveryImageDescriptor {
+    let bytes = vec![0x52; 512];
+    let hash = hash(&bytes);
+    PreimageData::mutate(|items| items.push((hash, bytes)));
+    RecoveryAttestationArtifact::set(Some((8, hash)));
+    let current = CurrentSpecName::<Test>::get().unwrap_or_else(|| spec(1));
+    let target_spec_version = current.spec_version.saturating_add(2);
+    ObservedArtifactVersions::mutate(|versions| {
+        versions.push((
+            hash,
+            RuntimeVersionConstraint {
+                spec_name: current.spec_name,
+                spec_version: target_spec_version,
+            },
+        ));
+    });
+    let _ = pid;
+    let _ = primary_hash;
+    RecoveryImageDescriptor {
+        hash,
+        len: 512,
+        target_spec_version,
+        attestation_id: 8,
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
 impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
     fn ratify_origin() -> RuntimeOrigin {
         RuntimeOrigin::from(pallet_origins::Origin::ConstitutionalValues)
+    }
+    fn recovery_commit_origin() -> RuntimeOrigin {
+        RuntimeOrigin::from(pallet_origins::Origin::FutarchyCode)
+    }
+    fn phase_four_origin() -> RuntimeOrigin {
+        RuntimeOrigin::root()
     }
     fn prime_ratify(pid: ProposalId, referendum_index: u32) {
         let code = b"benchmark-ratify";
         let artifact = hash(code);
         AttestationArtifact::set(Some((7, artifact)));
+        let _ = benchmark_recovery_descriptor(pid, artifact);
         benchmark_enqueue(
             pid,
             ProposalClass::Code,
-            vec![authorize_call(artifact)],
-            vec![CallDomain::InternalRootAuthorizeUpgrade],
+            benchmark_execute_calls(artifact, 2),
+            vec![CallDomain::InternalRootAuthorizeUpgrade, CallDomain::Code],
             Some(7),
             Some(referendum_index),
         );
@@ -920,11 +1091,11 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
     fn prime_execute(pid: ProposalId, calls: u32) {
         let artifact = [0x42; 32];
         AttestationArtifact::set(Some((7, artifact)));
-        let domains = if calls > 1 {
-            vec![CallDomain::Public, CallDomain::InternalRootAuthorizeUpgrade]
-        } else {
-            vec![CallDomain::InternalRootAuthorizeUpgrade]
-        };
+        let _ = benchmark_recovery_descriptor(pid, artifact);
+        let mut domains = vec![CallDomain::InternalRootAuthorizeUpgrade, CallDomain::Code];
+        if calls > 2 {
+            domains.push(CallDomain::Public);
+        }
         System::set_block_number(
             u64::from(CodeSpacing::get()).saturating_mul(MAX_EXECUTION_RECORDS as u64 + 1),
         );
@@ -946,6 +1117,98 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         benchmark_fill_records();
         run_to_maturity(pid);
         benchmark_fill_upgrade_history(System::block_number().saturated_into());
+    }
+    fn prime_recovery_commit(pid: ProposalId) -> crate::RecoveryImageDescriptor {
+        let descriptor = crate::RecoveryImageDescriptor {
+            hash: [0x52; 32],
+            len: 512,
+            target_spec_version: 3,
+            attestation_id: 8,
+        };
+        RecoveryAttestationArtifact::set(Some((descriptor.attestation_id, descriptor.hash)));
+        AttestationQuorum::set(true);
+        let _ = pid;
+        descriptor
+    }
+    fn prime_recovery_qualification(pid: ProposalId, bytes: u32) {
+        let primary_hash = [0x42; 32];
+        AttestationArtifact::set(Some((7, primary_hash)));
+        let mut code = vec![0x52; bytes as usize];
+        if let Some(first) = code.first_mut() {
+            *first = 0x52;
+        }
+        let recovery_hash = hash(&code);
+        PreimageData::mutate(|items| items.push((recovery_hash, code)));
+        RecoveryAttestationArtifact::set(Some((8, recovery_hash)));
+        let current = CurrentSpecName::<Test>::get().unwrap_or_else(|| spec(1));
+        let target_spec_version = current.spec_version.saturating_add(2);
+        ObservedArtifactVersions::mutate(|versions| {
+            versions.push((
+                recovery_hash,
+                RuntimeVersionConstraint {
+                    spec_name: current.spec_name,
+                    spec_version: target_spec_version,
+                },
+            ));
+        });
+        let mut calls = vec![
+            authorize_call(primary_hash),
+            RuntimeCall::ExecutionGuard(Call::commit_recovery_image {
+                hash: recovery_hash,
+                len: bytes,
+                target_spec_version,
+                attestation_id: 8,
+            }),
+            RuntimeCall::System(frame_system::Call::remark { remark: Vec::new() }),
+        ];
+        loop {
+            let encoded_len = calls.encode().len();
+            if encoded_len == MAX_PAYLOAD_BYTES as usize {
+                break;
+            }
+            let RuntimeCall::System(frame_system::Call::remark { remark }) =
+                calls.last_mut().expect("benchmark qualifier has padding")
+            else {
+                unreachable!("benchmark qualifier padding call changed")
+            };
+            if encoded_len < MAX_PAYLOAD_BYTES as usize {
+                remark.resize(
+                    remark
+                        .len()
+                        .saturating_add(MAX_PAYLOAD_BYTES as usize - encoded_len),
+                    0xff,
+                );
+            } else {
+                remark.truncate(
+                    remark
+                        .len()
+                        .saturating_sub(encoded_len - MAX_PAYLOAD_BYTES as usize),
+                );
+            }
+        }
+        let (payload_hash, _) = put_preimage(&calls);
+        commit_payload(pid, payload_hash);
+    }
+    fn prime_phase_four(pid: ProposalId) {
+        let artifact = [0x42; 32];
+        AttestationArtifact::set(Some((7, artifact)));
+        let _ = benchmark_recovery_descriptor(pid, artifact);
+        ExactPhaseThree::set(true);
+        let _payload_hash = benchmark_enqueue(
+            pid,
+            ProposalClass::Meta,
+            benchmark_execute_calls(artifact, 2),
+            vec![CallDomain::InternalRootAuthorizeUpgrade, CallDomain::Code],
+            Some(7),
+            Some(pid as u32),
+        );
+        ExecutionGuard::ratify(
+            RuntimeOrigin::from(pallet_origins::Origin::ConstitutionalValues),
+            pid,
+            pid as u32,
+        )
+        .expect("benchmark Phase-4 queue ratification must succeed");
+        run_to_maturity(pid);
     }
     fn prime_failed(pid: ProposalId) {
         benchmark_enqueue(
@@ -972,11 +1235,12 @@ impl BenchmarkHelper<RuntimeOrigin> for TestBenchmarkHelper {
         code.resize(bytes as usize, 0);
         let hash = hash(&code);
         AttestationArtifact::set(Some((7, hash)));
+        let _ = benchmark_recovery_descriptor(1, hash);
         benchmark_enqueue(
             1,
             ProposalClass::Code,
-            vec![authorize_call(hash)],
-            vec![CallDomain::InternalRootAuthorizeUpgrade],
+            benchmark_execute_calls(hash, 2),
+            vec![CallDomain::InternalRootAuthorizeUpgrade, CallDomain::Code],
             Some(7),
             Some(9),
         );
@@ -1019,12 +1283,17 @@ impl pallet_execution_guard::Config for Test {
     type UpgradeSchedule = TestUpgradeSchedule;
     type MigrationStatus = TestMigrationStatus;
     type Preimages = TestPreimages;
+    type RecoveryImages = TestPreimages;
     type ReleaseChannel = TestReleaseChannel;
     type RatifyOrigin = pallet_origins::EnsureConstitutionalValues;
+    type RecoveryCommitOrigin =
+        EitherOfDiverse<pallet_origins::EnsureFutarchyCode, pallet_origins::EnsureFutarchyMeta>;
+    type PhaseFourBridgeOrigin = frame_system::EnsureRoot<AccountId32>;
+    type PhaseState = TestPhaseState;
     type Dispatcher = TestDispatcher;
     type KeeperRebate = TestKeeperRebate;
     type PendingOutflowSync = TestPendingOutflowSync;
-    type MaxRuntimeCodeBytes = frame_support::traits::ConstU32<2_097_152>;
+    type MaxRuntimeCodeBytes = frame_support::traits::ConstU32<4_194_304>;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;
@@ -1035,11 +1304,13 @@ struct ReadRuntimeVersion;
 impl sp_core::traits::ReadRuntimeVersion for ReadRuntimeVersion {
     fn read_runtime_version(
         &self,
-        _wasm_code: &[u8],
+        wasm_code: &[u8],
         _ext: &mut dyn sp_core::traits::Externalities,
     ) -> Result<Vec<u8>, String> {
         let mut version = <Test as frame_system::Config>::Version::get();
-        version.spec_version = ObservedSpecVersion::get().unwrap_or_default();
+        version.spec_version = TestDispatcher::observed_runtime_version(wasm_code)
+            .map(|observed| observed.spec_version)
+            .unwrap_or_default();
         Ok(version.encode())
     }
 }
@@ -1095,8 +1366,11 @@ pub fn reset_statics() {
     EpochPayloads::set(Vec::new());
     PreimageData::set(Vec::new());
     PreimageFetchRequests::set(Vec::new());
+    RecoveryPins::set(Vec::new());
+    PhaseFourPlanValid::set(true);
     Unpinned::set(Vec::new());
     AttestationArtifact::set(None);
+    RecoveryAttestationArtifact::set(None);
     AttestationPresent::set(true);
     AttestationQuorum::set(true);
     GuardianHeld::set(Vec::new());
@@ -1108,9 +1382,12 @@ pub fn reset_statics() {
     CodeSpacing::set(20);
     AuthorizeCapabilityEnabled::set(true);
     UpgradeSchedulingPerformed::set(false);
+    ExactPhaseThree::set(false);
+    ExactPhaseFour::set(false);
     ReleaseRefuses::set(false);
     ObservedSpecVersion::set(Some(2));
     ObservedSpecName::set(b"test".to_vec());
+    ObservedArtifactVersions::set(Vec::new());
     MigrationCursorExists::set(false);
     UpgradeDispatchOrigins::set(Vec::new());
     RecordKeeperRebates::set(false);

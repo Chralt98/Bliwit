@@ -1,6 +1,6 @@
 use alloc::{boxed::Box, vec, vec::Vec};
 use frame_support::{
-    traits::{ConstU32, Contains, IsSubType, UnfilteredDispatchable},
+    traits::{ConstU32, Contains, Get, IsSubType, UnfilteredDispatchable},
     BoundedVec,
 };
 use futarchy_primitives::{kernel, ProposalClass, ResourceId, RuntimeVersionConstraint, H256};
@@ -127,9 +127,10 @@ fn derive_resource_inner(
             discriminator.extend(record.capability.encode());
             keyed_resource(0x02, &discriminator)
         }
-        RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
-            singleton_resource(0x03)
-        }
+        RuntimeCall::System(frame_system::Call::authorize_upgrade { .. })
+        | RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::commit_recovery_image {
+            ..
+        }) => singleton_resource(0x03),
         RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::spend { dest, .. }) => {
             keyed_resource(0x07, &dest.encode())
         }
@@ -462,6 +463,7 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_migrations::Call::clear_historic { .. }
             | pallet_migrations::Call::__Ignore(_, _) => denied(),
         },
+        #[cfg(feature = "bootstrap")]
         RuntimeCall::Sudo(call) => match call {
             // `sudo`/`sudo_unchecked_weight` dispatch the inner call as Root.
             // Root satisfies no custom `EnsureOrigin`, no protocol-account
@@ -754,7 +756,10 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             pallet_execution_guard::Call::execute { .. }
             | pallet_execution_guard::Call::apply_authorized_upgrade { .. }
             | pallet_execution_guard::Call::expire_failed_execution { .. }
-            | pallet_execution_guard::Call::reject_stale { .. } => leaf(CallDomain::Public),
+            | pallet_execution_guard::Call::reject_stale { .. }
+            | pallet_execution_guard::Call::qualify_recovery_image { .. }
+            | pallet_execution_guard::Call::authorize_phase_four { .. } => leaf(CallDomain::Public),
+            pallet_execution_guard::Call::commit_recovery_image { .. } => leaf(CallDomain::Code),
             pallet_execution_guard::Call::ratify { .. } => leaf(CallDomain::ConstitutionalValues),
             pallet_execution_guard::Call::__Ignore(_, _) => denied(),
         },
@@ -917,11 +922,101 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
         }
     }
 
+    fn recovery_image_descriptor(
+        call: &RuntimeCall,
+    ) -> Option<pallet_execution_guard::RecoveryImageDescriptor> {
+        match call {
+            RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::commit_recovery_image {
+                hash,
+                len,
+                target_spec_version,
+                attestation_id,
+            }) => Some(pallet_execution_guard::RecoveryImageDescriptor {
+                hash: *hash,
+                len: *len,
+                target_spec_version: *target_spec_version,
+                attestation_id: *attestation_id,
+            }),
+            _ => None,
+        }
+    }
+
+    fn phase_four_plan(
+        class: ProposalClass,
+        calls: &[RuntimeCall],
+    ) -> Option<pallet_execution_guard::PhaseFourPlan> {
+        if class != ProposalClass::Meta || calls.len() != 4 {
+            return None;
+        }
+        let tvl_key = pallet_constitution::key16(b"phase3.tvl_cap");
+        let deposit_key = pallet_constitution::key16(b"phase3.dep_cap");
+        let mut authorize = 0_u8;
+        let mut recovery = 0_u8;
+        let mut tvl_cap = None;
+        let mut deposit_cap = None;
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let now = frame_system::Pallet::<Runtime>::block_number();
+
+        for call in calls {
+            match call {
+                RuntimeCall::System(frame_system::Call::authorize_upgrade { .. }) => {
+                    authorize = authorize.saturating_add(1);
+                }
+                RuntimeCall::ExecutionGuard(
+                    pallet_execution_guard::Call::commit_recovery_image { .. },
+                ) => {
+                    recovery = recovery.saturating_add(1);
+                }
+                RuntimeCall::Constitution(pallet_constitution::Call::set_param { key, value })
+                    if *key == tvl_key || *key == deposit_key =>
+                {
+                    let record = pallet_constitution::Params::<Runtime>::get(key)?;
+                    let pallet_constitution::ParamValue::Balance(next) = value else {
+                        return None;
+                    };
+                    if *next <= record.value.as_u128()
+                        || record.checked_update(*value, epoch, now).is_err()
+                    {
+                        return None;
+                    }
+                    let slot = if *key == tvl_key {
+                        &mut tvl_cap
+                    } else {
+                        &mut deposit_cap
+                    };
+                    if slot.replace(*next).is_some() {
+                        return None;
+                    }
+                }
+                _ => return None,
+            }
+        }
+        if (authorize, recovery) != (1, 1) {
+            return None;
+        }
+        Some(pallet_execution_guard::PhaseFourPlan {
+            tvl_cap: tvl_cap?,
+            deposit_cap: deposit_cap?,
+        })
+    }
+
+    fn is_phase_four_cap_commitment(call: &RuntimeCall) -> bool {
+        matches!(
+            call,
+            RuntimeCall::Constitution(pallet_constitution::Call::set_param { key, .. })
+                if *key == pallet_constitution::key16(b"phase3.tvl_cap")
+                    || *key == pallet_constitution::key16(b"phase3.dep_cap")
+        )
+    }
+
     fn dispatch_with_class_origin(
         call: RuntimeCall,
         class: ProposalClass,
     ) -> frame_support::dispatch::DispatchResult {
-        if !Self::safety_filter(class, &call) {
+        let exact_phase_four_recovery_commit =
+            <crate::configs::RuntimePhaseState as pallet_execution_guard::PhaseState>::exact_phase_three()
+                && Self::recovery_image_descriptor(&call).is_some();
+        if !Self::safety_filter(class, &call) && !exact_phase_four_recovery_commit {
             return Err(DispatchError::Other("guard dispatch-time safety filter"));
         }
         match call {
@@ -963,24 +1058,27 @@ impl pallet_execution_guard::BatchDispatcher<RuntimeCall> for RuntimeDispatcher 
         }
         frame_support::storage::with_storage_layer(|| {
             crate::configs::parachain_upgrade_preflight(&code)?;
+            let candidate_hash = sp_io::hashing::blake2_256(&code);
 
-            // PB-MIGRATION's rollback is a forward remediation upgrade (09 §7).
-            // The stock frame-system preflight rejects every non-empty MBM
-            // cursor, so only an actually stuck cursor, or a still-live active
-            // stall backed by the migration failure/stall sources, is retired
-            // before scheduling. Unrelated alarms and resumed/healthy active
-            // work do not make a cursor disposable.
-            if crate::configs::retire_stuck_migration_cursor_for_remediation() {
-                // retired inside the helper
-            } else {
-                #[cfg(not(feature = "runtime-benchmarks"))]
-                System::can_set_code(&code, true).into_result()?;
-            }
+            // A normal extrinsic must never retire a migration cursor: doing
+            // so would reopen transactions against a half-migrated layout in
+            // the next block. Only the recovery-aware inherent hook owns that
+            // transactionally locked transition (SQ-309).
+            #[cfg(not(feature = "runtime-benchmarks"))]
+            System::can_set_code(&code, true).into_result()?;
 
             RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code })
                 .dispatch(RuntimeOrigin::none())
-                .map(|_| ())
-                .map_err(|error| error.error)
+                .map_err(|error| error.error)?;
+            if matches!(
+                pallet_execution_guard::PhaseFourBridge::<Runtime>::get(),
+                pallet_execution_guard::PhaseFourBridgeState::Pending { code_hash, .. }
+                    if code_hash == candidate_hash
+            ) {
+                crate::ExecutionGuard::phase_four_scheduled(candidate_hash)?;
+                crate::configs::PhaseTransitionLock::put(true);
+            }
+            Ok(())
         })
     }
 

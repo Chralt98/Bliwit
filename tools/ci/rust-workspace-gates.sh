@@ -48,6 +48,11 @@ cargo build -p bleavit-runtime --release --features runtime-benchmarks --locked
 cargo build -p bleavit-runtime --features try-runtime --locked
 cargo test -p bleavit-runtime --features try-runtime --locked
 
+# B16 deployable-image matrix. Every profile compiles and tests with Cargo
+# defaults disabled; recovery profiles additionally execute the runtime's
+# exact zero-multi-block-migrations proof under their own base feature.
+tools/ci/runtime-profile-gates.sh
+
 # Real no_std build gate: the frame-free math surface (futarchy-primitives,
 # futarchy-fixed) must compile without std (01 §5.2 / rule 9). A --no-default-features
 # `cargo test` executes zero tests and so silently passes; a build does not.

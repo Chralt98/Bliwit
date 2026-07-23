@@ -2,14 +2,17 @@
 //! B5 replaces the hand-seeded weights after assembled-runtime PoV calibration.
 
 use super::*;
-use crate::pallet::{Pallet, PendingUpgrade, Queue, Ratifications};
+use crate::pallet::{
+    ExecutingUpgrade, ExecutingUpgradeContext, Pallet, PendingUpgrade, Queue, QueuedRecoveryImages,
+    Ratifications, RecoveryImage,
+};
 use frame_benchmarking::v2::*;
 use frame_system::RawOrigin;
 
 // Both the production runtime and benchmark mock configure this exact maximum.
 // The 512-byte floor is the smallest sampled size that can hold the runtime's
 // encoded `runtime_version` custom section plus a padding section.
-const BENCHMARK_RUNTIME_CODE_BYTES_BOUND: u32 = 2_097_152;
+const BENCHMARK_RUNTIME_CODE_BYTES_BOUND: u32 = 4_194_304;
 
 #[benchmarks(where T: Config)]
 mod benches {
@@ -24,7 +27,7 @@ mod benches {
     #[benchmark(pov_mode = MaxEncodedLen {
         Preimage::PreimageFor: Measured
     })]
-    fn execute(c: Linear<1, MAX_CALLS_BOUND>) {
+    fn execute(c: Linear<2, MAX_CALLS_BOUND>) {
         let pid = 1;
         T::BenchmarkHelper::prime_execute(pid, c);
         let caller: T::AccountId = whitelisted_caller();
@@ -109,6 +112,59 @@ mod benches {
             futarchy_primitives::keeper::CrankClass::General,
         );
         assert!(!Queue::<T>::contains_key(pid));
+    }
+
+    #[benchmark]
+    fn commit_recovery_image() {
+        let pid = 1;
+        let descriptor = T::BenchmarkHelper::prime_recovery_commit(pid);
+        ExecutingUpgrade::<T>::put(ExecutingUpgradeContext {
+            pid,
+            primary_hash: [0x51; 32],
+            primary_target_spec_version: descriptor.target_spec_version.saturating_sub(1),
+        });
+        QueuedRecoveryImages::<T>::insert(pid, descriptor);
+        let origin = T::BenchmarkHelper::recovery_commit_origin();
+
+        #[extrinsic_call]
+        _(
+            origin as T::RuntimeOrigin,
+            descriptor.hash,
+            descriptor.len,
+            descriptor.target_spec_version,
+            descriptor.attestation_id,
+        );
+
+        assert!(RecoveryImage::<T>::get().is_some_and(|image| image.hash == descriptor.hash));
+    }
+
+    #[benchmark]
+    fn authorize_phase_four() {
+        let pid = 1;
+        T::BenchmarkHelper::prime_phase_four(pid);
+        let origin = T::BenchmarkHelper::phase_four_origin();
+
+        #[extrinsic_call]
+        _(origin as T::RuntimeOrigin, pid, [0x4f; 32]);
+
+        assert!(matches!(
+            crate::pallet::PhaseFourBridge::<T>::get(),
+            crate::pallet::PhaseFourBridgeState::Pending { .. }
+        ));
+    }
+
+    #[benchmark(pov_mode = Measured)]
+    fn qualify_recovery_image(b: Linear<512, BENCHMARK_RUNTIME_CODE_BYTES_BOUND>) {
+        let pid = 1;
+        T::BenchmarkHelper::prime_recovery_qualification(pid, b);
+        let caller: T::AccountId = whitelisted_caller();
+
+        #[extrinsic_call]
+        _(RawOrigin::Signed(caller), pid);
+
+        assert!(crate::pallet::QualifiedRecoveryImages::<T>::contains_key(
+            pid
+        ));
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);
