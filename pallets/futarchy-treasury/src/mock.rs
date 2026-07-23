@@ -73,6 +73,7 @@ parameter_types! {
     // Configurable stand-ins for the real KEEPER__/ORACLE__ USDC custody pots.
     pub static KeeperRebatePotBalance: u128 = 0;
     pub static OracleRebatePotBalance: u128 = 0;
+    pub static RewardsPayoutPotBalance: u128 = 0;
     pub CommunityPot: AccountId32 = AccountId32::new([77u8; 32]);
     pub static CommunityDistributionAmount: u128 = 250_000_000 * futarchy_treasury_core::VIT;
     pub static CommunityVestingDuration: u64 = 100;
@@ -274,6 +275,7 @@ impl RebatePayout<AccountId32> for RecordingRebatePayout {
         match line {
             PayoutLine::Keeper => KeeperRebatePotBalance::get(),
             PayoutLine::Oracle => OracleRebatePotBalance::get(),
+            PayoutLine::Rewards => RewardsPayoutPotBalance::get(),
         }
     }
 }
@@ -290,6 +292,7 @@ pub fn set_rebate_pot_balance(line: PayoutLine, balance: u128) {
     match line {
         PayoutLine::Keeper => KeeperRebatePotBalance::set(balance),
         PayoutLine::Oracle => OracleRebatePotBalance::set(balance),
+        PayoutLine::Rewards => RewardsPayoutPotBalance::set(balance),
     }
 }
 
@@ -394,6 +397,10 @@ pub fn new_test_ext_with(
         CoretimeQuoteTtl::set(100);
         TreasuryArmedValue::set(false);
         reset_rebate_payout();
+        // `reset_rebate_payout` preserves the funded rewards pot for tests
+        // that merely reset payout observations; each fresh externality still
+        // starts with an empty custody fixture.
+        RewardsPayoutPotBalance::set(0);
         reset_pot_funding();
         reset_insurance_sweeps();
         reset_community_vesting();

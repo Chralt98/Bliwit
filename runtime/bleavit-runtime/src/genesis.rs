@@ -100,7 +100,12 @@ pub fn usdc_genesis_endowments() -> Vec<(Location, AccountId, Balance)> {
             crate::configs::treasury_keeper_account(),
             amount,
         ),
-        (asset, crate::configs::treasury_oracle_account(), amount),
+        (
+            asset.clone(),
+            crate::configs::treasury_oracle_account(),
+            amount,
+        ),
+        (asset, crate::configs::treasury_rewards_account(), amount),
     ]
 }
 

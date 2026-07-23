@@ -54,6 +54,10 @@ fn funded_ext() -> sp_io::TestExternalities {
             BudgetLine::OpsCoretime,
             1_000_000 * USDC
         ));
+        // The setup funding is part of genesis-like fixture construction; keep
+        // custody balances, but clear the seam call log so each test observes
+        // only the funding it performs itself.
+        reset_pot_funding();
     });
     ext
 }
@@ -503,6 +507,7 @@ fn pot_backed_budget_lines_sync_exact_funding_to_custody() {
     funded_ext().execute_with(|| {
         let keeper_before = Treasury::line_balance(BudgetLine::Keeper);
         let oracle_before = Treasury::line_balance(BudgetLine::Oracle);
+        let rewards_before = Treasury::line_balance(BudgetLine::Rewards);
 
         assert_ok!(Treasury::fund_budget_line(
             to(),
@@ -514,12 +519,18 @@ fn pot_backed_budget_lines_sync_exact_funding_to_custody() {
             BudgetLine::Oracle,
             30 * USDC
         ));
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Rewards,
+            40 * USDC
+        ));
 
         assert_eq!(
             pot_funding_calls(),
             vec![
                 (PayoutLine::Keeper, 50 * USDC),
                 (PayoutLine::Oracle, 30 * USDC),
+                (PayoutLine::Rewards, 40 * USDC),
             ]
         );
         assert_eq!(
@@ -530,8 +541,13 @@ fn pot_backed_budget_lines_sync_exact_funding_to_custody() {
             Treasury::line_balance(BudgetLine::Oracle),
             oracle_before + 30 * USDC
         );
+        assert_eq!(
+            Treasury::line_balance(BudgetLine::Rewards),
+            rewards_before + 40 * USDC
+        );
         assert_eq!(KeeperRebatePotBalance::get(), 50 * USDC);
         assert_eq!(OracleRebatePotBalance::get(), 30 * USDC);
+        assert_eq!(RewardsPayoutPotBalance::get(), 2_000_000 * USDC + 40 * USDC);
         assert_ok!(crate::Pallet::<Test>::do_try_state());
     });
 }
@@ -562,7 +578,6 @@ fn non_pot_budget_lines_credit_without_custody_calls() {
         let cases = [
             (BudgetLine::Pol, 11 * USDC),
             (BudgetLine::OpsCoretime, 12 * USDC),
-            (BudgetLine::Rewards, 13 * USDC),
         ];
         let before = cases
             .iter()
@@ -825,6 +840,41 @@ fn keeper_and_oracle_rebates_pay_from_the_selected_lines() {
             ]
         );
         assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
+#[test]
+fn proposer_reward_pays_from_the_rewards_line_and_is_fail_soft() {
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_budget_line(
+            to(),
+            BudgetLine::Rewards,
+            100 * USDC
+        ));
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::Rewards, 100 * USDC);
+        let before_line = Treasury::treasury().line_balance(BudgetLine::Rewards);
+
+        assert!(crate::Pallet::<Test>::do_proposer_reward(
+            &acc(11),
+            25 * USDC
+        ));
+        assert_eq!(
+            Treasury::treasury().line_balance(BudgetLine::Rewards),
+            before_line - 25 * USDC
+        );
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(11), 25 * USDC, PayoutLine::Rewards)]
+        );
+
+        set_rebate_pot_balance(PayoutLine::Rewards, 0);
+        let before = Treasury::treasury();
+        assert!(!crate::Pallet::<Test>::do_proposer_reward(
+            &acc(11),
+            25 * USDC
+        ));
+        assert_eq!(Treasury::treasury(), before);
     });
 }
 

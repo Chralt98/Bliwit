@@ -3387,7 +3387,7 @@ fn genesis_endows_every_r4_protocol_account() {
 
     development_ext().execute_with(|| {
         let endowments = crate::genesis::usdc_genesis_endowments();
-        assert_eq!(endowments.len(), 10);
+        assert_eq!(endowments.len(), 11);
         let mut accounts = BTreeSet::new();
         for (asset, account, amount) in endowments {
             assert_eq!(asset, usdc_location());
@@ -3407,7 +3407,7 @@ fn genesis_usdc_issuance_is_exactly_the_r4_floor() {
     development_ext().execute_with(|| {
         assert_eq!(
             ForeignAssets::total_issuance(usdc_location()),
-            currency::USDC_CENT.saturating_mul(10),
+            currency::USDC_CENT.saturating_mul(11),
         );
     });
 }
@@ -3454,6 +3454,10 @@ fn r4_account_addresses_are_stable() {
         (
             "treasury ORACLE",
             "6d6f646c626c2f74727372794f5241434c455f5f000000000000000000000000",
+        ),
+        (
+            "treasury REWARDS",
+            "6d6f646c626c2f7472737279524557415244535f000000000000000000000000",
         ),
     ];
     let endowments = crate::genesis::usdc_genesis_endowments();

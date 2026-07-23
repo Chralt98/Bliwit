@@ -2142,6 +2142,11 @@ pub fn treasury_keeper_account() -> AccountId {
 pub fn treasury_oracle_account() -> AccountId {
     TreasuryPalletId::get().into_sub_account_truncating(*b"ORACLE__")
 }
+/// 08 §1.1 REWARDS USDC custody pot, kept separate from the ORACLE/KEEPER
+/// rebate pots so a crank budget cannot consume proposer rewards.
+pub fn treasury_rewards_account() -> AccountId {
+    TreasuryPalletId::get().into_sub_account_truncating(*b"REWARDS_")
+}
 
 pub struct EnsureMarketAccount;
 impl frame_support::traits::EnsureOrigin<RuntimeOrigin> for EnsureMarketAccount {
@@ -5093,6 +5098,7 @@ impl pallet_futarchy_treasury::RebatePayout<AccountId> for TreasuryRebatePayout 
         let source = match line {
             pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
             pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
+            pallet_futarchy_treasury::PayoutLine::Rewards => treasury_rewards_account(),
         };
         <ForeignAssets as Mutate<AccountId>>::transfer(
             usdc_location(),
@@ -5108,6 +5114,7 @@ impl pallet_futarchy_treasury::RebatePayout<AccountId> for TreasuryRebatePayout 
         let source = match line {
             pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
             pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
+            pallet_futarchy_treasury::PayoutLine::Rewards => treasury_rewards_account(),
         };
         <ForeignAssets as Inspect<AccountId>>::balance(usdc_location(), &source)
     }
@@ -5124,6 +5131,7 @@ impl pallet_futarchy_treasury::PotFunding<AccountId> for TreasuryPotFunding {
         let destination = match line {
             pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
             pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
+            pallet_futarchy_treasury::PayoutLine::Rewards => treasury_rewards_account(),
         };
         <ForeignAssets as Mutate<AccountId>>::transfer(
             usdc_location(),
@@ -5831,6 +5839,29 @@ impl pallet_attestor::Config for Runtime {
 
 // --- A8/A11 execution-guard production wiring ------------------------------
 
+/// Frozen execution-time proposer reward schedule (08 §1.1; 05 §2.1 T17).
+/// The per-class caps are live constitution records; TREASURY/CODE use the
+/// claimant-adverse floor of `0.05% × Ask`, capped by their class record.
+fn proposer_reward_for(proposal: &futarchy_primitives::Proposal<AccountId>) -> Option<Balance> {
+    let (key, ask_scaled) = match proposal.class {
+        futarchy_primitives::ProposalClass::Param => (b"trs.reward.param".as_slice(), false),
+        futarchy_primitives::ProposalClass::Treasury => (b"trs.reward.trs".as_slice(), true),
+        futarchy_primitives::ProposalClass::Code => (b"trs.reward.code".as_slice(), true),
+        futarchy_primitives::ProposalClass::Meta => (b"trs.reward.meta".as_slice(), false),
+        futarchy_primitives::ProposalClass::Constitutional => return None,
+    };
+    let cap = balance_param(key);
+    if !ask_scaled {
+        return (cap > 0).then_some(cap);
+    }
+    proposal
+        .ask
+        .checked_mul(5)
+        .and_then(|value| value.checked_div(10_000))
+        .map(|value| value.min(cap))
+        .filter(|value| *value > 0)
+}
+
 pub struct RuntimeEpochHandoff;
 impl pallet_execution_guard::EpochHandoff for RuntimeEpochHandoff {
     fn payload_hash(pid: futarchy_primitives::ProposalId) -> Option<futarchy_primitives::H256> {
@@ -5870,7 +5901,21 @@ impl pallet_execution_guard::EpochHandoff for RuntimeEpochHandoff {
         .map(|version| (proposal.payload_hash, version))
     }
     fn mark_executed(pid: futarchy_primitives::ProposalId) -> DispatchResult {
-        Epoch::mark_executed(RuntimeOrigin::signed(execution_guard_account()), pid)
+        let proposal = pallet_epoch::Proposals::<Runtime>::get(pid);
+        Epoch::mark_executed(RuntimeOrigin::signed(execution_guard_account()), pid)?;
+        if let Some(proposal) = proposal {
+            if let Some(reward) = proposer_reward_for(&proposal) {
+                // Reward custody is deliberately fail-soft. The execution and
+                // its measurement transition are already valid; an unfunded
+                // REWARDS line must not turn them into an unbacked obligation
+                // or make the guard retry a successful payload forever.
+                let _ = pallet_futarchy_treasury::Pallet::<Runtime>::do_proposer_reward(
+                    &proposal.proposer,
+                    reward,
+                );
+            }
+        }
+        Ok(())
     }
     fn mark_failed_executed(pid: futarchy_primitives::ProposalId) -> DispatchResult {
         Epoch::mark_failed_executed(RuntimeOrigin::signed(execution_guard_account()), pid)
@@ -7128,6 +7173,7 @@ pub(crate) fn prime_keeper_rebate_worst_case() {
         for line in [
             pallet_futarchy_treasury::BudgetLine::Keeper,
             pallet_futarchy_treasury::BudgetLine::Oracle,
+            pallet_futarchy_treasury::BudgetLine::Rewards,
         ] {
             if let Some((_, balance)) = state.lines.iter_mut().find(|(stored, _)| *stored == line) {
                 *balance = BENCHMARK_REBATE_LINE_BALANCE;
@@ -7142,7 +7188,11 @@ pub(crate) fn prime_keeper_rebate_worst_case() {
     });
 
     benchmark_ensure_usdc();
-    for pot in [treasury_keeper_account(), treasury_oracle_account()] {
+    for pot in [
+        treasury_keeper_account(),
+        treasury_oracle_account(),
+        treasury_rewards_account(),
+    ] {
         let balance = <ForeignAssets as Inspect<AccountId>>::balance(usdc_location(), &pot);
         if balance < BENCHMARK_REBATE_LINE_BALANCE {
             let _ = <ForeignAssets as Mutate<AccountId>>::mint_into(

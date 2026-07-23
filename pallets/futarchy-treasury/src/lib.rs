@@ -176,7 +176,10 @@ pub trait TreasuryParams {
     fn coretime_quote_ttl() -> u32;
 }
 
-/// Custody account from which a rebate is paid.
+/// Custody account from which a keeper/oracle rebate or proposer reward is
+/// paid. The REWARDS variant shares the fail-soft adapter because execution
+/// must never create an unbacked claimant when its line or custody pot is
+/// absent.
 #[derive(
     Clone,
     Copy,
@@ -192,6 +195,7 @@ pub trait TreasuryParams {
 pub enum PayoutLine {
     Keeper,
     Oracle,
+    Rewards,
 }
 
 /// Narrow runtime custody seam for real-USDC keeper payouts.
@@ -790,6 +794,7 @@ pub mod pallet {
                 let payout_line = match line {
                     BudgetLine::Keeper => Some(PayoutLine::Keeper),
                     BudgetLine::Oracle => Some(PayoutLine::Oracle),
+                    BudgetLine::Rewards => Some(PayoutLine::Rewards),
                     _ => None,
                 };
                 if let Some(payout_line) = payout_line {
@@ -1258,6 +1263,35 @@ pub mod pallet {
             }
         }
 
+        /// Pay one execution-time proposer reward from the dedicated REWARDS
+        /// line (08 §1.1; 05 §2.1 T17). This is deliberately fail-soft: a
+        /// missing/underfunded line or custody pot leaves both accounting and
+        /// custody unchanged, while the already-successful execution remains
+        /// successful and creates no unbacked reward claim.
+        pub fn do_proposer_reward(who: &T::AccountId, amount: Balance) -> bool {
+            if amount == 0 {
+                return true;
+            }
+            let mut t = Self::load();
+            if t.proposer_reward(Self::to_core_account(who.clone()), amount)
+                .is_err()
+            {
+                return false;
+            }
+            let events = core::mem::take(&mut t.events);
+            let Ok(state) = Self::checked_state(&t) else {
+                return false;
+            };
+            if T::RebatePayout::pay(who, amount, PayoutLine::Rewards).is_err() {
+                return false;
+            }
+            State::<T>::put(state);
+            for event in events {
+                Self::deposit_core_event(event);
+            }
+            true
+        }
+
         /// 08 §1.2/§8.2: sync the live-book POL subsidy commitments `nav()` nets
         /// as obligations. Runtime-internal — the POL/market lifecycle (A3) owns
         /// the set; B1a wires this so NAV reflects live commitments. The
@@ -1635,6 +1669,13 @@ pub mod pallet {
             {
                 return Err(TryRuntimeError::Other(
                     "treasury: ORACLE line exceeds real USDC custody pot",
+                ));
+            }
+            if t.line_balance(BudgetLine::Rewards)
+                > T::RebatePayout::pot_balance(PayoutLine::Rewards)
+            {
+                return Err(TryRuntimeError::Other(
+                    "treasury: REWARDS line exceeds real USDC custody pot",
                 ));
             }
             Ok(())

@@ -602,6 +602,26 @@ impl Treasury {
         rebate
     }
 
+    /// Pay one proposer reward from the dedicated REWARDS line (08 §1.1;
+    /// 05 §2.1 T17). Rewards are execution-time obligations, not ordinary
+    /// discretionary grants: they bypass the stream and rolling outflow
+    /// meters, but still require an already-funded bounded line. The pallet
+    /// adapter treats a missing or underfunded line as a strict no-op, so an
+    /// execution can never create an unbacked claimant.
+    pub fn proposer_reward(&mut self, dest: AccountId, amount: Balance) -> Result<(), Error> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let idx = self.debitable_line(BudgetLine::Rewards, amount)?;
+        self.lines[idx].1 -= amount;
+        self.events.push(Event::Spent {
+            line: BudgetLine::Rewards,
+            dest,
+            amount,
+        });
+        Ok(())
+    }
+
     pub fn fund_budget_line(
         &mut self,
         origin: Origin,
@@ -1564,6 +1584,25 @@ mod tests {
         assert_eq!(t.oracle_line_rebate(3), 0);
         assert_eq!(t.keeper_meter, KeeperMeter::default());
         assert!(t.events.is_empty());
+    }
+
+    #[test]
+    fn proposer_reward_debits_only_the_funded_rewards_line() {
+        let mut t = Treasury::default();
+        t.lines.push((BudgetLine::Rewards, 10));
+        assert_eq!(t.proposer_reward(acct(9), 6), Ok(()));
+        assert_eq!(t.line_balance(BudgetLine::Rewards), 4);
+        assert_eq!(
+            t.events,
+            vec![Event::Spent {
+                line: BudgetLine::Rewards,
+                dest: acct(9),
+                amount: 6,
+            }]
+        );
+        let before = t.clone();
+        assert_eq!(t.proposer_reward(acct(9), 5), Err(Error::InsufficientFunds));
+        assert_eq!(t, before);
     }
 
     #[test]
