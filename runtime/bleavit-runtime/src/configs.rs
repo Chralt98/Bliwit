@@ -1651,11 +1651,25 @@ impl pallet_constitution::PhaseArmingGate for TreasuryPhaseArmingGate {
     }
 }
 
+/// Temporary SQ-303 fail-closed screen. The eventual committed re-derivation
+/// artifact will replace this conservative unsafe-direction brake.
+pub struct RuntimeBudgetDerivationGuard;
+impl pallet_constitution::BudgetDerivationGuard for RuntimeBudgetDerivationGuard {
+    fn permits(
+        key: futarchy_primitives::ParamKey,
+        current: pallet_constitution::ParamValue,
+        next: pallet_constitution::ParamValue,
+    ) -> bool {
+        !pallet_constitution::rederive_budgets_required(key, current, next)
+    }
+}
+
 impl pallet_constitution::Config for Runtime {
     type GovernanceOrigin = ConstitutionGovernanceOrigin;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type WeightInfo = crate::weights::pallet_constitution::WeightInfo<Runtime>;
     type PhaseArmingGate = TreasuryPhaseArmingGate;
+    type BudgetDerivationGuard = RuntimeBudgetDerivationGuard;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }

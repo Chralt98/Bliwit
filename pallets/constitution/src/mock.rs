@@ -106,6 +106,7 @@ impl pallet_constitution::Config for Test {
     type CurrentEpoch = CurrentEpochValue;
     type WeightInfo = ();
     type PhaseArmingGate = TestPhaseArmingGate;
+    type BudgetDerivationGuard = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestBenchmarkHelper;
 }

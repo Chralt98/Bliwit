@@ -48,13 +48,14 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // (named, not glob — the pallet defines its own `Error`/storage aliases).
 pub use constitution_core::{
-    empty_release_channel, genesis_capabilities, genesis_meters, genesis_params, key16, Capability,
-    CapabilityRecord, ConstitutionOrigin, ConstitutionState, Error as CoreError, MaxDelta, Meter,
-    ParamClass, ParamRecord, ParamValue, PhaseFlags as PhaseFlagsValue,
-    ReleaseChannel as ReleaseChannelValue, CONTRACT_VERSION, MAX_CAPABILITIES, MAX_METERS,
-    MAX_PARAMS, META_MAX_COOLDOWN_EPOCHS, POL_BUDGET_EPOCH_DEFAULT_PPB, POL_B_DEFAULTS,
-    POL_GATE_B_DEFAULT, RELEASE_CHANNEL_FLAGS, RELEASE_CHANNEL_FLAG_URGENT_UPGRADE,
-    RELEASE_CHANNEL_LEN, RELEASE_CHANNEL_PENDING_AUTHORIZED_AT, RELEASE_CHANNEL_SPEC_VERSION,
+    empty_release_channel, genesis_capabilities, genesis_meters, genesis_params, key16,
+    rederive_budgets_required, Capability, CapabilityRecord, ConstitutionOrigin, ConstitutionState,
+    Error as CoreError, MaxDelta, Meter, ParamClass, ParamRecord, ParamValue,
+    PhaseFlags as PhaseFlagsValue, ReleaseChannel as ReleaseChannelValue, CONTRACT_VERSION,
+    MAX_CAPABILITIES, MAX_METERS, MAX_PARAMS, META_MAX_COOLDOWN_EPOCHS,
+    POL_BUDGET_EPOCH_DEFAULT_PPB, POL_B_DEFAULTS, POL_GATE_B_DEFAULT, RELEASE_CHANNEL_FLAGS,
+    RELEASE_CHANNEL_FLAG_URGENT_UPGRADE, RELEASE_CHANNEL_LEN,
+    RELEASE_CHANNEL_PENDING_AUTHORIZED_AT, RELEASE_CHANNEL_SPEC_VERSION,
     RELEASE_CHANNEL_STORAGE_KEY, RELEASE_CHANNEL_UPDATED_AT,
 };
 pub use futarchy_primitives::kernel;
@@ -82,6 +83,20 @@ pub const MAX_METERS_BOUND: u32 = MAX_METERS as u32;
 pub trait PhaseArmingGate {
     /// `Ok(())` iff `class` may be armed now. Implementations MUST NOT mutate.
     fn ensure_armable(class: ProposalClass) -> DispatchResult;
+}
+
+/// Temporary SQ-303 admission seam. The runtime binds the conservative
+/// re-derivation screen; pallet-only mocks keep the core/pallet differential
+/// focused on the registry semantics.
+pub trait BudgetDerivationGuard {
+    /// `true` permits the change after ordinary bounds/Δ/cooldown checks.
+    fn permits(key: futarchy_primitives::ParamKey, current: ParamValue, next: ParamValue) -> bool;
+}
+
+impl BudgetDerivationGuard for () {
+    fn permits(_: futarchy_primitives::ParamKey, _: ParamValue, _: ParamValue) -> bool {
+        true
+    }
 }
 
 /// Permissive default for mocks and for runtimes that have not bound the
@@ -149,6 +164,9 @@ pub mod pallet {
         /// is enabled (SQ-180). The runtime binds it to the treasury; mocks may
         /// use the permissive `()`.
         type PhaseArmingGate: PhaseArmingGate;
+
+        /// Temporary fail-closed guard for 13 §5 coupling changes (SQ-303).
+        type BudgetDerivationGuard: BudgetDerivationGuard;
 
         /// Origin construction for benchmarking (see [`BenchmarkHelper`]).
         #[cfg(feature = "runtime-benchmarks")]
@@ -267,6 +285,10 @@ pub mod pallet {
         /// `amend_registry` tried to move a kernel-bounded row's bounds
         /// (13 rule 7 — genesis-fixed).
         KernelBoundImmutable,
+        /// 13 §5's re-derivation artifact/verifier is not live yet; this
+        /// unsafe-direction timing/capacity/POL change is refused fail-closed
+        /// (SQ-303).
+        BudgetDerivationRequired,
         /// `amend_registry` violates the compile-time meta-bounds
         /// (13 rule 2/7: `min ≤ value ≤ max`, kind-consistent, cooldown ≤ 8).
         MetaBoundViolation,
@@ -333,6 +355,10 @@ pub mod pallet {
                     _ => return Err(Error::<T>::WrongType.into()),
                 }
             }
+            ensure!(
+                T::BudgetDerivationGuard::permits(key, record.value, value),
+                Error::<T>::BudgetDerivationRequired
+            );
             Params::<T>::insert(key, updated);
             Self::deposit_event(Event::ParamUpdated { key, value });
             Ok(())
@@ -831,6 +857,7 @@ pub mod pallet {
                 CoreError::ReservedPhaseFlag => Error::<T>::ReservedPhaseFlag.into(),
                 CoreError::FlagNotArmable => Error::<T>::FlagNotArmable.into(),
                 CoreError::KernelBoundImmutable => Error::<T>::KernelBoundImmutable.into(),
+                CoreError::BudgetDerivationRequired => Error::<T>::BudgetDerivationRequired.into(),
                 CoreError::MetaBoundViolation => Error::<T>::MetaBoundViolation.into(),
                 CoreError::BadReleaseSchema => Error::<T>::BadReleaseSchema.into(),
                 CoreError::TooManyParams => Error::<T>::TooManyParams.into(),

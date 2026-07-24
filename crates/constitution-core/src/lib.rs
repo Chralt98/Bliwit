@@ -945,6 +945,10 @@ pub enum Error {
     ReservedPhaseFlag,
     FlagNotArmable,
     KernelBoundImmutable,
+    /// The 13 §5 derived-budget artifact is not implemented yet. Until its
+    /// verifier lands, changes to the load-bearing timing/capacity/POL keys
+    /// are refused in the unsafe direction (SQ-303, G-1).
+    BudgetDerivationRequired,
     MetaBoundViolation,
     BadReleaseSchema,
     TooManyParams,
@@ -952,6 +956,40 @@ pub enum Error {
     TooManyCapabilities,
     BadOrigin,
     TryStateViolation,
+}
+
+/// Temporary SQ-303 screen for the keys whose values feed the bounded
+/// occupancy, POL-commitment or frozen NAV-floor derivations in 13 §5.
+///
+/// The durable artifact/pairing verifier is a later milestone. Accepting a
+/// change before that verifier exists would make the published floor and PoV
+/// arithmetic silently stale, so this helper rejects every timing/capacity
+/// change and only the unsafe direction for the POL keys. Safe-direction
+/// changes remain available; all accepted changes still use the normal
+/// `Params` bounds, delta and cooldown checks.
+pub fn rederive_budgets_required(key: ParamKey, current: ParamValue, next: ParamValue) -> bool {
+    let changed = current.as_u128() != next.as_u128();
+    if !changed {
+        return false;
+    }
+    let increasing = next.as_u128() > current.as_u128();
+    let decreasing = next.as_u128() < current.as_u128();
+    let timing_or_capacity = key == key16(b"epoch.slots")
+        || key == key16(b"mkt.obs_interval")
+        || key == key16(b"dec.window")
+        || key == key16(b"epoch.length")
+        || key == key16(b"ledger.archive");
+    if timing_or_capacity {
+        return true;
+    }
+    let pol_budget = key == key16(b"pol.budget_epoch");
+    let pol_floor = key == key16(b"pol.b_gate")
+        || key == key16(b"pol.b_baseline")
+        || key == key16(b"pol.b.param")
+        || key == key16(b"pol.b.trs")
+        || key == key16(b"pol.b.code")
+        || key == key16(b"pol.b.meta");
+    (pol_budget && decreasing) || (pol_floor && increasing)
 }
 
 macro_rules! ensure {
@@ -2620,15 +2658,53 @@ mod tests {
                 10,
             )
             .unwrap();
+        state
+            .dispatch_set_param(
+                ConstitutionOrigin::FutarchyParam,
+                key16(b"mkt.fee"),
+                ParamValue::Perbill(4_000_000),
+                1,
+                10,
+            )
+            .unwrap();
         assert_eq!(
             state
                 .params
                 .iter()
-                .find(|r| r.key == key16(b"mkt.obs_interval"))
+                .find(|r| r.key == key16(b"mkt.fee"))
                 .unwrap()
                 .value,
-            ParamValue::U32(12)
+            ParamValue::Perbill(4_000_000)
         );
+    }
+
+    #[test]
+    fn sq_303_screen_rejects_only_unsafe_budget_directions() {
+        assert!(rederive_budgets_required(
+            key16(b"epoch.length"),
+            ParamValue::U32(302_400),
+            ParamValue::U32(302_401)
+        ));
+        assert!(rederive_budgets_required(
+            key16(b"pol.budget_epoch"),
+            ParamValue::Perbill(7_500_000),
+            ParamValue::Perbill(7_499_999)
+        ));
+        assert!(rederive_budgets_required(
+            key16(b"pol.b.code"),
+            ParamValue::Balance(60_000 * futarchy_primitives::currency::USDC),
+            ParamValue::Balance(60_001 * futarchy_primitives::currency::USDC)
+        ));
+        assert!(!rederive_budgets_required(
+            key16(b"pol.b.code"),
+            ParamValue::Balance(60_000 * futarchy_primitives::currency::USDC),
+            ParamValue::Balance(59_999 * futarchy_primitives::currency::USDC)
+        ));
+        assert!(!rederive_budgets_required(
+            key16(b"mkt.fee"),
+            ParamValue::Perbill(30_000_000),
+            ParamValue::Perbill(31_000_000)
+        ));
     }
 
     #[test]

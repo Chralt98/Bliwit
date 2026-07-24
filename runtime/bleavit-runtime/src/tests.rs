@@ -14370,6 +14370,51 @@ fn live_param_adapters_resolve_their_registry_keys() {
 }
 
 #[test]
+fn sq_303_rederivation_screen_is_fail_closed_in_production() {
+    development_ext().execute_with(|| {
+        let epoch_key = pallet_constitution::key16(b"epoch.length");
+        let current_epoch_length = match pallet_constitution::Params::<Runtime>::get(epoch_key) {
+            Some(record) => match record.value {
+                pallet_constitution::ParamValue::U32(value) => value,
+                other => panic!("epoch.length has unexpected value: {other:?}"),
+            },
+            None => panic!("13 §1 epoch.length row is missing"),
+        };
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = clock.index.saturating_add(2)
+        });
+        assert_noop!(
+            Constitution::set_param(
+                pallet_origins::Origin::FutarchyMeta.into(),
+                epoch_key,
+                pallet_constitution::ParamValue::U32(current_epoch_length + 1),
+            ),
+            pallet_constitution::Error::<Runtime>::BudgetDerivationRequired
+        );
+        assert_eq!(
+            pallet_constitution::Params::<Runtime>::get(epoch_key)
+                .expect("epoch.length row")
+                .value,
+            pallet_constitution::ParamValue::U32(current_epoch_length)
+        );
+
+        let pol_key = pallet_constitution::key16(b"pol.b.code");
+        let current_pol = match pallet_constitution::Params::<Runtime>::get(pol_key) {
+            Some(record) => match record.value {
+                pallet_constitution::ParamValue::Balance(value) => value,
+                other => panic!("pol.b.code has unexpected value: {other:?}"),
+            },
+            None => panic!("13 §1 pol.b.code row is missing"),
+        };
+        assert_ok!(Constitution::set_param(
+            pallet_origins::Origin::FutarchyTreasury.into(),
+            pol_key,
+            pallet_constitution::ParamValue::Balance(current_pol - 1),
+        ));
+    });
+}
+
+#[test]
 fn gate_v_min_is_a_live_bounded_param_not_a_hardwired_decision_floor_ratio() {
     use pallet_epoch::EpochParamsProvider;
 
