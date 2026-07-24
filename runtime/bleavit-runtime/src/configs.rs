@@ -2603,6 +2603,68 @@ pub(crate) fn decision_market_stats_for_view(
 }
 
 pub struct RuntimeMarketAccess;
+
+/// Runtime-owned Baseline carry predicate. A shared Baseline can serve
+/// multiple classes, so its sealed carry is admitted only when the strictest
+/// class-specific contest floor at this boundary grades the same window.
+pub struct RuntimeBaselineGrade;
+
+#[cfg_attr(feature = "runtime-benchmarks", allow(unreachable_code))]
+impl pallet_market::BaselineGrade for RuntimeBaselineGrade {
+    fn is_gradeable(
+        market: futarchy_primitives::MarketId,
+        end: BlockNumber,
+        window: BlockNumber,
+    ) -> bool {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            let _ = (market, end, window);
+            return true;
+        }
+        let Some(book) = pallet_market::Markets::<Runtime>::get(market) else {
+            return false;
+        };
+        if !matches!(
+            book.kind,
+            pallet_market::core_market::BookKind::Baseline { .. }
+        ) {
+            return false;
+        }
+        let params = <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+        let contest_floor = [
+            futarchy_primitives::ProposalClass::Param,
+            futarchy_primitives::ProposalClass::Treasury,
+            futarchy_primitives::ProposalClass::Code,
+            futarchy_primitives::ProposalClass::Meta,
+            futarchy_primitives::ProposalClass::Constitutional,
+        ]
+        .into_iter()
+        .filter_map(|class| {
+            contest_floor_for_grade(
+                market,
+                end,
+                pallet_epoch::BookRole::Baseline,
+                class,
+                &params,
+            )
+        })
+        .max();
+        let Some(contest_floor) = contest_floor else {
+            return false;
+        };
+        pallet_market::Pallet::<Runtime>::decision_grade_at(
+            market,
+            end,
+            window,
+            params.coverage_pct,
+            params.delta_max,
+            contest_floor,
+            balance_param(b"pol.b_baseline"),
+            true,
+        )
+    }
+}
+
 #[cfg_attr(feature = "runtime-benchmarks", allow(unreachable_code))]
 impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
     fn open_markets(
@@ -3391,6 +3453,16 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
         // is too late for an earlier decision in the next epoch; the market
         // snapshot is captured at the immutable seal boundary and retained
         // with BaselineMarketOf until reap.
+        // A cohort VOID is not a settled measurement (05 §5.3, §7(5)); its
+        // archived summary therefore invalidates the sealed snapshot as a
+        // carry source. Keep the absent-summary path for the pre-finalization
+        // next-epoch decision that SQ-88 explicitly supports.
+        if pallet_epoch::RecentCohortSummaries::<Runtime>::get()
+            .into_iter()
+            .any(|summary| summary.epoch == previous && summary.voided)
+        {
+            return None;
+        }
         pallet_market::Pallet::<Runtime>::sealed_baseline_twap(previous)
     }
 }
@@ -3453,6 +3525,7 @@ impl pallet_market::Config for Runtime {
     type KeeperRebate = FutarchyTreasury;
     type InDecisionWindow = RuntimeInDecisionWindow;
     type PolCommitmentSync = RuntimePolCommitmentSync;
+    type BaselineGrade = RuntimeBaselineGrade;
 }
 
 pub struct RuntimeEpochOracle;
@@ -5345,6 +5418,28 @@ impl pallet_futarchy_treasury::TreasuryPhase for RuntimeTreasuryPhase {
     }
 }
 
+/// Live session size used to scale the per-registered-collator stipend. The
+/// active session includes registered collators that authored zero blocks.
+pub struct RuntimeRegisteredCollatorCount;
+impl Get<u32> for RuntimeRegisteredCollatorCount {
+    fn get() -> u32 {
+        match u32::try_from(Session::validators().len()) {
+            Ok(count) => count,
+            Err(_) => u32::MAX,
+        }
+    }
+}
+
+/// Boundary-aware epoch projection for the authorship callback. The
+/// persisted `EpochOf` can still name the completed epoch when the callback
+/// runs before the first clock-cranking extrinsic in a boundary block.
+pub struct RuntimeCollatorEpoch;
+impl pallet_futarchy_treasury::CollatorEpochProvider for RuntimeCollatorEpoch {
+    fn epoch_at(block: futarchy_primitives::BlockNumber) -> futarchy_primitives::EpochId {
+        pallet_epoch::Pallet::<Runtime>::epoch_for_block(block)
+    }
+}
+
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
     type CommunityDistributionOrigin = pallet_origins::EnsureFutarchyParam;
@@ -5356,6 +5451,8 @@ impl pallet_futarchy_treasury::Config for Runtime {
     type MaxCommunitySchedules = MaxCommunitySchedules;
     type MaxCollatorCompensationEntries =
         ConstU32<{ pallet_futarchy_treasury::MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND }>;
+    type RegisteredCollatorCount = RuntimeRegisteredCollatorCount;
+    type CollatorEpoch = RuntimeCollatorEpoch;
     type Params = TreasuryParams;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type TreasuryPhase = RuntimeTreasuryPhase;
