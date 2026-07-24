@@ -225,6 +225,8 @@ The heading's ownership applies to the identity/supply table. The genesis protoc
 
 ---
 
+The A13 proposer-reward extension adds `treasury_rewards_account()` (`PalletId(*b"bl/trsry").into_sub_account_truncating(*b"REWARDS_")`) to this exact genesis-endowed set; its `REWARDS` line is custody-synced to that pot when funded.
+
 ## 4. Reconciled storage bounds (D-10 — one table, all budgets derive from it)
 
 | Bound | Value | Scope (the reconciliation) | Doc |
@@ -257,7 +259,7 @@ The heading's ownership applies to the identity/supply table. The genesis protoc
 | Vesting schedules per account | **8** (`MAX_VESTING_SCHEDULES`; the genesis allocation uses exactly one per founding-team beneficiary) | `pallet-vesting` | [08](08-treasury-and-economics.md) §2.1 |
 | Community distribution schedules | **4,096** successful schedules over the lifetime of the Phase-4 community allocation; completed schedules do not replenish the bound | `pallet-futarchy-treasury` | [08](08-treasury-and-economics.md) §2.1 |
 | Treasury `Streams` | **128** open vesting streams (recipient-claimable grants > `trs.stream_threshold`, §1.3); ≥ `epoch.slots` new grants/epoch over multi-epoch vesting horizons, with headroom | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.3) |
-| Pending collator authored-share entries | **100** distinct accounts in one epoch accumulator, equal to the runtime's `MaxCandidates` session ceiling; overflow authors are not recorded and the payout remains fail-closed | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §2.4) |
+| Pending collator authored-share entries | **120** distinct accounts in one epoch accumulator, equal to the runtime's 100-candidate plus 20-invulnerable active-session ceiling; overflow authors are not recorded and the payout remains fail-closed | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §2.4) |
 | Treasury budget lines | **32** — ≥ the enumerated `POL`/`POL_BASELINE`/`KEEPER`/`ORACLE`/`REWARDS`/`ops.*` lines (§1.1) with headroom; upsert-keyed, so occupancy ≤ the line enumeration | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.1) |
 | Treasury pending outflows | **64** — queued in-cap proposal outflows awaiting meter grace (§1.3); matched to the `IntakeQueue` pre-qualification ceiling | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §1.3) |
 | Treasury POL commitments | **196** = `MaxLiveMarkets` — one obligation per book without a durable terminal latch that NAV nets against (§1.2/§8.2); terminal retained books do not consume this bound | `pallet-futarchy-treasury` ([08](08-treasury-and-economics.md) §8) |
