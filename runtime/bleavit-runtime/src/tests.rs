@@ -978,7 +978,6 @@ fn create_synthetic_markets_for_void(
             RuntimeOrigin::signed(crate::configs::epoch_account()),
             id,
             kind,
-            proposal.epoch,
             crate::configs::market_book_account(id),
             crate::configs::market_fee_account(id),
             b,
@@ -3323,7 +3322,6 @@ fn last_redeemer_of_last_vault_can_fully_exit() {
                 proposal: PID,
                 branch: Branch::Accept,
             },
-            0,
             book.clone(),
             crate::configs::market_fee_account(MARKET_ID),
             crate::configs::balance_param(b"pol.b.param"),
@@ -3566,7 +3564,6 @@ fn market_custody_namespace_prevents_future_address_poisoning() {
                 proposal: FUTURE_MARKET,
                 branch: Branch::Accept,
             },
-            0,
             crate::configs::market_book_account(FUTURE_MARKET),
             crate::configs::market_fee_account(FUTURE_MARKET),
             crate::configs::balance_param(b"pol.b.param"),
@@ -3604,7 +3601,6 @@ fn pol_account_funded_to_exact_seed_amount_can_seed() {
                 proposal: PID,
                 branch: futarchy_primitives::Branch::Accept,
             },
-            0,
             crate::configs::market_book_account(MARKET_ID),
             crate::configs::market_fee_account(MARKET_ID),
             b,
@@ -4580,6 +4576,23 @@ fn treasury_collator_boundary_authorship_uses_the_next_epoch_accumulator() {
         assert_eq!(CollatorPendingEpoch::<Runtime>::get(), Some(epoch));
         assert_eq!(CollatorAuthoredEpoch::<Runtime>::get(), Some(epoch + 1));
         assert_eq!(CollatorAuthoredBlocks::<Runtime>::get().len(), 1);
+    });
+}
+
+#[test]
+fn runtime_collator_authorship_charges_mandatory_accounting_weight() {
+    development_ext().execute_with(|| {
+        let before = *System::block_weight().get(DispatchClass::Mandatory);
+        let expected = <<Runtime as pallet_futarchy_treasury::Config>::WeightInfo as
+            pallet_futarchy_treasury::WeightInfo>::note_collator_block();
+
+        <crate::configs::RuntimeCollatorAuthorship as pallet_authorship::EventHandler<
+            AccountId,
+            BlockNumber,
+        >>::note_author(account(77));
+
+        let after = *System::block_weight().get(DispatchClass::Mandatory);
+        assert_eq!(after, before.saturating_add(expected));
     });
 }
 
@@ -10068,7 +10081,6 @@ fn sq92_epoch_void_settles_the_baseline_and_unstrands_a_single_sided_holder() {
             RuntimeOrigin::signed(crate::configs::epoch_account()),
             BASELINE_MARKET,
             BookKind::Baseline { epoch },
-            epoch,
             crate::configs::market_book_account(BASELINE_MARKET),
             crate::configs::market_fee_account(BASELINE_MARKET),
             crate::configs::balance_param(b"pol.b_baseline"),
@@ -10230,7 +10242,6 @@ fn sq92_epoch_void_with_a_live_baseline_book_keeps_market_try_state_green() {
             RuntimeOrigin::signed(crate::configs::epoch_account()),
             BASELINE_MARKET,
             BookKind::Baseline { epoch },
-            epoch,
             crate::configs::market_book_account(BASELINE_MARKET),
             crate::configs::market_fee_account(BASELINE_MARKET),
             crate::configs::balance_param(b"pol.b_baseline"),
