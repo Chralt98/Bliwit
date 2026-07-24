@@ -925,6 +925,28 @@ fn proposer_reward_pays_from_the_rewards_line_and_is_fail_soft() {
 }
 
 #[test]
+fn note_collator_block_registers_mandatory_block_weight() {
+    funded_ext().execute_with(|| {
+        // `pallet_authorship` drives this callback from `on_initialize` with
+        // no reserved weight, so the callback must register its own
+        // benchmarked worst-case weight into the Mandatory class.
+        let before = frame_system::Pallet::<Test>::block_weight()
+            .get(frame_support::dispatch::DispatchClass::Mandatory)
+            .to_owned();
+        Treasury::note_collator_block(acc(7));
+        let after = frame_system::Pallet::<Test>::block_weight()
+            .get(frame_support::dispatch::DispatchClass::Mandatory)
+            .to_owned();
+        assert_eq!(
+            after,
+            before.saturating_add(
+                <<Test as crate::Config>::WeightInfo as crate::WeightInfo>::note_collator_block()
+            )
+        );
+    });
+}
+
+#[test]
 fn collator_compensation_pays_authored_shares_once_and_rounds_down() {
     funded_ext().execute_with(|| {
         reset_rebate_payout();

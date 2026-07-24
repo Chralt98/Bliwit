@@ -1,7 +1,9 @@
 //! `frame-benchmarking` v2 benchmarks for every extrinsic (Track-A DoD,
-//! 15 §4.5). The treasury has no weight-bearing hooks — 08 gives it no cranks
-//! and `try_state` is try-runtime-only — so the call set below is the complete
-//! benchmark surface. Each benchmark seeds worst-case bounded state (near-full
+//! 15 §4.5) plus the one weight-bearing non-extrinsic entry point: the
+//! `note_collator_block` authorship callback, which registers its own
+//! Mandatory weight because `pallet_authorship` reserves nothing for its
+//! `EventHandler`. 08 gives the treasury no cranks and `try_state` is
+//! try-runtime-only, so this set is the complete benchmark surface. Each benchmark seeds worst-case bounded state (near-full
 //! streams / a funded line) and drives its call with the exact 08 §1.1
 //! authority via [`crate::BenchmarkHelper`]. B5 turns the generated output into
 //! the PoV-calibrated `weights.rs`.
@@ -11,6 +13,7 @@ use crate::pallet::Pallet;
 
 use frame_benchmarking::v2::*;
 use frame_support::traits::Get;
+use frame_support::BoundedVec;
 use frame_system::RawOrigin;
 use futarchy_treasury_core::{CoretimeQuote, Stream, Treasury, USDC};
 
@@ -300,6 +303,40 @@ mod benches {
 
         #[extrinsic_call]
         _(T::BenchmarkHelper::community_origin(), beneficiary, amount);
+    }
+
+    #[benchmark]
+    fn note_collator_block() {
+        // Worst case: the accumulator holds a full prior-epoch share table,
+        // the boundary is crossed (tracked epoch != current), and nothing is
+        // pending — so the callback moves the whole bounded vector aside,
+        // snapshots the pending epoch/count, starts a fresh accumulator, and
+        // records the new author.
+        let bound = T::MaxCollatorCompensationEntries::get();
+        let mut shares: BoundedVec<(T::AccountId, u32), T::MaxCollatorCompensationEntries> =
+            BoundedVec::new();
+        for i in 0..bound {
+            let filler: T::AccountId = T::BenchmarkHelper::account(i as u8);
+            assert!(shares.try_push((filler, 1)).is_ok());
+        }
+        CollatorAuthoredBlocks::<T>::put(shares);
+        let current =
+            T::CollatorEpoch::epoch_at(sp_runtime::SaturatedConversion::saturated_into::<
+                futarchy_primitives::BlockNumber,
+            >(frame_system::Pallet::<T>::block_number()));
+        CollatorAuthoredEpoch::<T>::put(current.wrapping_add(1));
+        CollatorAuthoredRegisteredCount::<T>::put(bound);
+        let author: T::AccountId = T::BenchmarkHelper::account(200);
+
+        #[block]
+        {
+            Pallet::<T>::note_collator_block(author.clone());
+        }
+
+        assert!(CollatorPendingEpoch::<T>::get().is_some());
+        assert!(CollatorAuthoredBlocks::<T>::get()
+            .iter()
+            .any(|(who, blocks)| *who == author && *blocks == 1));
     }
 
     impl_benchmark_test_suite!(Pallet, crate::mock::new_test_ext(), crate::mock::Test);
