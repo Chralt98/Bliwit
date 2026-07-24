@@ -426,6 +426,12 @@ pub enum Capability {
     TreasurySpend,
     OracleConfig,
     MarketTemplate,
+    /// Move protocol INSURANCE custody back into MAIN without granting the
+    /// broader treasury outflow surface (08 §1.2/§1.4; SQ-384).
+    ///
+    /// Appended deliberately: Capability is SCALE-encoded in stored records
+    /// and resource keys, so the pre-existing discriminants are immutable.
+    InsuranceSweep,
 }
 
 #[derive(
@@ -1019,6 +1025,11 @@ pub fn genesis_capabilities() -> Vec<CapabilityRecord> {
         CapabilityRecord {
             class: ProposalClass::Treasury,
             capability: Capability::TreasurySpend,
+            enabled: true
+        },
+        CapabilityRecord {
+            class: ProposalClass::Treasury,
+            capability: Capability::InsuranceSweep,
             enabled: true
         },
     ]
@@ -2176,6 +2187,16 @@ pub mod benchmarking {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capability_scale_discriminants_are_append_only() {
+        // Capability values are embedded in stored records and the 0x02
+        // resource-key discriminator. Existing values must retain their
+        // SCALE tags when a new authority is introduced.
+        assert_eq!(Capability::OracleConfig.encode(), vec![6]);
+        assert_eq!(Capability::MarketTemplate.encode(), vec![7]);
+        assert_eq!(Capability::InsuranceSweep.encode(), vec![8]);
+    }
 
     #[test]
     fn param_record_fields_match_contract_02_section_7_3() {

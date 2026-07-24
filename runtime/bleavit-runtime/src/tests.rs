@@ -7026,6 +7026,58 @@ fn live_treasury_capability_disables_queued_call_without_state_change_then_reena
 }
 
 #[test]
+fn insurance_sweep_uses_a_dedicated_treasury_capability() {
+    development_ext().execute_with(|| {
+        let call = RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::sweep_insurance {
+            amount: 1,
+        });
+        let enabled = || {
+            <crate::configs::RuntimeCapabilities as pallet_execution_guard::Capabilities<
+                RuntimeCall,
+            >>::call_enabled(ProposalClass::Treasury, &call)
+        };
+        assert!(enabled());
+
+        // Ordinary TreasurySpend authority is intentionally insufficient for
+        // the INSURANCE custody return path.
+        assert_ok!(Constitution::set_capability(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::CapabilityRecord {
+                class: ProposalClass::Treasury,
+                capability: pallet_constitution::Capability::TreasurySpend,
+                enabled: false,
+            },
+        ));
+        assert!(enabled());
+
+        assert_ok!(Constitution::set_capability(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::CapabilityRecord {
+                class: ProposalClass::Treasury,
+                capability: pallet_constitution::Capability::InsuranceSweep,
+                enabled: false,
+            },
+        ));
+        assert!(!enabled());
+
+        assert_ok!(Constitution::set_capability(
+            pallet_origins::Origin::FutarchyMeta.into(),
+            pallet_constitution::CapabilityRecord {
+                class: ProposalClass::Treasury,
+                capability: pallet_constitution::Capability::InsuranceSweep,
+                enabled: true,
+            },
+        ));
+        assert!(enabled());
+        assert!(
+            !<crate::configs::RuntimeCapabilities as pallet_execution_guard::Capabilities<
+                RuntimeCall,
+            >>::call_enabled(ProposalClass::Param, &call)
+        );
+    });
+}
+
+#[test]
 fn execute_under_constitution_dead_man_reports_freeze_active_and_preserves_queue() {
     development_ext().execute_with(|| {
         arm_all_classes_for_tests();
@@ -13586,6 +13638,7 @@ fn canonical_resource_key_universe_has_no_semantic_collisions() {
             pallet_constitution::Capability::TreasurySpend,
             pallet_constitution::Capability::OracleConfig,
             pallet_constitution::Capability::MarketTemplate,
+            pallet_constitution::Capability::InsuranceSweep,
         ];
         for class in classes {
             for capability in fixed_capabilities {
