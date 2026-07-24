@@ -20,9 +20,24 @@ use futarchy_primitives::{
 };
 use market_core::{BookKind, MarketBook, MarketPhase, MarketState, TwapCumulative, MIN_TRADE};
 use pallet_conditional_ledger::core_ledger::{baseline, position, LedgerState};
+use parity_scale_codec::Encode;
 use sp_runtime::traits::Dispatchable;
 
 type E = Error<Test>;
+
+#[test]
+fn error_scale_discriminants_are_append_only() {
+    // Existing market errors are retained in execution metadata across
+    // upgrades. The epoch-mismatch error must trail them rather than shift
+    // the established discriminants.
+    assert_eq!(E::AlreadySeeded.encode(), vec![15]);
+    assert_eq!(E::CreationFrozen.encode(), vec![16]);
+    assert_eq!(E::Frozen.encode(), vec![17]);
+    assert_eq!(E::FreezeOutOfBounds.encode(), vec![18]);
+    assert_eq!(E::FreezeRenewalExhausted.encode(), vec![19]);
+    assert_eq!(E::UnreservedProtocolAccount.encode(), vec![20]);
+    assert_eq!(E::EpochMismatch.encode(), vec![21]);
+}
 
 const MARKET_ID: MarketId = 7;
 const BASELINE_ID: MarketId = 11;

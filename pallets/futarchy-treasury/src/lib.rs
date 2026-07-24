@@ -384,6 +384,11 @@ pub mod pallet {
         /// share accumulator.
         type MaxCollatorCompensationEntries: Get<u32>;
 
+        /// Number of collators registered in the active session. The stipend
+        /// is per registered collator, including collators with zero authored
+        /// blocks, rather than per author present in the accumulator.
+        type RegisteredCollatorCount: Get<u32>;
+
         /// Live 13 §1 treasury tunables, read from `pallet-constitution::Params`
         /// (rule 4). See [`TreasuryParams`].
         type Params: TreasuryParams;
@@ -539,6 +544,12 @@ pub mod pallet {
     /// Epoch whose authored shares are currently held in the accumulator.
     #[pallet::storage]
     pub type CollatorAuthoredEpoch<T: Config> = StorageValue<_, EpochId, OptionQuery>;
+
+    /// Sticky fail-closed marker for an authored-share accumulator overflow.
+    /// A payout is never attempted while this is set, so omitted authors can
+    /// never be silently underpaid.
+    #[pallet::storage]
+    pub type CollatorAuthoredOverflowed<T: Config> = StorageValue<_, bool, ValueQuery>;
 
     /// Last epoch whose compensation was committed. This prevents authorship
     /// arriving after the Housekeeping payout from creating a second claim.
@@ -1255,9 +1266,6 @@ pub mod pallet {
         /// and defers the reward rather than growing state or panicking.
         pub fn note_collator_block(author: T::AccountId) {
             let epoch = T::CurrentEpoch::get();
-            if CollatorCompensationPaidEpoch::<T>::get() == Some(epoch) {
-                return;
-            }
             if let Some(tracked) = CollatorAuthoredEpoch::<T>::get() {
                 if tracked != epoch {
                     return;
@@ -1268,23 +1276,30 @@ pub mod pallet {
             CollatorAuthoredBlocks::<T>::mutate(|shares| {
                 if let Some((_, blocks)) = shares.iter_mut().find(|(who, _)| *who == author) {
                     *blocks = blocks.saturating_add(1);
-                } else {
-                    let _ = shares.try_push((author, 1));
+                } else if shares.try_push((author, 1)).is_err() {
+                    CollatorAuthoredOverflowed::<T>::put(true);
                 }
             });
         }
 
-        /// Pay the bounded authored-share accumulator during Housekeeping.
-        /// The epoch pallet invokes this exactly on a phase entry; if a prior
-        /// payout is still pending, this method pays that older accumulator
-        /// first. Every custody transfer and the accounting/map cleanup share
-        /// one storage transaction, so a partial payout cannot create an
-        /// unbacked claimant.
+        /// Pay the bounded authored-share accumulator at the completed-epoch
+        /// Housekeeping boundary. The epoch pallet invokes this after the
+        /// clock crosses into the next epoch, so the completed-epoch guard is
+        /// meaningful and a failed custody transfer leaves the accumulator for
+        /// retry. Every transfer and accounting/map cleanup share one storage
+        /// transaction, so a partial payout cannot create an unbacked claimant.
         pub fn pay_collator_compensation() {
             let Some(tracked_epoch) = CollatorAuthoredEpoch::<T>::get() else {
                 return;
             };
-            if tracked_epoch > T::CurrentEpoch::get() {
+            // Housekeeping is the payout boundary for the epoch that just
+            // completed. Keep the current epoch's accumulator open so blocks
+            // authored after the boundary are not silently discarded and are
+            // paid at the following Housekeeping boundary.
+            if tracked_epoch >= T::CurrentEpoch::get() {
+                return;
+            }
+            if CollatorAuthoredOverflowed::<T>::get() {
                 return;
             }
             let shares = CollatorAuthoredBlocks::<T>::get();
@@ -1295,6 +1310,7 @@ pub mod pallet {
                     .map(|(who, blocks)| (Self::to_core_account(who.clone()), *blocks))
                     .collect::<Vec<_>>(),
                 T::Params::collator_comp_epoch(),
+                T::RegisteredCollatorCount::get(),
             ) else {
                 return;
             };
@@ -1316,6 +1332,7 @@ pub mod pallet {
                 }
                 CollatorAuthoredBlocks::<T>::kill();
                 CollatorAuthoredEpoch::<T>::kill();
+                CollatorAuthoredOverflowed::<T>::kill();
                 CollatorCompensationPaidEpoch::<T>::put(tracked_epoch);
                 Ok::<(), DispatchError>(())
             });
@@ -1773,11 +1790,9 @@ pub mod pallet {
                     "treasury: collator authored-share epoch is not joined to its accumulator",
                 ));
             }
-            if CollatorCompensationPaidEpoch::<T>::get() == CollatorAuthoredEpoch::<T>::get()
-                && CollatorAuthoredEpoch::<T>::get().is_some()
-            {
+            if CollatorAuthoredOverflowed::<T>::get() {
                 return Err(TryRuntimeError::Other(
-                    "treasury: collator compensation is both paid and pending",
+                    "treasury: collator authored-share accumulator overflowed",
                 ));
             }
             let community_remaining = CommunityDistributionRemaining::<T>::get();

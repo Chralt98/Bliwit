@@ -1007,6 +1007,7 @@ pub mod pallet {
             let params = Self::live_params()?;
             let now = Self::now();
             let mut advanced = false;
+            let mut crossed_epoch = false;
             let result = frame_support::storage::with_storage_layer(|| {
                 Self::mutate(|state, ledger| {
                     state.horizon_k = params.horizon_k;
@@ -1019,11 +1020,7 @@ pub mod pallet {
                         state.epoch.length,
                     );
                     Self::sync_clock(state, now)?;
-                    let entered_housekeeping = clock_before.1 != EpochPhase::Housekeeping
-                        && state.epoch.phase == EpochPhase::Housekeeping;
-                    if entered_housekeeping {
-                        T::CollatorCompensation::pay();
-                    }
+                    crossed_epoch = clock_before.0 != state.epoch.index;
                     let entered_seed =
                         clock_before.1 != EpochPhase::Seed && state.epoch.phase == EpochPhase::Seed;
                     if entered_seed {
@@ -1279,6 +1276,13 @@ pub mod pallet {
                     .map_err(|_| Error::<T>::Welfare)?;
                 Ok(())
             });
+            // The Housekeeping phase belongs to the epoch that just ended. Pay
+            // only after the clock crossing has persisted `EpochOf`, so the
+            // compensation sink observes `CurrentEpoch = completed + 1` and
+            // its completed-epoch guard cannot suppress the payout.
+            if result.is_ok() && crossed_epoch {
+                T::CollatorCompensation::pay();
+            }
             if result.is_ok() && advanced {
                 // B5 recalibrates this weight for the rebate sink's treasury writes.
                 T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);

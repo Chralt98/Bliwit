@@ -4522,7 +4522,14 @@ fn treasury_collator_compensation_uses_authored_share_and_dedicated_custody() {
         FutarchyTreasury::note_collator_block(first.clone());
         FutarchyTreasury::note_collator_block(first.clone());
         FutarchyTreasury::note_collator_block(second.clone());
-        FutarchyTreasury::pay_collator_compensation();
+        // The Housekeeping boundary crosses the epoch clock first; the
+        // persisted callback then settles the completed epoch.
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        System::set_block_number(schedule.epoch_start_block.saturating_add(schedule.length));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(account(79)),
+            Default::default()
+        ));
 
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &first),

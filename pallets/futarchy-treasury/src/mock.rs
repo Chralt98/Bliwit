@@ -346,6 +346,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type MaxCommunitySchedules = MaxCommunitySchedules;
     type MaxCollatorCompensationEntries =
         ConstU32<{ pallet_futarchy_treasury::MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND }>;
+    type RegisteredCollatorCount = ConstU32<2>;
     type Params = TestParams;
     type CurrentEpoch = CurrentEpochValue;
     type TreasuryPhase = TestTreasuryPhase;

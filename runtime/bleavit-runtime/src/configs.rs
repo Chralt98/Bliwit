@@ -5343,6 +5343,18 @@ impl pallet_futarchy_treasury::TreasuryPhase for RuntimeTreasuryPhase {
     }
 }
 
+/// Live session size used to scale the per-registered-collator stipend. The
+/// active session includes registered collators that authored zero blocks.
+pub struct RuntimeRegisteredCollatorCount;
+impl Get<u32> for RuntimeRegisteredCollatorCount {
+    fn get() -> u32 {
+        match u32::try_from(Session::validators().len()) {
+            Ok(count) => count,
+            Err(_) => u32::MAX,
+        }
+    }
+}
+
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
     type CommunityDistributionOrigin = pallet_origins::EnsureFutarchyParam;
@@ -5354,6 +5366,7 @@ impl pallet_futarchy_treasury::Config for Runtime {
     type MaxCommunitySchedules = MaxCommunitySchedules;
     type MaxCollatorCompensationEntries =
         ConstU32<{ pallet_futarchy_treasury::MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND }>;
+    type RegisteredCollatorCount = RuntimeRegisteredCollatorCount;
     type Params = TreasuryParams;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type TreasuryPhase = RuntimeTreasuryPhase;

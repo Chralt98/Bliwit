@@ -112,7 +112,7 @@ Vesting is enforced on-chain from genesis via SDK **`pallet-vesting`** (stable26
 
 **Genesis protocol-account derivations (normative; mirrored in [13 §3.5](13-parameters.md)).** Account identity is derived with Substrate's `PalletId` conversion exactly as follows; a seed is the exact byte string shown, with no padding, normalization or replacement. The VIT allocation pots use `TreasuryPalletId = PalletId(*b"bl/trsry")`: `MAIN` is `TreasuryPalletId::get().into_account_truncating()`, the community pot is `TreasuryPalletId::get().into_sub_account_truncating(b"communty")`, and the Phase-3–4 incentive pot is `TreasuryPalletId::get().into_sub_account_truncating(b"incentiv")`.
 
-Under [03 §7](03-conditional-ledger.md) R-4, `usdc_genesis_endowments()` endows exactly the following ten statically derived protocol accounts with exactly the live USDC `min_balance`; the endowment rule is owned there, while this section freezes the account derivations consumed by genesis and deployment tooling:
+Under [03 §7](03-conditional-ledger.md) R-4, `usdc_genesis_endowments()` endows exactly the following twelve statically derived protocol accounts with exactly the live USDC `min_balance`; the endowment rule is owned there, while this section freezes the account derivations consumed by genesis and deployment tooling:
 
 | Account | Frozen derivation |
 |---|---|
@@ -127,6 +127,7 @@ Under [03 §7](03-conditional-ledger.md) R-4, `usdc_genesis_endowments()` endows
 | `treasury_keeper_account()` (`KEEPER`) | `PalletId(*b"bl/trsry").into_sub_account_truncating(*b"KEEPER__")` |
 | `treasury_oracle_account()` (`ORACLE`) | `PalletId(*b"bl/trsry").into_sub_account_truncating(*b"ORACLE__")` |
 | `treasury_rewards_account()` (`REWARDS`) | `PalletId(*b"bl/trsry").into_sub_account_truncating(*b"REWARDS_")` |
+| `treasury_collators_account()` (`COLLATOR`) | `PalletId(*b"bl/trsry").into_sub_account_truncating(*b"COLLATOR")` |
 
 The set is deliberately exact. Per-market book/fee accounts do not exist until `create_market` and are reaped at close, so they cannot be genesis-endowed. The market, epoch, execution-guard, welfare-settlement, guardian and both registry sovereign accounts are excluded because [03 §7](03-conditional-ledger.md) R-4 does not name them; registry payouts deliberately use `Expendable`. A derivation or membership change is therefore a genesis/deployment identity change and MUST update this section and [13 §3.5](13-parameters.md) together.
 

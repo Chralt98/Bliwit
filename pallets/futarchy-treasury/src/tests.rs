@@ -4,10 +4,13 @@
 //! differential (Python M3 ≡ Rust core ≡ this pallet at default parameters).
 
 use crate::mock::*;
-use crate::{CollatorAuthoredBlocks, CollatorAuthoredEpoch, Error, Event, PayoutLine};
+use crate::{
+    CollatorAuthoredBlocks, CollatorAuthoredEpoch, CollatorAuthoredOverflowed, Error, Event,
+    PayoutLine,
+};
 use frame_support::{
     assert_err, assert_noop, assert_ok,
-    traits::{Hooks, StorageVersion},
+    traits::{ConstU32, Hooks, StorageVersion},
 };
 use futarchy_primitives::keeper::CrankClass;
 use futarchy_treasury_core::{
@@ -929,6 +932,9 @@ fn collator_compensation_pays_authored_shares_once_and_rounds_down() {
         Treasury::note_collator_block(acc(8));
         let before = Treasury::line_balance(BudgetLine::OpsCollators);
 
+        // Housekeeping pays the completed epoch; keep the current epoch open
+        // so authorship after the boundary is not discarded.
+        set_epoch(1);
         Treasury::pay_collator_compensation();
 
         assert_eq!(
@@ -945,8 +951,18 @@ fn collator_compensation_pays_authored_shares_once_and_rounds_down() {
         assert!(CollatorAuthoredBlocks::<Test>::get().is_empty());
         assert!(CollatorAuthoredEpoch::<Test>::get().is_none());
 
+        // A block after the payout boundary belongs to the next pending
+        // accumulator and must not be dropped just because the prior epoch
+        // was already paid.
+        Treasury::note_collator_block(acc(9));
         Treasury::pay_collator_compensation();
         assert_eq!(rebate_payouts().len(), 2);
+        assert_eq!(CollatorAuthoredBlocks::<Test>::get().len(), 1);
+
+        set_epoch(2);
+        Treasury::pay_collator_compensation();
+        assert_eq!(rebate_payouts().len(), 3);
+        assert!(CollatorAuthoredBlocks::<Test>::get().is_empty());
         assert_ok!(Treasury::do_try_state());
     });
 }
@@ -959,6 +975,7 @@ fn collator_compensation_defers_when_custody_is_underfunded() {
         Treasury::note_collator_block(acc(7));
         let before = Treasury::treasury();
 
+        set_epoch(1);
         Treasury::pay_collator_compensation();
 
         assert_eq!(Treasury::treasury(), before);
@@ -966,8 +983,25 @@ fn collator_compensation_defers_when_custody_is_underfunded() {
         assert_eq!(CollatorAuthoredEpoch::<Test>::get(), Some(0));
         assert_eq!(
             rebate_payouts(),
-            vec![(acc(7), 2_000_000_000, PayoutLine::OpsCollators)]
+            vec![(acc(7), 4_000_000_000, PayoutLine::OpsCollators)]
         );
+    });
+}
+
+#[test]
+fn collator_compensation_fails_closed_on_accumulator_overflow() {
+    funded_ext().execute_with(|| {
+        for seed in 0..=100 {
+            Treasury::note_collator_block(acc(seed));
+        }
+        assert_eq!(CollatorAuthoredBlocks::<Test>::get().len(), 100);
+        assert!(CollatorAuthoredOverflowed::<Test>::get());
+
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+        assert!(rebate_payouts().is_empty());
+        assert!(CollatorAuthoredOverflowed::<Test>::get());
+        assert!(Treasury::do_try_state().is_err());
     });
 }
 
@@ -1221,6 +1255,7 @@ mod renewal_dispatch_seam {
         type CommunityMinVestedTransfer = DispatchCommunityMin;
         type MaxCommunitySchedules = DispatchMaxCommunitySchedules;
         type MaxCollatorCompensationEntries = DispatchMaxCollatorCompensationEntries;
+        type RegisteredCollatorCount = ConstU32<1>;
         type Params = DispatchParams;
         type CurrentEpoch = CurrentEpoch;
         type TreasuryPhase = ();
