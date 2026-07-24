@@ -2016,6 +2016,23 @@ pub mod pallet {
             Self::load()
         }
 
+        /// Read the frozen epoch status view without hydrating bounded
+        /// proposal, cohort, history, lock or parameter collections.
+        pub fn status_view() -> futarchy_primitives::EpochStatusView {
+            let epoch = EpochOf::<T>::get();
+            let schedule = Schedule::<T>::get();
+            EpochState::<T::AccountId>::status_view_from_parts(
+                epoch.index,
+                epoch.phase,
+                epoch.phase_start_block,
+                schedule.epoch_start_block,
+                schedule.length,
+                T::Guardian::dead_man_engaged(),
+                T::Constitution::ledger_frozen(),
+                T::Constitution::phase_flags(),
+            )
+        }
+
         /// Read the exact 02 §3 decision inputs the crank assembles for `pid`.
         /// This accessor never seals windows or writes storage. Callers that
         /// require a complete public view MUST reject `backing_complete ==

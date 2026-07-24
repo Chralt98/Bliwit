@@ -567,6 +567,34 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             phase_flags: self.phase_flags,
         }
     }
+
+    /// Build the seven-field status projection without constructing an
+    /// `EpochState`.  The FRAME shell uses this for the light-client view so
+    /// the projection's phase arithmetic remains owned by the core while the
+    /// reader can avoid hydrating bounded proposal/cohort collections.
+    pub fn status_view_from_parts(
+        index: EpochId,
+        phase: EpochPhase,
+        phase_start_block: BlockNumber,
+        epoch_start_block: BlockNumber,
+        length: BlockNumber,
+        dead_man_armed: bool,
+        ledger_frozen: bool,
+        phase_flags: u32,
+    ) -> EpochStatusView {
+        let next_boundary = epoch_start_block
+            .saturating_add(phase_start_offset(phase, length))
+            .saturating_add(phase_len(phase, length));
+        EpochStatusView {
+            index,
+            phase,
+            phase_start_block,
+            next_boundary,
+            dead_man_armed,
+            ledger_frozen,
+            phase_flags,
+        }
+    }
     pub fn set_next_epoch_length(
         &mut self,
         origin: Origin,
@@ -2269,36 +2297,30 @@ impl<AccountId: Clone + Eq> EpochState<AccountId> {
             .saturating_add(phase_len(self.epoch.phase, self.epoch.length))
     }
     fn phase_start(&self, phase: EpochPhase) -> BlockNumber {
-        self.epoch.epoch_start_block.saturating_add(match phase {
-            EpochPhase::Intake => 0,
-            EpochPhase::Qualify => {
-                self.epoch.length.saturating_mul(phase_offsets::QUALIFY_NUM) / PHASE_DENOM
-            }
-            EpochPhase::Seed => {
-                self.epoch.length.saturating_mul(phase_offsets::SEED_NUM) / PHASE_DENOM
-            }
-            EpochPhase::Trade => {
-                self.epoch.length.saturating_mul(phase_offsets::TRADE_NUM) / PHASE_DENOM
-            }
-            EpochPhase::Decide => {
-                self.epoch.length.saturating_mul(phase_offsets::DECIDE_NUM) / PHASE_DENOM
-            }
-            EpochPhase::Review | EpochPhase::Execute => {
-                (self.epoch.length.saturating_mul(phase_offsets::DECIDE_NUM) / PHASE_DENOM)
-                    .saturating_add(1)
-            }
-            EpochPhase::Housekeeping => {
-                self.epoch
-                    .length
-                    .saturating_mul(phase_offsets::HOUSEKEEPING_NUM)
-                    / PHASE_DENOM
-            }
-        })
+        self.epoch
+            .epoch_start_block
+            .saturating_add(phase_start_offset(phase, self.epoch.length))
     }
 }
 impl<AccountId: Clone + Eq> Default for EpochState<AccountId> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn phase_start_offset(phase: EpochPhase, length: BlockNumber) -> BlockNumber {
+    match phase {
+        EpochPhase::Intake => 0,
+        EpochPhase::Qualify => length.saturating_mul(phase_offsets::QUALIFY_NUM) / PHASE_DENOM,
+        EpochPhase::Seed => length.saturating_mul(phase_offsets::SEED_NUM) / PHASE_DENOM,
+        EpochPhase::Trade => length.saturating_mul(phase_offsets::TRADE_NUM) / PHASE_DENOM,
+        EpochPhase::Decide => length.saturating_mul(phase_offsets::DECIDE_NUM) / PHASE_DENOM,
+        EpochPhase::Review | EpochPhase::Execute => {
+            (length.saturating_mul(phase_offsets::DECIDE_NUM) / PHASE_DENOM).saturating_add(1)
+        }
+        EpochPhase::Housekeeping => {
+            length.saturating_mul(phase_offsets::HOUSEKEEPING_NUM) / PHASE_DENOM
+        }
     }
 }
 
@@ -2479,6 +2501,43 @@ mod tests {
             grace_end: None,
             version_constraint: None,
             decision: None,
+        }
+    }
+
+    #[test]
+    fn narrow_status_projection_matches_loaded_state_for_every_phase() {
+        for phase in [
+            EpochPhase::Intake,
+            EpochPhase::Qualify,
+            EpochPhase::Seed,
+            EpochPhase::Trade,
+            EpochPhase::Decide,
+            EpochPhase::Review,
+            EpochPhase::Execute,
+            EpochPhase::Housekeeping,
+        ] {
+            let mut state = EpochState::<[u8; 32]>::new();
+            state.epoch.index = 7;
+            state.epoch.phase = phase;
+            state.epoch.epoch_start_block = 1_000;
+            state.epoch.length = 302_400;
+            state.epoch.phase_start_block = state.phase_start(phase);
+            state.dead_man_armed = true;
+            state.ledger_frozen = true;
+            state.phase_flags = 0x55;
+            assert_eq!(
+                state.status_view(),
+                EpochState::<[u8; 32]>::status_view_from_parts(
+                    state.epoch.index,
+                    phase,
+                    state.epoch.phase_start_block,
+                    state.epoch.epoch_start_block,
+                    state.epoch.length,
+                    state.dead_man_armed,
+                    state.ledger_frozen,
+                    state.phase_flags,
+                )
+            );
         }
     }
     fn pass_input() -> DecisionInputs {

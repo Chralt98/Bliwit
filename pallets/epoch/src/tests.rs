@@ -25,6 +25,50 @@ fn tick_batch(pids: Vec<ProposalId>) -> TickBatch {
     BoundedVec::try_from(pids).expect("test tick batch is bounded")
 }
 
+#[test]
+fn narrow_status_reader_matches_full_projection_for_all_phases() {
+    new_test_ext().execute_with(|| {
+        let schedule = Schedule::<Test>::get();
+        for phase in [
+            EpochPhase::Intake,
+            EpochPhase::Qualify,
+            EpochPhase::Seed,
+            EpochPhase::Trade,
+            EpochPhase::Decide,
+            EpochPhase::Review,
+            EpochPhase::Execute,
+            EpochPhase::Housekeeping,
+        ] {
+            let offset = match phase {
+                EpochPhase::Intake => 0,
+                EpochPhase::Qualify => {
+                    schedule.length * phase_offsets::QUALIFY_NUM / phase_offsets::DENOMINATOR
+                }
+                EpochPhase::Seed => {
+                    schedule.length * phase_offsets::SEED_NUM / phase_offsets::DENOMINATOR
+                }
+                EpochPhase::Trade => {
+                    schedule.length * phase_offsets::TRADE_NUM / phase_offsets::DENOMINATOR
+                }
+                EpochPhase::Decide => {
+                    schedule.length * phase_offsets::DECIDE_NUM / phase_offsets::DENOMINATOR
+                }
+                EpochPhase::Review | EpochPhase::Execute => {
+                    schedule.length * phase_offsets::DECIDE_NUM / phase_offsets::DENOMINATOR + 1
+                }
+                EpochPhase::Housekeeping => {
+                    schedule.length * phase_offsets::HOUSEKEEPING_NUM / phase_offsets::DENOMINATOR
+                }
+            };
+            EpochOf::<Test>::mutate(|clock| {
+                clock.phase = phase;
+                clock.phase_start_block = schedule.epoch_start_block + offset;
+            });
+            assert_eq!(Epoch::status_view(), Epoch::epoch_state().status_view());
+        }
+    });
+}
+
 fn sync_at(block: BlockNumber) {
     set_block(block);
     assert_ok!(Epoch::tick(

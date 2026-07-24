@@ -12,11 +12,11 @@ use futarchy_primitives::{
 
 use crate::{usdc_location, AccountId, ForeignAssets, Runtime};
 
-/// Assemble `FutarchyApi::epoch_status` per 02 §3/§4. `epoch_state()`
-/// hydrates the clock and all three machine/provider flags through the B1b
-/// runtime Config before epoch-core computes the next exact phase boundary.
+/// Assemble `FutarchyApi::epoch_status` per 02 §3/§4. The epoch pallet's
+/// narrow reader touches only the clock, schedule and live provider flags;
+/// bounded proposal/cohort collections are not part of this seven-field view.
 pub fn epoch_status() -> EpochStatusView {
-    pallet_epoch::Pallet::<Runtime>::epoch_state().status_view()
+    pallet_epoch::Pallet::<Runtime>::status_view()
 }
 
 /// Assemble `FutarchyApi::proposal_summaries` per 02 §3/§4/§7.1.
