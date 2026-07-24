@@ -15,6 +15,7 @@ use futarchy_primitives::{
 };
 use parity_scale_codec::{Decode, Encode};
 use sp_runtime::{traits::AccountIdConversion, BuildStorage};
+use std::cell::Cell;
 
 pub type AccountId = u64;
 pub type AssetId = u32;
@@ -38,6 +39,10 @@ pub const UNIT: Balance = 1_000_000;
 // unit-test ids retain the compact BOOK/FEES fixtures below.
 const BENCHMARK_MARKET_ID_BASE: MarketId = 1 << 32;
 const BENCHMARK_MARKET_ACCOUNT_BASE: AccountId = 1 << 48;
+
+thread_local! {
+    pub static BASELINE_GRADE_ALLOWED: Cell<bool> = const { Cell::new(true) };
+}
 
 frame_support::construct_runtime!(
     pub enum Test {
@@ -149,6 +154,17 @@ impl crate::MarketAccountProvider<AccountId> for TestMarketAccounts {
         } else {
             FEES
         }
+    }
+}
+
+pub struct TestBaselineGrade;
+impl pallet_market::BaselineGrade for TestBaselineGrade {
+    fn is_gradeable(
+        _: MarketId,
+        _: futarchy_primitives::BlockNumber,
+        _: futarchy_primitives::BlockNumber,
+    ) -> bool {
+        BASELINE_GRADE_ALLOWED.with(Cell::get)
     }
 }
 
@@ -265,6 +281,7 @@ impl pallet_market::Config for Test {
     type KeeperRebate = TestKeeperRebate;
     type InDecisionWindow = TestInDecisionWindow;
     type PolCommitmentSync = TestPolCommitmentSync;
+    type BaselineGrade = TestBaselineGrade;
 }
 
 pub fn ledger_account() -> AccountId {
@@ -276,6 +293,7 @@ pub fn market_account() -> AccountId {
 }
 
 pub fn new_test_ext() -> sp_io::TestExternalities {
+    BASELINE_GRADE_ALLOWED.with(|allowed| allowed.set(true));
     DecisionWindowMarkets::set(Vec::new());
     RecordKeeperRebates::set(false);
     PolSyncRefuses::set(false);

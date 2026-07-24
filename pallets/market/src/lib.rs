@@ -10,6 +10,8 @@
 
 extern crate alloc;
 
+use futarchy_primitives::{BlockNumber, MarketId};
+
 pub use market_core as core_market;
 pub use pallet::*;
 pub use weights::WeightInfo;
@@ -82,6 +84,20 @@ pub trait PolCommitmentSync {
     fn pol_commitments_synced() -> bool;
 }
 
+/// Production decision-grade predicate for a sealed Baseline boundary.
+/// Baseline books are shared across proposal classes, so the runtime owns the
+/// governed coverage, convergence, POL and contest-floor inputs rather than
+/// hard-coding them in this generic pallet.
+pub trait BaselineGrade {
+    fn is_gradeable(market: MarketId, end: BlockNumber, window: BlockNumber) -> bool;
+}
+
+impl BaselineGrade for () {
+    fn is_gradeable(_: MarketId, _: BlockNumber, _: BlockNumber) -> bool {
+        true
+    }
+}
+
 impl PolCommitmentSync for () {
     fn sync_pol_commitments() -> frame_support::dispatch::DispatchResult {
         Ok(())
@@ -95,6 +111,7 @@ impl PolCommitmentSync for () {
 #[frame_support::pallet]
 pub mod pallet {
     use crate::weights::WeightInfo;
+    use crate::BaselineGrade;
     use crate::DecisionGradeFacts;
     use crate::MarketAccountProvider;
     use crate::PolCommitmentSync;
@@ -162,6 +179,11 @@ pub mod pallet {
         /// Transactional treasury obligation mirror. A lifecycle transition is
         /// rolled back if its exact NAV obligation cannot be mirrored.
         type PolCommitmentSync: crate::PolCommitmentSync;
+
+        /// Runtime-owned decision-grade predicate for sealed Baseline carry.
+        /// The predicate is read-only and must fail closed when governed grade
+        /// inputs are unavailable.
+        type BaselineGrade: crate::BaselineGrade;
 
         /// Cross-pallet keeper-rebate fixture used only by runtime benchmarks.
         #[cfg(feature = "runtime-benchmarks")]
@@ -2099,8 +2121,10 @@ pub mod pallet {
                 // decision-grade failure. Preserve the existing seal
                 // semantics and leave the carry source absent rather than
                 // turning this status-quo path into a dispatch failure.
-                if let Some(twap) = Self::twap_at(id, end, full) {
-                    SealedBaselineTwap::<T>::insert(epoch, twap);
+                if T::BaselineGrade::is_gradeable(id, end, full) {
+                    if let Some(twap) = Self::twap_at(id, end, full) {
+                        SealedBaselineTwap::<T>::insert(epoch, twap);
+                    }
                 }
             }
             Ok(())

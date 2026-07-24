@@ -2603,6 +2603,68 @@ pub(crate) fn decision_market_stats_for_view(
 }
 
 pub struct RuntimeMarketAccess;
+
+/// Runtime-owned Baseline carry predicate. A shared Baseline can serve
+/// multiple classes, so its sealed carry is admitted only when the strictest
+/// class-specific contest floor at this boundary grades the same window.
+pub struct RuntimeBaselineGrade;
+
+#[cfg_attr(feature = "runtime-benchmarks", allow(unreachable_code))]
+impl pallet_market::BaselineGrade for RuntimeBaselineGrade {
+    fn is_gradeable(
+        market: futarchy_primitives::MarketId,
+        end: BlockNumber,
+        window: BlockNumber,
+    ) -> bool {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            let _ = (market, end, window);
+            return true;
+        }
+        let Some(book) = pallet_market::Markets::<Runtime>::get(market) else {
+            return false;
+        };
+        if !matches!(
+            book.kind,
+            pallet_market::core_market::BookKind::Baseline { .. }
+        ) {
+            return false;
+        }
+        let params = <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+        let contest_floor = [
+            futarchy_primitives::ProposalClass::Param,
+            futarchy_primitives::ProposalClass::Treasury,
+            futarchy_primitives::ProposalClass::Code,
+            futarchy_primitives::ProposalClass::Meta,
+            futarchy_primitives::ProposalClass::Constitutional,
+        ]
+        .into_iter()
+        .filter_map(|class| {
+            contest_floor_for_grade(
+                market,
+                end,
+                pallet_epoch::BookRole::Baseline,
+                class,
+                &params,
+            )
+        })
+        .max();
+        let Some(contest_floor) = contest_floor else {
+            return false;
+        };
+        pallet_market::Pallet::<Runtime>::decision_grade_at(
+            market,
+            end,
+            window,
+            params.coverage_pct,
+            params.delta_max,
+            contest_floor,
+            balance_param(b"pol.b_baseline"),
+            true,
+        )
+    }
+}
+
 #[cfg_attr(feature = "runtime-benchmarks", allow(unreachable_code))]
 impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
     fn open_markets(
@@ -3453,6 +3515,7 @@ impl pallet_market::Config for Runtime {
     type KeeperRebate = FutarchyTreasury;
     type InDecisionWindow = RuntimeInDecisionWindow;
     type PolCommitmentSync = RuntimePolCommitmentSync;
+    type BaselineGrade = RuntimeBaselineGrade;
 }
 
 pub struct RuntimeEpochOracle;
