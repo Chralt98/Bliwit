@@ -1510,7 +1510,7 @@ fn decode_phase_offsets<C>(value: &Value<C>) -> Option<PhaseOffsets> {
         let numerator = as_u64(pair[0])?;
         let entry_denominator = as_u64(pair[1])?;
         if entry_denominator == 0
-            || numerator > entry_denominator
+            || numerator >= entry_denominator
             || denominator.is_some_and(|value| value != entry_denominator)
             || previous_numerator.is_some_and(|value| numerator <= value)
         {
@@ -2157,6 +2157,21 @@ mod tests {
             Value::unnamed_composite([Value::u128(20), Value::u128(21)]),
         ]);
         assert_eq!(decode_phase_offsets(&malformed), None);
+
+        // 02 §9 / 13 §3.1: every phase start lives in [0, 1) — a numerator
+        // equal to its denominator (e.g. a (21, 21) Housekeeping entry) is
+        // malformed and must disable phase-sensitive work, not round-trip
+        // into a derived schedule.
+        let end_of_epoch = Value::unnamed_composite([
+            Value::unnamed_composite([Value::u128(0), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(3), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(4), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(5), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(15), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(18), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(21), Value::u128(21)]),
+        ]);
+        assert_eq!(decode_phase_offsets(&end_of_epoch), None);
     }
 
     #[test]
