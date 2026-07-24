@@ -376,6 +376,11 @@ pub mod pallet {
         /// A proposed book/fee address is not the canonical, permanently
         /// reserved protocol-custody address for this market id.
         UnreservedProtocolAccount,
+        /// The explicit event epoch disagrees with an embedded Baseline epoch.
+        ///
+        /// This is append-only: the market error discriminants above are part
+        /// of retained dispatch metadata and must not be renumbered.
+        EpochMismatch,
     }
 
     impl<T: Config> From<market_core::Error> for Error<T> {
@@ -1526,6 +1531,7 @@ pub mod pallet {
             origin: OriginFor<T>,
             id: MarketId,
             kind: BookKind,
+            epoch: EpochId,
             account: T::AccountId,
             fees_account: T::AccountId,
             b: Balance,
@@ -1534,6 +1540,12 @@ pub mod pallet {
             Self::ensure_creation_open()?;
             ensure!(!Markets::<T>::contains_key(id), Error::<T>::DuplicateMarket);
             ensure!(b > 0, Error::<T>::TryStateViolation);
+            if let BookKind::Baseline {
+                epoch: baseline_epoch,
+            } = kind
+            {
+                ensure!(baseline_epoch == epoch, Error::<T>::EpochMismatch);
+            }
             ensure!(
                 Self::market_accounts_are_canonical(id, &account, &fees_account),
                 Error::<T>::UnreservedProtocolAccount
@@ -1557,7 +1569,7 @@ pub mod pallet {
                 );
             }
 
-            let (market_kind, pid, epoch) = Self::describe_kind(kind);
+            let (market_kind, pid, event_epoch) = Self::describe_kind(kind, epoch);
             // Same reasoning as `seed`: this internal path creates a ledger vault and
             // writes market storage, so wrap it in a storage layer so a partial failure
             // cannot outlive its caller's error handling (G-1).
@@ -1605,7 +1617,7 @@ pub mod pallet {
                     market: id,
                     kind: market_kind,
                     pid,
-                    epoch,
+                    epoch: event_epoch,
                     b,
                 });
                 Ok(())
@@ -2080,7 +2092,10 @@ pub mod pallet {
             Ok(())
         }
 
-        fn describe_kind(kind: BookKind) -> (MarketKind, Option<ProposalId>, EpochId) {
+        fn describe_kind(
+            kind: BookKind,
+            epoch: EpochId,
+        ) -> (MarketKind, Option<ProposalId>, EpochId) {
             match kind {
                 BookKind::Decision { proposal, branch } => (
                     if matches!(branch, Branch::Accept) {
@@ -2089,7 +2104,7 @@ pub mod pallet {
                         MarketKind::DecisionReject
                     },
                     Some(proposal),
-                    0,
+                    epoch,
                 ),
                 BookKind::Gate {
                     proposal,
@@ -2102,7 +2117,7 @@ pub mod pallet {
                         (GateType::Security, Branch::Accept) => MarketKind::GateC_Adopt,
                         (GateType::Security, Branch::Reject) => MarketKind::GateC_Reject,
                     };
-                    (kind, Some(proposal), 0)
+                    (kind, Some(proposal), epoch)
                 }
                 BookKind::Baseline { epoch } => (MarketKind::Baseline, None, epoch),
             }
