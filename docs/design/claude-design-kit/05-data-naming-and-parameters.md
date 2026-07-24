@@ -44,7 +44,8 @@ Rerun, Rejected(RejectReason), Executed, FailedExecuted, Measuring, Settled, Can
 Expired`**.
 Ratification badge: `NotRequired` / `NoPassedRecord` / `Passed { referendum }`.
 `NoPassedRecord` says only that the execution guard has no passing record; derive never
-submitted / ongoing / failed referendum lifecycle from `pallet-referenda`, not this badge.
+submitted / submitted-but-unbound / ongoing / failed referendum lifecycle from `pallet-referenda`,
+not this badge. The pending proposer binding is internal until the queue's `ratify_ref` is readable.
 
 **Markets & trading** — `quote(market, side, amount)` → `QuoteView`: `cost` (USDC, excl. fee),
 `fee`, `p_after_1e9` (post-trade price), `max_trade`, `within_domain`, `evaluable` — an exact
@@ -120,7 +121,7 @@ URGENT_UPGRADE) — the "update available" banner source.
 **Extrinsics:** `market.buy` / `market.sell` · `ledger.split` / `ledger.merge` /
 `ledger.split_scalar` / `ledger.merge_scalar` / `ledger.merge_gate` / `ledger.transfer` /
 `ledger.redeem` / `ledger.redeem_scalar` / `ledger.redeem_scalar_pair` / `ledger.redeem_void` ·
-`epoch.submit` / `epoch.withdraw` · `oracle.register_reporter` / `oracle.report` /
+`epoch.submit` / `epoch.withdraw` / `epoch.bind_ratification` · `oracle.register_reporter` / `oracle.report` /
 `oracle.challenge` / `oracle.recompute_proof` · `registry.file_incident` /
 `registry.file_milestone` / `registry.challenge` · `execution_guard.execute` /
 `execution_guard.ratify(proposal_id, referendum_index)` · `futarchy_treasury.claim_stream` ·
@@ -274,7 +275,7 @@ live. For mock data these are the correct realistic values.
 | `StaleEpochBound` | 7 days ⇒ force-reject in-flight | explains `StaleQueue` |
 | Dead-man switch | no finalized block ~8 h or snapshot > 4 d overdue ⇒ freeze | `dead_man_armed` banner |
 | PB-LEDGER-FREEZE | ≤ 14 days, one renewal | `ledger_frozen` banner |
-| Attestation | 25k VIT bond; ≥ 3 attestors; 2-of-N quorum; 72 h challenge window | "2 of 3 attested" progress |
+| Attestation | 25k VIT held bond; ≥ 3 attestors; 2-of-N queue/record quorum; 72 h challenge window; cause revocation + terminal reap | "2 of 3 attested" progress, liability/revocation status |
 | `grd.bond` / `grd.review_deadline` | 50k VIT / 2 epochs | guardian roster, review countdown |
 
 ### B6. Treasury & economics (13 §1, §3.4–§3.5)

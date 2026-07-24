@@ -1,7 +1,12 @@
 use crate::mock::*;
 use crate::*;
 use epoch_core::{CohortInfo as CoreCohort, EpochParams, Origin as CoreOrigin};
-use frame_support::{assert_noop, assert_ok, BoundedVec};
+use frame_support::{
+    assert_noop, assert_ok,
+    traits::{Hooks, StorageVersion},
+    weights::Weight,
+    BoundedVec,
+};
 use futarchy_primitives::{
     keeper::CrankClass, phase_offsets, Branch, CohortSummary, DecisionOutcome, EpochPhase,
     ProposalState,
@@ -26,6 +31,39 @@ fn sync_at(block: BlockNumber) {
         RuntimeOrigin::signed(keeper()),
         tick_batch(Vec::new()),
     ));
+}
+
+#[test]
+fn storage_v1_backfills_the_separate_guardian_review_window() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Epoch>();
+        EpochOf::<Test>::mutate(|clock| clock.index = 2);
+        GuardianReviewDeadlines::<Test>::insert(7, 10);
+        GuardianReviewDeadlines::<Test>::insert(8, 1);
+        Proposals::<Test>::insert(7, live_proposal(7, ProposalState::Suspended, 0));
+        Proposals::<Test>::insert(8, live_proposal(8, ProposalState::Suspended, 0));
+
+        let _ = <Epoch as Hooks<u64>>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<Epoch>(), StorageVersion::new(1));
+        assert_eq!(GuardianReviewWindows::<Test>::get(7), Some(3));
+        assert_eq!(GuardianReviewWindows::<Test>::get(8), Some(2));
+        // A second invocation is an idempotent no-op at the new version.
+        assert_eq!(<Epoch as Hooks<u64>>::on_runtime_upgrade(), Weight::zero());
+    });
+}
+
+#[test]
+fn storage_v1_migration_stays_retryable_on_an_orphaned_deadline() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Epoch>();
+        GuardianReviewDeadlines::<Test>::insert(7, 10);
+
+        let _ = <Epoch as Hooks<u64>>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<Epoch>(), StorageVersion::new(0));
+        assert!(!GuardianReviewWindows::<Test>::contains_key(7));
+    });
 }
 
 fn seed_idle_clock(epoch: EpochId) {
@@ -561,7 +599,7 @@ fn genesis_uses_the_frozen_three_field_epoch_shape() {
             <CurrentEpoch<Test> as frame_support::traits::Get<EpochId>>::get(),
             0
         );
-        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 9);
+        assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 10);
         assert_ok!(Epoch::do_try_state());
     });
 }

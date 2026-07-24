@@ -1,6 +1,7 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/11-frontend-workflows.md` (the frozen source of truth),
-> regenerated 2026-07-22 from integration contract v8 (SQ-483), on top of batch D's refresh at
+> regenerated 2026-07-23 from integration contract v10 (B19 attestor lifecycle; B18 guardian-review and ratification-binding
+> workflow), on top of the previous SQ-483 refresh at
 > commit `a893790`, for upload to Claude Design. If this copy and the source ever differ, the
 > source wins. Regenerate by re-copying the source file.
 
@@ -149,7 +150,7 @@ The FE renders each of the 14 checks as a named row with expected/actual; any fa
 
 ---
 
-**Reaped Baseline books (normative; SQ-304; contract v8).** Successful market reap removes the Baseline book and its `BaselineMarketOf(e)` entry atomically. When cohort history identifies epoch `e` but that mapping is absent, the UI MUST label the book **reaped/archived**, MUST NOT render a missing or fail-closed zero quote as a market price, and MUST disable every trade action on it; cohort history continues to render from `RecentCohortSummaries`. A present mapping with an absent or mismatched book is corrupt chain state and triggers the compatibility hard block. Redemption of already-held Baseline positions is unaffected — it reads the vault, not the book.
+**Reaped Baseline books (normative; SQ-304; contract v10).** Successful market reap removes the Baseline book and its `BaselineMarketOf(e)` entry atomically. When cohort history identifies epoch `e` but that mapping is absent, the UI MUST label the book **reaped/archived**, MUST NOT render a missing or fail-closed zero quote as a market price, and MUST disable every trade action on it; cohort history continues to render from `RecentCohortSummaries`. A present mapping with an absent or mismatched book is corrupt chain state and triggers the compatibility hard block. Redemption of already-held Baseline positions is unaffected — it reads the vault, not the book.
 
 ## 11.6 VOID redemption workflow (X-6, D-1)
 
@@ -199,7 +200,7 @@ The values layer is served by the canonical frontend. All state involved is boun
 | User votes & delegations | `ConvictionVoting.VotingFor(who, class)` |
 | User locks | `ConvictionVoting.ClassLocksFor(who)` + lock expiry derivation |
 | Enactment | `Scheduler.Agenda` (display only — the FE never infers execution from schedule presence) |
-| Ratification linkage | `ExecutionGuard.Queue(pid)` commitment + scan of `ratify`-track referenda whose call is `ratify(pid, …)` (bounded: live referenda only) |
+| Ratification linkage | `ExecutionGuard.Queue(pid)` commitment + scan of `ratify`-track referenda whose call is `ratify(pid, …)` (bounded: live referenda only); after a referendum is submitted, the proposer binds its exact index with `epoch.bind_ratification` before queue admission or while queued |
 | Oracle ballots | `open_oracle_rounds()` + oracle round storage ([02](02-integration-contract.md) names) |
 
 ### 11.7.3 Extrinsics and precondition rows
@@ -211,22 +212,25 @@ The values layer is served by the canonical frontend. All state involved is boun
 | G-3 | `conviction_voting.undelegate(class)` | currently delegating in class |
 | G-4 | `conviction_voting.remove_vote(class, index)` | vote exists; referendum ended or removal allowed |
 | G-5 | `conviction_voting.unlock(class, target)` | computed unlock block ≤ now (else blocked with the exact remaining lock time) |
-| G-6 | `referenda.submit(track_origin, proposal, enactment)` | track deposit balance `[C]`; call admissible for the track's `Contains` filter (statically checked against the frozen admissible-call sets of [06](06-governance-and-guardians.md)); preimage noted; for the `ratify` track: the referenced proposal's artifact commitment exists (submittable any time after queue-time commitment, D-5) |
+| G-6 | `referenda.submit(track_origin, proposal, enactment)` | track deposit balance `[C]`; call admissible for the track's `Contains` filter (statically checked against the frozen admissible-call sets of [06](06-governance-and-guardians.md)); preimage noted; for the `ratify` track: the referenced proposal's artifact commitment exists (submittable any time after commitment at proposal submission, D-5) |
 | G-7 | `referenda.place_decision_deposit(index)` | referendum in `Preparing`; deposit balance `[C]` |
 | G-8 | `referenda.refund_submission_deposit` / `refund_decision_deposit` | referendum terminal; refund available |
+| G-9 | `epoch.bind_ratification(proposal_id, referendum_index)` | caller is the proposal's proposer; proposal is non-terminal CODE/META; referendum is live on the `ratify` track with the scoped `ConstitutionalValues` origin; its exact preimage decodes to `execution_guard.ratify(proposal_id, referendum_index)`; the artifact commitment is unchanged; repeated binding of the same index is idempotent |
 
 For G-6 on the `ratify` track: the `ratify(proposal_id, referendum_index)` call signature is frozen in [02](02-integration-contract.md)/[06](06-governance-and-guardians.md); the FE pre-computes the prospective `referendum_index` from `ReferendumCount` and warns that an interleaving submission changes the index (rebuild-and-resubmit flow, same as a nonce race).
+
+After G-6 creates a ratification referendum, the proposal's proposer MUST submit G-9 with the exact index; an unbound referendum cannot pass through the guard's `ratify` call. Before queue admission, the pending binding is an internal join outside the contract surface, so the panel MUST keep G-9 actionable until the transaction is finalized and the queued `ratify_ref` becomes readable. A proposal with no submitted referendum may still queue without a `ratify_ref`; once the queue entry carries `ratify_ref`, the FE shows that identity as frozen even while the referendum is still ongoing.
 
 ### 11.7.4 Ratification status on proposal detail
 
 For every proposal whose class requires values ratification (CODE/META per [06](06-governance-and-guardians.md)), the proposal detail screen (S2) MUST render a ratification panel:
 
-- linked `ratify`-track referendum (or "none submitted yet — anyone may submit; the artifact hash was committed at queue time" with a one-click prefilled G-6 flow);
+- linked `ratify`-track referendum (or "none submitted yet — anyone may submit; after submission the proposer binds its exact index" with one-click G-6/G-9 flows; the artifact hash was committed at proposal submission);
 - its live status and tally;
 - the **execute-time deadline** (D-5, [06](06-governance-and-guardians.md)): *"must be Approved by the moment `execute()` is dispatched; execution window: maturity → grace_end"* with both block numbers and countdowns;
 - if the referendum cannot mathematically pass before `grace_end` (decision + confirm periods vs. remaining window), an explicit warning: *"ratification can no longer complete inside the execution window — this proposal will reject with `NotRatified`."*
 
-The guard status is not the referendum lifecycle source. `RatificationStatus::NoPassedRecord` means only that the guard has no passed-ratification record; it deliberately does not distinguish never submitted, submitted and ongoing, or submitted and failed. The panel MUST derive those lifecycle states from `pallet-referenda` (`ReferendumInfoFor`, calls and tallies above). `RatificationStatus::Passed { referendum }` supplies the guard's passed-record linkage after approval; it does not replace the referendum read.
+The guard status is not the referendum lifecycle source. `RatificationStatus::NoPassedRecord` means only that the guard has no passed-ratification record; it deliberately does not distinguish never submitted, submitted-but-unbound, submitted and ongoing, or submitted and failed. The panel MUST derive those lifecycle states from `pallet-referenda` (`ReferendumInfoFor`, calls and tallies above). `RatificationStatus::Passed { referendum }` supplies the guard's passed-record linkage after approval; it does not replace the referendum read.
 
 ### 11.7.5 OracleResolution ballot and the pre-cohort snapshot rule
 

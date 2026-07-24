@@ -21,13 +21,11 @@
 //! - 09 §1.4 lists `utility.batch`/`force_batch` among recursively inspected
 //!   wrappers, but their best-effort semantics contradict 09 §1.2(12)'s atomic
 //!   dispatch requirement; B1a must reject them and admit only `batch_all`.
-//! - 09 §1.2(5) once read as narrowing the dispatch-time attestation check to
-//!   the committed record alone, against I-19 and 06 §7's live-quorum reading;
-//!   this implementation fails closed by rechecking both presence and quorum.
-//!   No longer a conflict: 06 §7 and 09 §1.2(5)/§2.4 now state that the SQ-97
-//!   relaxation is NOT in force until a cause-carrying removal surface exists
-//!   (02 §7.5 provides none), so the live-registry check this pallet performs
-//!   *is* the normative behaviour. See PLAN.md SQ-97/SQ-312.
+//! - 09 §1.2(5) now splits the attestation read at the queue/execute boundary:
+//!   queue admission uses the live roster, while execute-time reads the
+//!   committed record quorum and v10 revocation surface. Routine rotation is
+//!   therefore liveness-safe; cause-aware removal and adverse challenge remain
+//!   fail-closed. See 06 §7 and PLAN.md SQ-97/SQ-312.
 
 extern crate alloc;
 
@@ -101,6 +99,14 @@ pub trait EpochHandoff {
     /// Ratification may precede queue admission (06 §2.2), so the guard
     /// cannot derive this binding from `Queue` alone.
     fn payload_hash(pid: ProposalId) -> Option<H256>;
+    /// Whether a pre-queue ratification binding belongs to a class that
+    /// requires values ratification.  Lightweight test seams may return
+    /// `None`; the production runtime returns the exact class predicate so
+    /// try-state can reject a forged pending join rather than trusting only a
+    /// payload hash.
+    fn requires_ratification(_pid: ProposalId) -> Option<bool> {
+        None
+    }
     /// Immutable proposal context exposed only while a proposal is eligible
     /// for healthy-chain recovery-image qualification.
     fn recovery_qualification_context(pid: ProposalId) -> Option<(H256, RuntimeVersionConstraint)> {
@@ -197,6 +203,12 @@ pub trait Attestations {
     fn artifact_hash(attestation_id: u32) -> Option<H256>;
     fn present_unrevoked_unchallenged(attestation_id: u32) -> bool;
     fn has_quorum(pid: ProposalId, artifact_hash: H256) -> bool;
+    /// Execute-time quorum over the committed record set. Implementations
+    /// that predate contract v10 may conservatively fall back to the live
+    /// roster read.
+    fn has_record_quorum(pid: ProposalId, artifact_hash: H256) -> bool {
+        Self::has_quorum(pid, artifact_hash)
+    }
 }
 
 /// Guardian/playbook projection used at ordered checks 9 and 10.
@@ -609,6 +621,15 @@ pub mod pallet {
     #[pallet::storage]
     pub type Ratifications<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, ProposalId, RatificationRecord, OptionQuery>;
+
+    /// Referendum identity bound by the CODE/META proposer before ratification
+    /// passes. This is an internal join: it is mirrored into the queue at
+    /// admission, retained across a non-terminal rerun, and consumed only
+    /// when the ratification passes or the proposal becomes terminal. It never
+    /// appears in the frozen 02 queue view.
+    #[pallet::storage]
+    pub type PendingRatifications<T: Config> =
+        CountedStorageMap<_, Blake2_128Concat, ProposalId, u32, OptionQuery>;
 
     #[pallet::storage]
     pub type ExecutionRecords<T: Config> = StorageValue<_, StoredRecords, ValueQuery>;
@@ -1289,6 +1310,63 @@ pub mod pallet {
             GateSuspension::<T>::kill();
         }
 
+        /// Freeze a CODE/META referendum identity before queue admission. The
+        /// epoch pallet validates the signed proposer and exact ratify-track
+        /// preimage before calling this runtime-internal seam. If the proposal
+        /// is already queued, the core queue mirror is updated transactionally;
+        /// otherwise the bounded pending join survives until `enqueue`.
+        pub fn bind_ratification(pid: ProposalId, referendum_index: u32) -> DispatchResult {
+            with_storage_layer(|| {
+                let payload_hash = T::Epoch::payload_hash(pid).ok_or(Error::<T>::NotFound)?;
+                if let Some(bound) = PendingRatifications::<T>::get(pid) {
+                    ensure!(bound == referendum_index, Error::<T>::NotRatified);
+                }
+                if let Some(record) = Ratifications::<T>::get(pid) {
+                    ensure!(
+                        record.payload_hash == payload_hash
+                            && record.referendum_index == referendum_index,
+                        Error::<T>::NotRatified
+                    );
+                    if let Some(queued) = Queue::<T>::get(pid) {
+                        ensure!(
+                            execution_guard_core::requires_ratification(queued.class)
+                                && queued.payload_hash == payload_hash
+                                && queued.ratify_ref == Some(referendum_index)
+                                && queued.ratification_passed,
+                            Error::<T>::NotRatified
+                        );
+                    }
+                    PendingRatifications::<T>::remove(pid);
+                    return Ok(());
+                }
+                if Queue::<T>::contains_key(pid) {
+                    let mut state = Self::load()?;
+                    state
+                        .bind_ratification(pid, referendum_index)
+                        .map_err(Self::map_core_error)?;
+                    Self::persist(state)?;
+                    ensure!(
+                        PendingRatifications::<T>::contains_key(pid)
+                            || PendingRatifications::<T>::count() < MAX_RATIFICATIONS_BOUND,
+                        Error::<T>::QueueFull
+                    );
+                    PendingRatifications::<T>::insert(pid, referendum_index);
+                    return Ok(());
+                }
+                ensure!(
+                    PendingRatifications::<T>::contains_key(pid)
+                        || PendingRatifications::<T>::count() < MAX_RATIFICATIONS_BOUND,
+                    Error::<T>::QueueFull
+                );
+                if let Some(bound) = PendingRatifications::<T>::get(pid) {
+                    ensure!(bound == referendum_index, Error::<T>::NotRatified);
+                } else {
+                    PendingRatifications::<T>::insert(pid, referendum_index);
+                }
+                Ok(())
+            })
+        }
+
         /// Internal enqueue endpoint. B1a's A8 adapter constructs `item` from
         /// pallet-epoch's adopted proposal and supplies the epoch-decision
         /// origin; it is not a public extrinsic (I-9).
@@ -1437,6 +1515,43 @@ pub mod pallet {
                             && (T::Guardian::ledger_freeze_active() || MigrationHalt::<T>::get())),
                     Error::<T>::FreezeActive
                 );
+
+                // A CODE/META referendum may be submitted before this
+                // proposal reaches the execution queue. Merge its frozen
+                // identity into the queue value without treating it as
+                // passed; the proposer-side binding is consumed only after
+                // the queue mirror has persisted successfully.
+                if execution_guard_core::requires_ratification(item.class) {
+                    if let Some(bound) = PendingRatifications::<T>::get(item.pid) {
+                        ensure!(
+                            item.ratify_ref.is_none() || item.ratify_ref == Some(bound),
+                            Error::<T>::NotRatified
+                        );
+                        item.ratify_ref = Some(bound);
+                    } else if let Some(record) = Ratifications::<T>::get(item.pid) {
+                        ensure!(
+                            record.payload_hash == item.payload_hash,
+                            Error::<T>::NotRatified
+                        );
+                        ensure!(
+                            item.ratify_ref.is_none()
+                                || item.ratify_ref == Some(record.referendum_index),
+                            Error::<T>::NotRatified
+                        );
+                        item.ratify_ref = Some(record.referendum_index);
+                    } else {
+                        // Queue admission must not manufacture a referendum
+                        // identity. Only the proposer-side binding above (or
+                        // an already-passed exact record) may populate it.
+                        ensure!(item.ratify_ref.is_none(), Error::<T>::NotRatified);
+                    }
+                } else {
+                    ensure!(
+                        item.ratify_ref.is_none()
+                            && !PendingRatifications::<T>::contains_key(item.pid),
+                        Error::<T>::CapabilityDenied
+                    );
+                }
 
                 item.ratification_passed = execution_guard_core::requires_ratification(item.class)
                     && Ratifications::<T>::get(item.pid).is_some_and(|record| {
@@ -1707,7 +1822,7 @@ pub mod pallet {
                     AttestationBindings::<T>::get(pid).is_some_and(|(bound_id, artifact)| {
                         id == bound_id
                             && T::Attestations::present_unrevoked_unchallenged(id)
-                            && T::Attestations::has_quorum(pid, artifact)
+                            && T::Attestations::has_record_quorum(pid, artifact)
                     })
                 });
                 if !valid {
@@ -1716,7 +1831,7 @@ pub mod pallet {
                 if QueuedRecoveryImages::<T>::get(pid).is_some_and(|recovery| {
                     T::Attestations::artifact_hash(recovery.attestation_id) != Some(recovery.hash)
                         || !T::Attestations::present_unrevoked_unchallenged(recovery.attestation_id)
-                        || !T::Attestations::has_quorum(pid, recovery.hash)
+                        || !T::Attestations::has_record_quorum(pid, recovery.hash)
                 }) {
                     return Some(RejectReason::AttestationMissing);
                 }
@@ -1809,7 +1924,7 @@ pub mod pallet {
                     ensure!(
                         bound_id == id
                             && T::Attestations::present_unrevoked_unchallenged(id)
-                            && T::Attestations::has_quorum(pid, artifact),
+                            && T::Attestations::has_record_quorum(pid, artifact),
                         Error::<T>::AttestationMissing
                     );
                     if let Some(recovery) = QueuedRecoveryImages::<T>::get(pid) {
@@ -1819,7 +1934,7 @@ pub mod pallet {
                                 && T::Attestations::present_unrevoked_unchallenged(
                                     recovery.attestation_id,
                                 )
-                                && T::Attestations::has_quorum(pid, recovery.hash),
+                                && T::Attestations::has_record_quorum(pid, recovery.hash),
                             Error::<T>::AttestationMissing
                         );
                     }
@@ -2140,7 +2255,7 @@ pub mod pallet {
             ensure!(
                 T::Attestations::artifact_hash(attestation_id) == Some(hash)
                     && T::Attestations::present_unrevoked_unchallenged(attestation_id)
-                    && T::Attestations::has_quorum(context.pid, hash),
+                    && T::Attestations::has_record_quorum(context.pid, hash),
                 Error::<T>::AttestationMissing
             );
             QueuedRecoveryImages::<T>::remove(context.pid);
@@ -2318,6 +2433,19 @@ pub mod pallet {
                 !Ratifications::<T>::contains_key(pid),
                 Error::<T>::NotRatified
             );
+            // In the production runtime CODE/META proposals must carry the
+            // proposer-owned pending join created by `epoch.bind_ratification`.
+            // Test seams that do not model proposal classes return `None` and
+            // retain the core pallet's historical direct-ratify fixture path.
+            if T::Epoch::requires_ratification(pid) == Some(true) {
+                ensure!(
+                    PendingRatifications::<T>::get(pid) == Some(referendum_index),
+                    Error::<T>::NotRatified
+                );
+            }
+            if let Some(bound) = PendingRatifications::<T>::get(pid) {
+                ensure!(bound == referendum_index, Error::<T>::NotRatified);
+            }
             ensure!(
                 Ratifications::<T>::count() < MAX_RATIFICATIONS_BOUND,
                 Error::<T>::QueueFull
@@ -2344,6 +2472,7 @@ pub mod pallet {
                     ratified_at: Self::now(),
                 },
             );
+            PendingRatifications::<T>::remove(pid);
             Ok(())
         }
 
@@ -2513,6 +2642,7 @@ pub mod pallet {
 
         fn cleanup_terminal(pid: ProposalId) {
             Ratifications::<T>::remove(pid);
+            PendingRatifications::<T>::remove(pid);
             Expedited::<T>::remove(pid);
             AttestationBindings::<T>::remove(pid);
             QualifiedRecoveryImages::<T>::remove(pid);
@@ -2728,12 +2858,16 @@ pub mod pallet {
                 .map_err(|_| TryRuntimeError::Other("execution guard core bounds failed"))?;
             let actual_queue_count = Queue::<T>::iter_keys().count();
             let actual_ratification_count = Ratifications::<T>::iter_keys().count();
+            let actual_pending_ratification_count = PendingRatifications::<T>::iter_keys().count();
             let actual_rerun_pin_count = RerunPins::<T>::iter_keys().count();
             if Queue::<T>::count() > MAX_QUEUE_BOUND
                 || usize::try_from(Queue::<T>::count()).ok() != Some(actual_queue_count)
                 || Ratifications::<T>::count() > MAX_RATIFICATIONS_BOUND
                 || usize::try_from(Ratifications::<T>::count()).ok()
                     != Some(actual_ratification_count)
+                || PendingRatifications::<T>::count() > MAX_RATIFICATIONS_BOUND
+                || usize::try_from(PendingRatifications::<T>::count()).ok()
+                    != Some(actual_pending_ratification_count)
                 || RerunPins::<T>::count() > MAX_QUEUE_BOUND
                 || usize::try_from(RerunPins::<T>::count()).ok() != Some(actual_rerun_pin_count)
                 || ExecutionRecords::<T>::get().len() > MAX_EXECUTION_RECORDS
@@ -2780,6 +2914,15 @@ pub mod pallet {
                     ));
                 }
                 let ratification = Ratifications::<T>::get(pid);
+                if requires_ratification
+                    && queued.ratify_ref.is_some()
+                    && !queued.ratification_passed
+                    && PendingRatifications::<T>::get(pid) != queued.ratify_ref
+                {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard queue ratification identity is unbound",
+                    ));
+                }
                 if queued.ratification_passed
                     != ratification.is_some_and(|record| {
                         record.payload_hash == queued.payload_hash
@@ -2857,6 +3000,11 @@ pub mod pallet {
                 }
             }
             for (pid, record) in Ratifications::<T>::iter() {
+                if PendingRatifications::<T>::contains_key(pid) {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard ratification is both pending and passed",
+                    ));
+                }
                 let queued_binding = Queue::<T>::get(pid).is_some_and(|queued| {
                     queued.payload_hash == record.payload_hash
                         && queued.ratify_ref == Some(record.referendum_index)
@@ -2864,6 +3012,22 @@ pub mod pallet {
                 if !queued_binding && T::Epoch::payload_hash(pid) != Some(record.payload_hash) {
                     return Err(TryRuntimeError::Other(
                         "execution guard Ratifications commitment is absent",
+                    ));
+                }
+            }
+            for (pid, bound) in PendingRatifications::<T>::iter() {
+                let valid_queue_binding = Queue::<T>::get(pid).is_some_and(|queued| {
+                    execution_guard_core::requires_ratification(queued.class)
+                        && !queued.ratification_passed
+                        && queued.ratify_ref == Some(bound)
+                });
+                if (!valid_queue_binding && Queue::<T>::contains_key(pid))
+                    || Ratifications::<T>::contains_key(pid)
+                    || T::Epoch::payload_hash(pid).is_none()
+                    || T::Epoch::requires_ratification(pid) == Some(false)
+                {
+                    return Err(TryRuntimeError::Other(
+                        "execution guard orphan pending ratification",
                     ));
                 }
             }

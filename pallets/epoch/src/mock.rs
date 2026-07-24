@@ -2,10 +2,12 @@
 
 use crate as pallet_epoch;
 use crate::*;
-use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
+use frame_support::{
+    derive_impl, pallet_prelude::DispatchResult, parameter_types, traits::EnsureOrigin,
+};
 use futarchy_primitives::{
     keeper::{CrankClass, KeeperRebateSink},
-    BoundedVec, Branch, ProposalState, ResourceId,
+    BoundedVec, Branch, EpochPhase, ProposalState, ResourceId,
 };
 use parity_scale_codec::{Decode, Encode};
 use sp_core::crypto::AccountId32;
@@ -516,8 +518,11 @@ impl GuardianAccess for TestGuardian {
     fn dead_man_engaged() -> bool {
         DeadManEngaged::get()
     }
-    fn review_window_closed(_pid: ProposalId) -> bool {
+    fn review_window_closed(_pid: ProposalId, _epoch: EpochId, _phase: EpochPhase) -> bool {
         ReviewClosed::get()
+    }
+    fn close_review_window(_pid: ProposalId) -> DispatchResult {
+        Ok(())
     }
 }
 

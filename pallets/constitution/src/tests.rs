@@ -181,7 +181,7 @@ fn phase_flag_bit_assignments_match_02_7_3() {
 
 #[test]
 fn contract_version_and_bounds_reexports_hold() {
-    assert_eq!(CONTRACT_VERSION, 9); // v9: paired primary/recovery metadata commitments
+    assert_eq!(CONTRACT_VERSION, 10); // v10: attestor liabilities, revocations, and native holds
     assert_eq!(MAX_PARAMS, 128); // 13 §4 registry bound
     assert_eq!(MAX_CAPABILITIES, 64);
     assert_eq!(crate::MAX_METERS, 16);

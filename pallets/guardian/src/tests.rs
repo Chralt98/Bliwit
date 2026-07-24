@@ -6,12 +6,16 @@ use crate::mock::*;
 use crate::{pallet::*, Error, Event, ReviewVerdict};
 use frame_support::{
     assert_noop, assert_ok,
-    traits::fungible::{InspectHold, Mutate},
+    traits::{
+        fungible::{InspectHold, Mutate},
+        Hooks, StorageVersion,
+    },
+    BoundedVec,
 };
 use guardian_core::{
-    ActionId, DispatchContext, GuardianOrigin, GuardianPower, PlaybookId, PlaybookTrigger,
-    ProposalStatus, TriggerState, ACTION_EXPIRY_BLOCKS, FORCE_RERUN_WINDOW_BLOCKS, GUARDIAN_BOND,
-    GUARDIAN_SEATS,
+    ActionId, DispatchContext, GuardianOrigin, GuardianPower, PendingAction, PlaybookId,
+    PlaybookTrigger, ProposalStatus, TriggerState, ACTION_EXPIRY_BLOCKS, FORCE_RERUN_WINDOW_BLOCKS,
+    GUARDIAN_BOND, GUARDIAN_SEATS,
 };
 use sp_core::crypto::AccountId32;
 use sp_runtime::DispatchError;
@@ -72,6 +76,69 @@ fn genesis_seeds_council_and_try_state_holds() {
             );
         }
         assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn storage_v1_backfills_failed_delay_reverse_join() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Guardian>();
+        PendingActions::<Test>::put(
+            BoundedVec::try_from(vec![PendingAction {
+                id: 7,
+                proposer: acct(1).into(),
+                power: GuardianPower::DelayOnce { pid: 42 },
+                justification_hash: hash(7),
+                created_at: 0,
+                expires_at: ACTION_EXPIRY_BLOCKS,
+                dispatched: true,
+            }])
+            .expect("single pending action fits"),
+        );
+        VetoReviewReferenda::<Test>::insert(7, 101);
+
+        let _ = <Guardian as Hooks<u64>>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<Guardian>(), StorageVersion::new(1));
+        assert_eq!(VetoReviewActions::<Test>::get(42), Some(7));
+    });
+}
+
+#[test]
+fn storage_v1_migration_stays_retryable_on_ambiguous_review() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Guardian>();
+        VetoReviewReferenda::<Test>::insert(8, 101);
+
+        let _ = <Guardian as Hooks<u64>>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<Guardian>(), StorageVersion::new(0));
+        assert!(!VetoReviewActions::<Test>::contains_key(42));
+    });
+}
+
+#[test]
+fn storage_v1_migration_stays_retryable_on_malformed_existing_reverse_join() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Guardian>();
+        PendingActions::<Test>::put(
+            BoundedVec::try_from(vec![PendingAction {
+                id: 7,
+                proposer: acct(1).into(),
+                power: GuardianPower::DelayOnce { pid: 42 },
+                justification_hash: hash(7),
+                created_at: 0,
+                expires_at: ACTION_EXPIRY_BLOCKS,
+                dispatched: true,
+            }])
+            .expect("single pending action fits"),
+        );
+        VetoReviewReferenda::<Test>::insert(7, 101);
+        VetoReviewActions::<Test>::insert(99, 7);
+
+        let _ = <Guardian as Hooks<u64>>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<Guardian>(), StorageVersion::new(0));
     });
 }
 
@@ -551,9 +618,15 @@ fn maintenance_crank_expires_playbooks_and_slashes_overdue_reviews() {
             hash(2)
         ));
         approve_to_dispatch();
-        // Review deadline is `current_epoch + 2`; it fails at that boundary.
+        // Review deadline is `current_epoch + 2`; strict enforcement fails
+        // only after that boundary, at epoch 3 (SQ-45).
         set_epoch(2);
         run_to_block(2);
+        assert!(MemberBonds::<Test>::get()
+            .iter()
+            .all(|bond| *bond == GUARDIAN_BOND));
+        set_epoch(3);
+        run_to_block(3);
         let bonds = MemberBonds::<Test>::get();
         assert!(bonds[..5].iter().all(|b| *b == GUARDIAN_BOND / 2));
         assert!(bonds[5..].iter().all(|b| *b == GUARDIAN_BOND));
@@ -1793,8 +1866,9 @@ fn maintenance_crank_reaps_dispatched_action_and_terminal_review() {
 #[test]
 fn review_failure_slashes_and_schedules_recall() {
     // 06 §5.4: a missed 2-epoch deadline slashes each approver 50% AND
-    // auto-schedules a recall referendum on the `guardian` track. A delay
-    // review leaves both verdict referenda open for the deadline cleanup.
+    // auto-schedules a recall referendum on the `guardian` track. The
+    // ordinary ratify review is settled at the deadline; the separate veto
+    // referendum remains bounded until T12 (SQ-311).
     new_test_ext().execute_with(|| {
         reset_review_scheduler();
         set_status(ProposalStatus::Queued, false);
@@ -1823,8 +1897,8 @@ fn review_failure_slashes_and_schedules_recall() {
             2 * ReviewDepositValue::get()
         );
 
-        set_epoch(2); // dispatch epoch (0) + REVIEW_DEADLINE_EPOCHS (2)
-        run_to_block(2);
+        set_epoch(3); // strictly after dispatch epoch (0) + deadline (2)
+        run_to_block(3);
         assert!(last_events()
             .iter()
             .any(|e| matches!(e, Event::ReviewFailed { action: 0, .. })));
@@ -1835,16 +1909,130 @@ fn review_failure_slashes_and_schedules_recall() {
                 referendum: 102
             }
         )));
-        assert_eq!(CancelledReviews::get(), vec![100, 101]);
-        assert_eq!(RefundedReviews::get(), vec![100, 101]);
+        assert_eq!(CancelledReviews::get(), vec![100]);
+        assert_eq!(RefundedReviews::get(), vec![100]);
         assert_eq!(MemberBonds::<Test>::get()[..5], [GUARDIAN_BOND / 2; 5]);
+        let failed_fronting =
+            ReviewFrontingOf::<Test>::get(0).expect("failed delay retains veto fronting");
         for member in members().iter().take(5) {
-            assert_eq!(seat_hold(member), GUARDIAN_BOND / 2);
+            let position = members()
+                .iter()
+                .position(|candidate| candidate == member)
+                .expect("member is seated");
+            assert_eq!(
+                seat_hold(member) + failed_fronting.slices[position],
+                GUARDIAN_BOND / 2
+            );
         }
         assert!(FailedActions::<Test>::contains_key(0));
         assert!(!ReviewReferenda::<Test>::contains_key(0));
+        assert_eq!(VetoReviewReferenda::<Test>::get(0), Some(101));
+        assert_eq!(VetoReviewActions::<Test>::get(4), Some(0));
+        assert_eq!(
+            failed_fronting.slices.iter().copied().sum::<u128>(),
+            ReviewDepositValue::get()
+        );
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn t12_closes_only_veto_and_leaves_accountability_review_live() {
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_status(ProposalStatus::Queued, false);
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::DelayOnce { pid: 42 },
+            hash(42)
+        ));
+        approve_to_dispatch();
+
+        // T12 happens in the next epoch's Seed phase, before the separate
+        // accountability deadline. Closing it must not erase ratification or
+        // the core action record.
+        assert_ok!(Guardian::close_review_window(42));
+        assert_eq!(CancelledReviews::get(), vec![101]);
+        assert_eq!(RefundedReviews::get(), vec![101]);
+        assert_eq!(ReviewReferenda::<Test>::get(0), Some(100));
         assert!(!VetoReviewReferenda::<Test>::contains_key(0));
+        assert!(!VetoReviewActions::<Test>::contains_key(42));
+        assert_eq!(
+            ReviewFrontingOf::<Test>::get(0)
+                .expect("ordinary review remains fronted")
+                .slices
+                .iter()
+                .copied()
+                .sum::<u128>(),
+            ReviewDepositValue::get()
+        );
+        assert_ok!(Guardian::do_try_state());
+
+        // The ordinary review still reaches the strict deadline and follows
+        // the normal slash/recall path with no surviving veto liability.
+        set_epoch(3);
+        run_to_block(3);
+        assert!(last_events()
+            .iter()
+            .any(|event| matches!(event, Event::ReviewFailed { action: 0, .. })));
         assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        assert!(!ReviewReferenda::<Test>::contains_key(0));
+        assert!(!VetoReviewReferenda::<Test>::contains_key(0));
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn close_review_window_refuses_a_wrong_reverse_join_before_side_effects() {
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_status(ProposalStatus::Queued, false);
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::DelayOnce { pid: 42 },
+            hash(42)
+        ));
+        approve_to_dispatch();
+        let action = VetoReviewActions::<Test>::get(42).expect("reverse join");
+        VetoReviewActions::<Test>::insert(99, action);
+
+        assert_noop!(
+            Guardian::close_review_window(99),
+            Error::<Test>::FailedActionNotFound
+        );
+        assert!(CancelledReviews::get().is_empty());
+        assert!(VetoReviewReferenda::<Test>::contains_key(action));
+    });
+}
+
+#[test]
+fn recall_before_t12_keeps_returned_veto_fronting_releasable() {
+    new_test_ext().execute_with(|| {
+        reset_review_scheduler();
+        set_status(ProposalStatus::Queued, false);
+        assert_ok!(Guardian::propose_action(
+            RuntimeOrigin::signed(acct(1)),
+            GuardianPower::DelayOnce { pid: 77 },
+            hash(77)
+        ));
+        approve_to_dispatch();
+        set_epoch(3);
+        run_to_block(3);
+
+        // Recall may enact before the keeper observes T12. The review deposit
+        // remains in the sovereign until the proposal-specific close.
+        assert_ok!(Guardian::recall(values_origin(), 0));
+        assert_eq!(PendingBondReleases::<Test>::get().len(), 5);
+        assert_ok!(Guardian::close_review_window(77));
+        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        assert!(!VetoReviewActions::<Test>::contains_key(77));
+
+        set_epoch(4);
+        run_to_block(4);
+        assert!(PendingBondReleases::<Test>::get().is_empty());
+        for member in members().into_iter().take(5) {
+            assert_eq!(seat_hold(&member), 0);
+        }
         assert_ok!(Guardian::do_try_state());
     });
 }
@@ -1908,18 +2096,18 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
         // Isolate the middle review's refund failure. The first and third
         // reviews must commit independently instead of sharing one rollback.
         ReviewRefundFailsFor::set(Some(102));
-        set_epoch(2);
-        run_to_block(2);
+        set_epoch(3);
+        run_to_block(3);
         assert!(FailedActions::<Test>::contains_key(0));
         assert!(!FailedActions::<Test>::contains_key(1));
         assert!(FailedActions::<Test>::contains_key(2));
         assert!(ReviewFrontingOf::<Test>::contains_key(1));
-        assert!(!ReviewFrontingOf::<Test>::contains_key(0));
+        assert!(ReviewFrontingOf::<Test>::contains_key(0));
         assert!(!ReviewFrontingOf::<Test>::contains_key(2));
         assert!(!ReviewReferenda::<Test>::contains_key(0));
         assert_eq!(ReviewReferenda::<Test>::get(1), Some(102));
         assert!(!ReviewReferenda::<Test>::contains_key(2));
-        assert!(!VetoReviewReferenda::<Test>::contains_key(0));
+        assert_eq!(VetoReviewReferenda::<Test>::get(0), Some(101));
         assert_eq!(VetoReviewReferenda::<Test>::get(1), Some(103));
         assert!(!VetoReviewReferenda::<Test>::contains_key(2));
 
@@ -1934,9 +2122,9 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
         );
         let bonds = MemberBonds::<Test>::get();
         for (position, bond) in bonds.iter().take(5).enumerate() {
-            assert_eq!(
-                *bond, stranded.slices[position],
-                "actual obligation is held balance plus outstanding fronting"
+            assert!(
+                *bond >= stranded.slices[position],
+                "the remaining obligation covers the stranded fronting slice"
             );
         }
         assert_ok!(Guardian::do_try_state());
@@ -1944,21 +2132,36 @@ fn three_concurrent_failed_reviews_settle_independently_with_bounded_liability()
         // Retrying only the failed review consumes the remaining bounded
         // liability. No exact transfer can demand more than the live hold.
         ReviewRefundFailsFor::set(None);
-        run_to_block(3);
+        run_to_block(4);
+        assert!(FailedActions::<Test>::contains_key(0));
+        assert!(FailedActions::<Test>::contains_key(1));
+        assert!(FailedActions::<Test>::contains_key(2));
+        assert!(ReviewFrontingOf::<Test>::contains_key(0));
+        assert!(ReviewFrontingOf::<Test>::contains_key(1));
+        assert!(!ReviewFrontingOf::<Test>::contains_key(2));
+        assert_eq!(VetoReviewReferenda::<Test>::get(0), Some(101));
+        assert_eq!(VetoReviewReferenda::<Test>::get(1), Some(103));
+
+        // Both delayed actions remain admissible for T24 until their
+        // proposal-specific T12 close is observed.
+        assert_ok!(Guardian::close_review_window(10));
+        assert_ok!(Guardian::close_review_window(11));
         for action in 0..3 {
             assert!(FailedActions::<Test>::contains_key(action));
             assert!(!ReviewReferenda::<Test>::contains_key(action));
             assert!(!VetoReviewReferenda::<Test>::contains_key(action));
             assert!(!ReviewFrontingOf::<Test>::contains_key(action));
         }
+        let residual_obligation = 2 * ReviewDepositValue::get() / 5;
         assert!(MemberBonds::<Test>::get()[..5]
             .iter()
-            .all(|bond| *bond == 0));
+            .all(|bond| *bond == residual_obligation));
         let reason = RuntimeHoldReason::Guardian(crate::HoldReason::SeatBond);
         for member in members().iter().take(5) {
             assert_eq!(
                 <Balances as InspectHold<AccountId32>>::balance_on_hold(&reason, member),
-                0
+                residual_obligation,
+                "unexpected seat hold after all veto closes for {member:?}"
             );
         }
         assert_ok!(Guardian::do_try_state());
@@ -2095,8 +2298,8 @@ fn recall_vacates_approvers_and_releases_residual_bonds_one_epoch_later() {
             hash(7)
         ));
         approve_to_dispatch();
-        set_epoch(2);
-        run_to_block(2);
+        set_epoch(3);
+        run_to_block(3);
         assert_ok!(Guardian::recall(values_origin(), 0));
         let seats = Members::<Test>::get().expect("council remains initialized");
         assert_eq!(seats.iter().filter(|seat| seat.is_none()).count(), 5);
@@ -2110,8 +2313,8 @@ fn recall_vacates_approvers_and_releases_residual_bonds_one_epoch_later() {
         assert_ok!(Guardian::approve_action(RuntimeOrigin::signed(acct(7)), 1));
         assert!(!PendingActions::<Test>::get()[0].dispatched);
 
-        set_epoch(3);
-        run_to_block(3);
+        set_epoch(4);
+        run_to_block(4);
         assert!(PendingBondReleases::<Test>::get().is_empty());
         for member in members().into_iter().take(5) {
             assert_eq!(

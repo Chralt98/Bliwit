@@ -234,7 +234,7 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use sp_runtime::{SaturatedConversion, TryRuntimeError};
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -399,6 +399,14 @@ pub mod pallet {
     #[pallet::storage]
     pub type VetoReviewReferenda<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, ActionId, u32, OptionQuery>;
+
+    /// Reverse join for a failed `delay_once` review. The action record is
+    /// retained only until T12 leaves `Suspended`, so the surviving veto can
+    /// still enact even after the ordinary review referendum has failed and
+    /// the guardian action has otherwise become terminal.
+    #[pallet::storage]
+    pub type VetoReviewActions<T: Config> =
+        CountedStorageMap<_, Blake2_128Concat, ProposalId, ActionId, OptionQuery>;
 
     #[derive(
         Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo, Default,
@@ -583,6 +591,81 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        /// Backfill the reverse pid→action join introduced with the separate
+        /// T12 veto lifetime.  Pre-B18 chains already have the bounded
+        /// `PendingActions` and `VetoReviewReferenda` rows; deriving the join
+        /// from those two sources keeps an upgrade from losing a live veto.
+        /// An ambiguous or over-bound state leaves the version at zero so a
+        /// later upgrade attempt can retry after operator repair.
+        fn on_runtime_upgrade() -> Weight {
+            let version = StorageVersion::get::<Pallet<T>>();
+            if version != StorageVersion::new(0) {
+                return Weight::zero();
+            }
+            let pending = PendingActions::<T>::get();
+            let referenda = VetoReviewReferenda::<T>::iter()
+                .take((MAX_REVIEWS as usize).saturating_add(1))
+                .collect::<Vec<_>>();
+            let existing = VetoReviewActions::<T>::iter()
+                .take((MAX_REVIEWS as usize).saturating_add(1))
+                .collect::<Vec<_>>();
+            let reads = 3u64
+                .saturating_add(referenda.len() as u64)
+                .saturating_add(existing.len() as u64)
+                .saturating_add(existing.len() as u64);
+            if referenda.len() > MAX_REVIEWS as usize || existing.len() > MAX_REVIEWS as usize {
+                return T::DbWeight::get().reads(reads);
+            }
+            // A pre-existing reverse row is not trusted merely because its
+            // action id appears in the veto map: validate both directions of
+            // the join before advancing the storage version.  Otherwise a
+            // malformed row could make the migration look complete while
+            // leaving a permanent try-state failure (G-1).
+            for (pid, action) in &existing {
+                let valid_pending = pending.iter().any(|pending| {
+                    pending.id == *action
+                        && matches!(
+                            pending.power,
+                            GuardianPower::DelayOnce { pid: target } if target == *pid
+                        )
+                });
+                if !valid_pending
+                    || !VetoReviewReferenda::<T>::contains_key(*action)
+                    || existing
+                        .iter()
+                        .filter(|(_, mapped)| mapped == action)
+                        .count()
+                        != 1
+                {
+                    return T::DbWeight::get().reads(reads);
+                }
+            }
+            let mut writes = 0u64;
+            for (action, _) in referenda {
+                if existing.iter().any(|(_, mapped)| *mapped == action) {
+                    continue;
+                }
+                let Some(pid) = pending.iter().find_map(|pending| {
+                    (pending.id == action).then_some(match pending.power {
+                        GuardianPower::DelayOnce { pid } => Some(pid),
+                        _ => None,
+                    })?
+                }) else {
+                    return T::DbWeight::get().reads(reads);
+                };
+                if VetoReviewActions::<T>::count() >= MAX_REVIEWS {
+                    return T::DbWeight::get().reads(reads);
+                }
+                VetoReviewActions::<T>::insert(pid, action);
+                writes = writes.saturating_add(1);
+            }
+            StorageVersion::new(1).put::<Pallet<T>>();
+            writes = writes.saturating_add(1);
+            T::DbWeight::get()
+                .reads(reads)
+                .saturating_add(T::DbWeight::get().writes(writes))
+        }
+
         /// Bounded maintenance crank (06 §5.4 review deadlines, §6.2 playbook
         /// expiry). Both act on bounded collections (≤ [`MAX_REVIEWS`] reviews,
         /// ≤ [`MAX_ACTIVE_PLAYBOOKS`] playbooks) and are idempotent, so a
@@ -706,6 +789,11 @@ pub mod pallet {
                 Self::drain_events(&mut g)?;
                 ReviewReferenda::<T>::remove(action_id);
                 VetoReviewReferenda::<T>::remove(action_id);
+                if let Some(pid) = VetoReviewActions::<T>::iter()
+                    .find_map(|(pid, action)| (action == action_id).then_some(pid))
+                {
+                    VetoReviewActions::<T>::remove(pid);
+                }
                 ReviewFrontingOf::<T>::remove(action_id);
                 Ok(())
             })
@@ -754,14 +842,23 @@ pub mod pallet {
                 )
                 .map_err(Self::map_core_error)?;
                 T::ProposalVeto::uphold(pid)?;
-                let referendum =
-                    ReviewReferenda::<T>::get(action_id).ok_or(Error::<T>::ReviewNotFound)?;
-                T::ReviewScheduler::cancel_review(referendum)?;
+                ensure!(
+                    VetoReviewReferenda::<T>::contains_key(action_id),
+                    Error::<T>::ReviewNotFound
+                );
+                if let Some(referendum) = ReviewReferenda::<T>::get(action_id) {
+                    T::ReviewScheduler::cancel_review(referendum)?;
+                }
                 Self::refund_review_fronting(action_id)?;
                 Self::persist(&g)?;
                 Self::drain_events(&mut g)?;
                 ReviewReferenda::<T>::remove(action_id);
                 VetoReviewReferenda::<T>::remove(action_id);
+                if let Some(pid) = VetoReviewActions::<T>::iter()
+                    .find_map(|(pid, action)| (action == action_id).then_some(pid))
+                {
+                    VetoReviewActions::<T>::remove(pid);
+                }
                 ReviewFrontingOf::<T>::remove(action_id);
                 Ok(())
             })
@@ -1115,13 +1212,19 @@ pub mod pallet {
             if fronting.slices.iter().all(|slice| *slice == 0) {
                 return Ok(());
             }
-            let referendum = ReviewReferenda::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
+            let referendum = ReviewReferenda::<T>::get(action);
             let veto_referendum = VetoReviewReferenda::<T>::get(action);
             ensure!(
-                fronting.referendum == referendum,
-                Error::<T>::BondAccounting
+                referendum.is_some() || veto_referendum.is_some(),
+                Error::<T>::ReviewNotFound
             );
-            T::ReviewScheduler::refund_review(referendum)?;
+            if let Some(referendum) = referendum {
+                ensure!(
+                    fronting.referendum == referendum,
+                    Error::<T>::BondAccounting
+                );
+                T::ReviewScheduler::refund_review(referendum)?;
+            }
             if let Some(uphold_veto) = veto_referendum {
                 T::ReviewScheduler::refund_review(uphold_veto)?;
             }
@@ -1149,25 +1252,50 @@ pub mod pallet {
         /// every refundable overdue review before computing any slash, so the
         /// current hold is the authoritative bounded liability.
         fn restore_due_review_fronting(action: ActionId) -> DispatchResult {
-            let mut fronting =
-                ReviewFrontingOf::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
-            if fronting.slices.iter().all(|slice| *slice == 0) {
-                return Ok(());
-            }
+            let fronting = ReviewFrontingOf::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
             let referendum = ReviewReferenda::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
             let veto_referendum = VetoReviewReferenda::<T>::get(action);
             ensure!(
                 fronting.referendum == referendum,
                 Error::<T>::BondAccounting
             );
+            // A delay review has two equally fronted deposits. The ordinary
+            // ratify referendum is terminal at `grd.review_dl`; retain exactly
+            // the deterministic one-deposit share for `uphold_veto`, whose
+            // state bound is T12 rather than the accountability deadline.
+            let retained_total = veto_referendum
+                .map(|_| T::ReviewScheduler::review_deposit())
+                .unwrap_or(0);
+            let fronted = fronting
+                .slices
+                .iter()
+                .take(usize::from(fronting.approver_count))
+                .copied()
+                .fold(0u128, u128::saturating_add);
+            ensure!(fronted >= retained_total, Error::<T>::BondAccounting);
+            if fronted == retained_total {
+                return Ok(());
+            }
             T::ReviewScheduler::cancel_review(referendum)?;
-            if let Some(uphold_veto) = veto_referendum {
-                T::ReviewScheduler::cancel_review(uphold_veto)?;
-            }
             T::ReviewScheduler::refund_review(referendum)?;
-            if let Some(uphold_veto) = veto_referendum {
-                T::ReviewScheduler::refund_review(uphold_veto)?;
-            }
+            Self::restore_fronting_excess(action, retained_total)
+        }
+
+        /// Return the portion of review fronting that no longer backs a live
+        /// referendum, retaining `retained_total` in the sovereign account and
+        /// moving the excess back into the approvers' seat holds. The caller
+        /// has already canceled/refunded the referendum being removed.
+        fn restore_fronting_excess(
+            action: ActionId,
+            retained_total: futarchy_primitives::Balance,
+        ) -> DispatchResult {
+            let mut fronting =
+                ReviewFrontingOf::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
+            ensure!(fronting.approver_count > 0, Error::<T>::BondAccounting);
+            let divisor = futarchy_primitives::Balance::from(fronting.approver_count);
+            let retained_base = retained_total / divisor;
+            let retained_remainder = usize::try_from(retained_total % divisor)
+                .map_err(|_| Error::<T>::BondAccounting)?;
             let reason = Self::seat_reason();
             let sovereign = T::SovereignAccount::get();
             for (position, raw) in fronting
@@ -1180,13 +1308,86 @@ pub mod pallet {
                 if slice == 0 {
                     continue;
                 }
+                let retained = retained_base.saturating_add(futarchy_primitives::Balance::from(
+                    position < retained_remainder,
+                ));
+                ensure!(retained <= slice, Error::<T>::BondAccounting);
+                let returned = slice.saturating_sub(retained);
                 let who = Self::from_core(*raw);
-                T::Currency::transfer(&sovereign, &who, slice, Preservation::Expendable)?;
-                T::Currency::hold(&reason, &who, slice)?;
-                fronting.slices[position] = 0;
+                if returned > 0 {
+                    T::Currency::transfer(&sovereign, &who, returned, Preservation::Expendable)?;
+                    T::Currency::hold(&reason, &who, returned)?;
+                }
+                fronting.slices[position] = retained;
             }
             ReviewFrontingOf::<T>::insert(action, fronting);
             Ok(())
+        }
+
+        /// Close the surviving `uphold_veto` referendum when T12 leaves the
+        /// proposal's `Suspended` state. Failed ordinary reviews have already
+        /// slashed and settled their ratify referendum; the veto deposit is
+        /// the only remaining fronted liability and is returned to the same
+        /// approver holds before the core action/review records are reaped.
+        pub fn close_review_window(pid: ProposalId) -> DispatchResult {
+            frame_support::storage::with_storage_layer(|| {
+                let Some(action) = VetoReviewActions::<T>::get(pid) else {
+                    return Ok(());
+                };
+                ensure!(
+                    PendingActions::<T>::get().iter().any(|pending| {
+                        pending.id == action
+                            && matches!(
+                                pending.power,
+                                GuardianPower::DelayOnce { pid: target } if target == pid
+                            )
+                    }),
+                    Error::<T>::FailedActionNotFound
+                );
+                let veto_referendum =
+                    VetoReviewReferenda::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
+                let fronting =
+                    ReviewFrontingOf::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
+                let ordinary_referendum = ReviewReferenda::<T>::get(action);
+                let retained_total = if ordinary_referendum.is_some() {
+                    // The ordinary ratify review remains accountable through
+                    // `grd.review_dl`; only the veto referendum is closed at
+                    // T12. Keep its one-deposit fronting in the sovereign.
+                    T::ReviewScheduler::review_deposit()
+                } else {
+                    // If the keeper missed T12 until after the accountability
+                    // deadline, the failed review still retains T24 admission.
+                    // T12 now closes that veto and releases the whole residual.
+                    0
+                };
+                let fronted = fronting
+                    .slices
+                    .iter()
+                    .take(usize::from(fronting.approver_count))
+                    .copied()
+                    .fold(0u128, u128::saturating_add);
+                ensure!(fronted >= retained_total, Error::<T>::BondAccounting);
+                T::ReviewScheduler::cancel_review(veto_referendum)?;
+                T::ReviewScheduler::refund_review(veto_referendum)?;
+                if fronted > retained_total {
+                    Self::restore_fronting_excess(action, retained_total)?;
+                }
+                if ordinary_referendum.is_none() {
+                    let mut g = Self::load().ok_or(Error::<T>::NotInitialized)?;
+                    g.close_failed_review(
+                        guardian_core::GuardianOrigin::ConstitutionalValues,
+                        action,
+                    )
+                    .map_err(Self::map_core_error)?;
+                    Self::persist(&g)?;
+                }
+                VetoReviewActions::<T>::remove(pid);
+                VetoReviewReferenda::<T>::remove(action);
+                if ordinary_referendum.is_none() {
+                    ReviewFrontingOf::<T>::remove(action);
+                }
+                Ok(())
+            })
         }
 
         /// Current block as the core's `u32` block number (real runtime is u32;
@@ -1352,6 +1553,23 @@ pub mod pallet {
                         ReviewReferenda::<T>::insert(action, referendum);
                         if let Some(veto_referendum) = veto_referendum {
                             VetoReviewReferenda::<T>::insert(action, veto_referendum);
+                            let pid = PendingActions::<T>::get()
+                                .into_iter()
+                                .find(|pending| pending.id == action)
+                                .and_then(|pending| match pending.power {
+                                    GuardianPower::DelayOnce { pid } => Some(pid),
+                                    _ => None,
+                                })
+                                .ok_or(Error::<T>::NotDelayAction)?;
+                            if let Some(existing) = VetoReviewActions::<T>::get(pid) {
+                                ensure!(existing == action, Error::<T>::TooManyReviews);
+                            } else {
+                                ensure!(
+                                    VetoReviewActions::<T>::count() < MAX_REVIEWS,
+                                    Error::<T>::TooManyReviews
+                                );
+                            }
+                            VetoReviewActions::<T>::insert(pid, action);
                         }
                         Self::deposit_event(Event::ReviewScheduled { action, referendum });
                     }
@@ -1390,10 +1608,23 @@ pub mod pallet {
         ) -> Result<(Option<u32>, [futarchy_primitives::Balance; GUARDIAN_SEATS]), DispatchError>
         {
             let fronting = ReviewFrontingOf::<T>::get(action).ok_or(Error::<T>::ReviewNotFound)?;
-            ensure!(
-                fronting.slices.iter().all(|slice| *slice == 0),
-                Error::<T>::BondAccounting
-            );
+            let veto_live = VetoReviewReferenda::<T>::contains_key(action);
+            let fronted = fronting
+                .slices
+                .iter()
+                .take(usize::from(fronting.approver_count))
+                .copied()
+                .fold(0u128, u128::saturating_add);
+            let expected_residual = if veto_live {
+                T::ReviewScheduler::review_deposit()
+            } else {
+                0
+            };
+            // `restore_due_review_fronting` is a separate child layer. If its
+            // cancellation/refund failed, leave this review untouched and
+            // retry next block rather than slashing against two deposits or
+            // committing an under-collateralized residual (G-1).
+            ensure!(fronted == expected_residual, Error::<T>::BondAccounting);
             ensure!(
                 FailedActions::<T>::contains_key(action)
                     || FailedActions::<T>::count() < MAX_FAILED_ACTIONS,
@@ -1464,8 +1695,9 @@ pub mod pallet {
             };
             FailedActions::<T>::insert(action, failed);
             ReviewReferenda::<T>::remove(action);
-            VetoReviewReferenda::<T>::remove(action);
-            ReviewFrontingOf::<T>::remove(action);
+            if !VetoReviewReferenda::<T>::contains_key(action) {
+                ReviewFrontingOf::<T>::remove(action);
+            }
             Ok((referendum, actual_slashes))
         }
 
@@ -1522,6 +1754,12 @@ pub mod pallet {
         /// no-op-safe.
         fn run_maintenance() {
             let epoch = T::CurrentEpoch::get();
+            // The core asks the FRAME shell whether a failed DelayOnce review
+            // still has a live veto referendum.  Snapshot the bounded action
+            // keys once; scanning the reverse pid→action join for every
+            // candidate would turn this already bounded hook into an O(n²)
+            // storage walk.
+            let live_veto_actions = VetoReviewReferenda::<T>::iter_keys().collect::<Vec<_>>();
             let overdue = match Self::load() {
                 Some(g) => g
                     .reviews
@@ -1529,7 +1767,7 @@ pub mod pallet {
                     .filter(|review| {
                         !review.ratified
                             && !review.recall_scheduled
-                            && epoch >= review.deadline_epoch
+                            && epoch > review.deadline_epoch
                     })
                     .map(|review| review.action_id)
                     .collect::<Vec<_>>(),
@@ -1557,7 +1795,9 @@ pub mod pallet {
                     let (scheduled, actual_slashes) = Self::settle_failed_review(action, nominal)?;
                     g.mark_review_failed(action, epoch, actual_slashes)
                         .map_err(Self::map_core_error)?;
-                    g.reap_terminal(Self::now());
+                    g.reap_terminal_with_veto(Self::now(), |candidate| {
+                        live_veto_actions.contains(&candidate)
+                    });
                     Self::persist(&g)?;
                     Self::deposit_event(Event::ReviewFailed {
                         action,
@@ -1575,7 +1815,9 @@ pub mod pallet {
                     let before = g.clone();
                     Self::sync_live_conditioned_playbooks(&g)?;
                     g.expire_playbooks(Self::now());
-                    g.reap_terminal(Self::now());
+                    g.reap_terminal_with_veto(Self::now(), |candidate| {
+                        live_veto_actions.contains(&candidate)
+                    });
                     if !(g.events.is_empty()
                         && g.active_playbooks == before.active_playbooks
                         && g.reviews == before.reviews
@@ -1722,6 +1964,10 @@ pub mod pallet {
                 TryRuntimeError::Other("guardian: VetoReviewReferenda over bound")
             );
             ensure!(
+                VetoReviewActions::<T>::count() <= MAX_REVIEWS,
+                TryRuntimeError::Other("guardian: VetoReviewActions over bound")
+            );
+            ensure!(
                 ALL_PLAYBOOKS
                     .iter()
                     .all(PlaybookRegistered::<T>::contains_key)
@@ -1758,6 +2004,31 @@ pub mod pallet {
                         )
                     );
                 }
+                for review in g.reviews.iter().filter(|review| {
+                    review.recall_scheduled
+                        && g.pending.iter().any(|pending| {
+                            pending.id == review.action_id
+                                && matches!(pending.power, GuardianPower::DelayOnce { .. })
+                        })
+                }) {
+                    let Some(pending) = g
+                        .pending
+                        .iter()
+                        .find(|pending| pending.id == review.action_id)
+                    else {
+                        return Err(TryRuntimeError::Other(
+                            "guardian I-23: failed delay review lost its action record",
+                        ));
+                    };
+                    ensure!(
+                        matches!(pending.power, GuardianPower::DelayOnce { .. })
+                            && VetoReviewReferenda::<T>::contains_key(review.action_id)
+                            && ReviewFrontingOf::<T>::contains_key(review.action_id),
+                        TryRuntimeError::Other(
+                            "guardian review: failed review lacks surviving veto",
+                        )
+                    );
+                }
 
                 let reason = Self::seat_reason();
                 for (index, member) in g.members.iter().enumerate() {
@@ -1790,18 +2061,20 @@ pub mod pallet {
                     );
                 }
                 for (action, fronting) in ReviewFrontingOf::<T>::iter() {
-                    let Some(referendum) = ReviewReferenda::<T>::get(action) else {
-                        return Err(TryRuntimeError::Other(
-                            "guardian bond: fronting has no referendum record",
-                        ));
-                    };
+                    let referendum = ReviewReferenda::<T>::get(action);
                     let veto_referendum = VetoReviewReferenda::<T>::get(action);
                     ensure!(
-                        fronting.referendum == referendum,
-                        TryRuntimeError::Other(
-                            "guardian bond: fronting and referendum records disagree"
-                        )
+                        referendum.is_some() || veto_referendum.is_some(),
+                        TryRuntimeError::Other("guardian bond: fronting has no referendum record")
                     );
+                    if let Some(referendum) = referendum {
+                        ensure!(
+                            fronting.referendum == referendum,
+                            TryRuntimeError::Other(
+                                "guardian bond: fronting and referendum records disagree"
+                            )
+                        );
+                    }
                     let is_delay_once = g
                         .pending
                         .iter()
@@ -1810,13 +2083,20 @@ pub mod pallet {
                             matches!(pending.power, GuardianPower::DelayOnce { .. })
                         });
                     ensure!(
-                        veto_referendum.is_some() == is_delay_once,
+                        if is_delay_once {
+                            // Before T12 both verdicts exist; after T12 the
+                            // veto is intentionally gone while the ordinary
+                            // accountability referendum remains live.
+                            veto_referendum.is_some() || referendum.is_some()
+                        } else {
+                            veto_referendum.is_none()
+                        },
                         TryRuntimeError::Other(
                             "guardian review: verdict set does not match action power"
                         )
                     );
                     ensure!(
-                        veto_referendum != Some(referendum),
+                        veto_referendum != referendum,
                         TryRuntimeError::Other("guardian review: duplicate verdict referenda")
                     );
                     let fronted = fronting
@@ -1825,8 +2105,20 @@ pub mod pallet {
                         .take(usize::from(fronting.approver_count))
                         .copied()
                         .fold(0u128, u128::saturating_add);
+                    let failed_delay = g
+                        .reviews
+                        .iter()
+                        .any(|review| review.action_id == action && review.recall_scheduled);
                     let expected = T::ReviewScheduler::review_deposit()
-                        .checked_mul(if veto_referendum.is_some() { 2 } else { 1 })
+                        .checked_mul(if veto_referendum.is_some() {
+                            if failed_delay {
+                                1
+                            } else {
+                                2
+                            }
+                        } else {
+                            1
+                        })
                         .ok_or(TryRuntimeError::Other(
                             "guardian bond: review deposit total overflow",
                         ))?;
@@ -1841,6 +2133,33 @@ pub mod pallet {
                     VetoReviewReferenda::<T>::iter_keys().all(ReviewFrontingOf::<T>::contains_key),
                     TryRuntimeError::Other(
                         "guardian review: veto referendum has no fronting record"
+                    )
+                );
+                let reverse_veto_joins = VetoReviewActions::<T>::iter().collect::<Vec<_>>();
+                ensure!(
+                    reverse_veto_joins.iter().all(|(pid, action)| {
+                        VetoReviewReferenda::<T>::contains_key(action)
+                            && ReviewFrontingOf::<T>::contains_key(action)
+                            && PendingActions::<T>::get().iter().any(|pending| {
+                                pending.id == *action
+                                    && matches!(
+                                        pending.power,
+                                        GuardianPower::DelayOnce { pid: target } if target == *pid
+                                    )
+                            })
+                    }),
+                    TryRuntimeError::Other("guardian review: reverse veto join is orphaned")
+                );
+                ensure!(
+                    VetoReviewReferenda::<T>::iter().all(|(action, _)| {
+                        reverse_veto_joins
+                            .iter()
+                            .filter(|(_, mapped)| *mapped == action)
+                            .count()
+                            == 1
+                    }),
+                    TryRuntimeError::Other(
+                        "guardian review: veto referendum lacks unique reverse join"
                     )
                 );
             }

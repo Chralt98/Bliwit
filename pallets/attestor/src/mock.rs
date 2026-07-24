@@ -10,6 +10,7 @@ type Block = frame_system::mocking::MockBlock<Test>;
 frame_support::construct_runtime!(
     pub enum Test {
         System: frame_system,
+        Balances: pallet_balances,
         Attestor: pallet_attestor,
     }
 );
@@ -19,6 +20,13 @@ impl frame_system::Config for Test {
     type Block = Block;
     type AccountId = AccountId32;
     type Lookup = IdentityLookup<AccountId32>;
+    type AccountData = pallet_balances::AccountData<futarchy_primitives::Balance>;
+}
+
+#[derive_impl(pallet_balances::config_preludes::TestDefaultConfig)]
+impl pallet_balances::Config for Test {
+    type AccountStore = System;
+    type Balance = futarchy_primitives::Balance;
 }
 
 pub const VALUES_ACC: [u8; 32] = [200; 32];
@@ -27,6 +35,19 @@ pub const RATIFY_ACC: [u8; 32] = [201; 32];
 parameter_types! {
     pub static AttestorParamsValue: pallet_attestor::AttestorParams =
         pallet_attestor::AttestorParams::DEFAULT;
+    pub const InsuranceAccount: AccountId32 = AccountId32::new([240; 32]);
+    pub static ProposalExecuted: bool = false;
+    pub static ProposalTerminal: bool = false;
+}
+
+pub struct TestProposalStatus;
+impl pallet_attestor::AttestorProposalStatus for TestProposalStatus {
+    fn has_executed(_pid: futarchy_primitives::ProposalId) -> bool {
+        ProposalExecuted::get()
+    }
+    fn is_terminal(_pid: futarchy_primitives::ProposalId) -> bool {
+        ProposalTerminal::get()
+    }
 }
 
 pub struct TestAttestorParams;
@@ -84,6 +105,10 @@ impl pallet_attestor::Config for Test {
     type Params = TestAttestorParams;
     type ValuesOrigin = TestValuesOrigin;
     type RatifyOrigin = TestRatifyOrigin;
+    type Currency = Balances;
+    type RuntimeHoldReason = RuntimeHoldReason;
+    type InsuranceAccount = InsuranceAccount;
+    type ProposalStatus = TestProposalStatus;
     type WeightInfo = ();
 
     #[cfg(feature = "runtime-benchmarks")]
@@ -138,8 +163,16 @@ pub fn new_test_ext_with(
     attestor: pallet_attestor::GenesisConfig<Test>,
 ) -> sp_io::TestExternalities {
     AttestorParamsValue::set(pallet_attestor::AttestorParams::DEFAULT);
+    let balances = (1u8..=16)
+        .map(|n| (acct(n), 1_000_000_000_000_000_000u128))
+        .chain([(AccountId32::from([240; 32]), 1_000_000_000_000_000_000u128)])
+        .collect();
     let storage = RuntimeGenesisConfig {
         system: Default::default(),
+        balances: pallet_balances::GenesisConfig {
+            balances,
+            ..Default::default()
+        },
         attestor,
     }
     .build_storage()

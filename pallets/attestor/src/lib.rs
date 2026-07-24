@@ -12,12 +12,12 @@
 //! surface), with call authorities from §3.2; `09 §1.2` consumes the quorum
 //! view; `15 §4.1` requires per-call origin/error tests.
 //!
-//! ## Scope boundary
+//! ## Custody
 //!
-//! Bonds are represented arithmetically exactly as in the core
-//! ([`AttestorInfo::bond`] and [`ChallengeStatus::Open::bond`]). A real
-//! `fungible` hold/slash and its destination are B-track runtime-integration
-//! work; A10 is not one of the audit-scope-A pallets in R-7.
+//! Attestor and challenger bonds are real native-asset holds. Slash proceeds
+//! are transferred to the configured INSURANCE account, and every custody
+//! mutation runs inside the dispatch storage layer so an underfunded seating or
+//! failed settlement is a strict no-op (G-1/R-7).
 //!
 //! Ratify-track adjudication is implemented here. The permissionless
 //! deterministic-recomputation proof path in 06 §7 follows in the B track once
@@ -39,9 +39,10 @@ mod mock;
 mod tests;
 
 pub use attestor_core::{
-    Attestation, AttestationId, AttestorInfo, AttestorOrigin, AttestorParams, AttestorRegistry,
-    ChallengeStatus, Error as CoreError, Event as CoreEvent, ATTESTOR_BOND, CHALLENGE_BOND,
-    CHALLENGE_WINDOW_BLOCKS, FALSE_EJECTION_THRESHOLD, MIN_MEMBERS, QUORUM,
+    Attestation, AttestationId, AttestationRevocation, AttestorInfo, AttestorLiability,
+    AttestorOrigin, AttestorParams, AttestorRegistry, ChallengeStatus, Error as CoreError,
+    Event as CoreEvent, ATTESTOR_BOND, CHALLENGE_BOND, CHALLENGE_WINDOW_BLOCKS,
+    FALSE_EJECTION_THRESHOLD, MIN_MEMBERS, QUORUM,
 };
 
 use futarchy_primitives::AccountId as CoreAccountId;
@@ -59,14 +60,28 @@ pub const MAX_ATTESTORS: u32 = 16;
 /// its versioning/migration discipline.
 pub const MAX_ATTESTATIONS: u32 = 256;
 
+/// Retained liability rows are bounded by the same maximum as the roster.
+pub const MAX_LIABILITIES: u32 = MAX_ATTESTORS;
+
 /// Live attestor tunables sourced from `pallet-constitution::Params`.
 pub trait AttestorParamsProvider {
     fn get() -> AttestorParams;
 }
 
+/// Terminal/executed proposal feed used by permissionless record reaping and
+/// cause-aware revocation. The runtime owns the concrete epoch lookup.
+pub trait AttestorProposalStatus {
+    fn has_executed(pid: futarchy_primitives::ProposalId) -> bool;
+    fn is_terminal(pid: futarchy_primitives::ProposalId) -> bool;
+}
+
 /// Maps authority roles to concrete origins for the v2 benchmark harness.
 #[cfg(feature = "runtime-benchmarks")]
 pub trait BenchmarkHelper<RuntimeOrigin> {
+    /// Endow benchmark accounts and install the attestor bond holds required
+    /// by custody-aware extrinsics. Production genesis already provisions
+    /// these holds; the omni-bencher starts from an empty benchmark state.
+    fn prime_funds() {}
     /// Construct a signed origin for `who`.
     fn signed(who: CoreAccountId) -> RuntimeOrigin;
     /// Construct a `ConstitutionalValues` origin.
@@ -80,7 +95,11 @@ pub mod pallet {
     use super::*;
     use alloc::vec::Vec;
     use frame_support::pallet_prelude::*;
-    use frame_support::traits::EnsureOrigin;
+    use frame_support::traits::{
+        fungible::{Inspect, InspectHold, MutateHold},
+        tokens::{Fortitude, Precision, Restriction},
+        EnsureOrigin,
+    };
     use frame_system::pallet_prelude::*;
     use sp_runtime::{SaturatedConversion, TryRuntimeError};
 
@@ -89,6 +108,13 @@ pub mod pallet {
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
+
+    /// Native VIT hold namespaces owned by this pallet.
+    #[pallet::composite_enum]
+    pub enum HoldReason {
+        AttestorBond,
+        ChallengeBond,
+    }
 
     // The canonical account is AccountId32 (02 §8). Bounding the frame-system
     // supertrait's associated type makes the `[u8; 32]` core bridge available
@@ -110,7 +136,21 @@ pub mod pallet {
         /// `ratify`-track authority for challenge adjudication (06 §7).
         type RatifyOrigin: EnsureOrigin<Self::RuntimeOrigin>;
 
-        /// Weight information for all four calls.
+        /// Native VIT custody for attestor/challenger bonds.
+        type Currency: Inspect<Self::AccountId, Balance = futarchy_primitives::Balance>
+            + InspectHold<Self::AccountId, Reason = Self::RuntimeHoldReason>
+            + MutateHold<Self::AccountId>;
+
+        /// Aggregate runtime hold reason.
+        type RuntimeHoldReason: From<HoldReason>;
+
+        /// INSURANCE sink for every slash leg.
+        type InsuranceAccount: Get<Self::AccountId>;
+
+        /// Proposal status for durable revocation/reap checks.
+        type ProposalStatus: AttestorProposalStatus;
+
+        /// Weight information for all six calls.
         type WeightInfo: WeightInfo;
 
         /// Origin construction for benchmarking.
@@ -130,6 +170,16 @@ pub mod pallet {
     #[pallet::storage]
     pub type Attestations<T: Config> =
         StorageValue<_, BoundedVec<Attestation, ConstU32<MAX_ATTESTATIONS>>, ValueQuery>;
+
+    /// Bond bases independent of the active roster (02 §7.5, v10).
+    #[pallet::storage]
+    pub type Liabilities<T: Config> =
+        StorageValue<_, BoundedVec<AttestorLiability, ConstU32<MAX_LIABILITIES>>, ValueQuery>;
+
+    /// Durable cause markers for records that lost their signer (02 §7.5, v10).
+    #[pallet::storage]
+    pub type Revocations<T: Config> =
+        StorageValue<_, BoundedVec<AttestationRevocation, ConstU32<MAX_ATTESTATIONS>>, ValueQuery>;
 
     /// Monotonic attestation id cursor.
     #[pallet::storage]
@@ -162,6 +212,18 @@ pub mod pallet {
         },
         /// An attestor reached the second-false-attestation ejection threshold.
         AttestorEjected { who: T::AccountId },
+        /// A values-authorized cause removed an attestor from the active roster.
+        AttestorRemovedForCause {
+            who: T::AccountId,
+            cause_hash: futarchy_primitives::H256,
+        },
+        /// A record was durably revoked by a cause-aware removal/ejection.
+        AttestationRevoked {
+            attestation_id: AttestationId,
+            pid: futarchy_primitives::ProposalId,
+            attestor: T::AccountId,
+            cause_hash: futarchy_primitives::H256,
+        },
     }
 
     /// Core errors map 1:1; `CoreError::BadOrigin` becomes
@@ -188,6 +250,15 @@ pub mod pallet {
         NotInitialized,
         TooManyAttestors,
         TooManyAttestations,
+        TooManyLiabilities,
+        TooManyRevocations,
+        LiabilityExists,
+        AttestorNotFound,
+        LiabilityNotFound,
+        ProposalNotTerminal,
+        ChallengeOpen,
+        ReapNotAllowed,
+        BondAccounting,
     }
 
     #[pallet::hooks]
@@ -211,19 +282,69 @@ pub mod pallet {
                 members.len() <= MAX_ATTESTORS as usize,
                 Error::<T>::TooManyAttestors
             );
-            let raw: Vec<CoreAccountId> = members.iter().map(Self::to_core).collect();
-            let mut registry = Self::load().unwrap_or_else(Self::empty_core);
-            registry
-                .set_members(
-                    AttestorOrigin::ConstitutionalValues,
-                    raw,
-                    Self::now(),
-                    T::Params::get(),
-                )
-                .map_err(Self::map_core_error)?;
-            Self::persist(&registry)?;
-            Self::drain_events(&mut registry);
-            Ok(())
+            frame_support::storage::with_storage_layer(|| {
+                let params = T::Params::get();
+                let raw: Vec<CoreAccountId> = members.iter().map(Self::to_core).collect();
+                let mut registry = Self::load().unwrap_or_else(Self::empty_core);
+                let old_members = registry.members.clone();
+                let attestor_reason = Self::attestor_reason();
+                for member in members.iter() {
+                    let raw_member = Self::to_core(member);
+                    ensure!(
+                        !registry
+                            .liabilities
+                            .iter()
+                            .any(|liability| liability.account == raw_member),
+                        Error::<T>::LiabilityExists
+                    );
+                    let old_bond = old_members
+                        .iter()
+                        .find(|info| info.account == raw_member)
+                        .map(|info| info.bond)
+                        .unwrap_or(0);
+                    if params.bond > old_bond {
+                        T::Currency::hold(&attestor_reason, member, params.bond - old_bond)?;
+                    } else if old_bond > params.bond {
+                        T::Currency::release(
+                            &attestor_reason,
+                            member,
+                            old_bond - params.bond,
+                            Precision::Exact,
+                        )?;
+                    }
+                }
+                registry
+                    .set_members(
+                        AttestorOrigin::ConstitutionalValues,
+                        raw,
+                        Self::now(),
+                        params,
+                    )
+                    .map_err(Self::map_core_error)?;
+                for previous in old_members {
+                    if members
+                        .iter()
+                        .any(|member| Self::to_core(member) == previous.account)
+                    {
+                        continue;
+                    }
+                    let retained = registry
+                        .liabilities
+                        .iter()
+                        .any(|liability| liability.account == previous.account);
+                    if !retained && previous.bond > 0 {
+                        T::Currency::release(
+                            &attestor_reason,
+                            &Self::from_core(previous.account),
+                            previous.bond,
+                            Precision::Exact,
+                        )?;
+                    }
+                }
+                Self::persist(&registry)?;
+                Self::drain_events(&mut registry);
+                Ok(())
+            })
         }
 
         /// Submit a member's bonded artifact attestation (06 §7). Membership
@@ -264,19 +385,23 @@ pub mod pallet {
             bond: futarchy_primitives::Balance,
         ) -> DispatchResult {
             let challenger = ensure_signed(origin)?;
-            let mut registry = Self::load().ok_or(Error::<T>::NotInitialized)?;
-            registry
-                .challenge_attestation(
-                    Self::to_core_authorized(&challenger)?,
-                    attestation_id,
-                    evidence_hash,
-                    bond,
-                    Self::now(),
-                )
-                .map_err(Self::map_core_error)?;
-            Self::persist(&registry)?;
-            Self::drain_events(&mut registry);
-            Ok(())
+            frame_support::storage::with_storage_layer(|| {
+                let mut registry = Self::load().ok_or(Error::<T>::NotInitialized)?;
+                let reason = Self::challenge_reason();
+                T::Currency::hold(&reason, &challenger, bond)?;
+                registry
+                    .challenge_attestation(
+                        Self::to_core_authorized(&challenger)?,
+                        attestation_id,
+                        evidence_hash,
+                        bond,
+                        Self::now(),
+                    )
+                    .map_err(Self::map_core_error)?;
+                Self::persist(&registry)?;
+                Self::drain_events(&mut registry);
+                Ok(())
+            })
         }
 
         /// Resolve an open challenge through the `ratify` track (06 §7).
@@ -290,17 +415,171 @@ pub mod pallet {
             attestation_upheld: bool,
         ) -> DispatchResult {
             T::RatifyOrigin::ensure_origin(origin)?;
-            let mut registry = Self::load().ok_or(Error::<T>::NotInitialized)?;
-            registry
-                .resolve_challenge(
-                    AttestorOrigin::RatifyTrack,
-                    attestation_id,
-                    attestation_upheld,
-                )
-                .map_err(Self::map_core_error)?;
-            Self::persist(&registry)?;
-            Self::drain_events(&mut registry);
-            Ok(())
+            frame_support::storage::with_storage_layer(|| {
+                let mut registry = Self::load().ok_or(Error::<T>::NotInitialized)?;
+                let attestation = registry
+                    .attestations
+                    .iter()
+                    .find(|attestation| attestation.id == attestation_id)
+                    .copied()
+                    .ok_or(Error::<T>::AttestationNotFound)?;
+                let (challenger, challenge_bond) = match attestation.challenge {
+                    Some(ChallengeStatus::Open {
+                        challenger, bond, ..
+                    }) => (challenger, bond),
+                    _ => return Err(Error::<T>::NoOpenChallenge.into()),
+                };
+                registry
+                    .resolve_challenge_with(
+                        AttestorOrigin::RatifyTrack,
+                        attestation_id,
+                        attestation_upheld,
+                        T::ProposalStatus::has_executed,
+                    )
+                    .map_err(Self::map_core_error)?;
+                let slashed = registry
+                    .events
+                    .iter()
+                    .rev()
+                    .find_map(|event| match event {
+                        CoreEvent::ChallengeResolved {
+                            attestation_id: event_id,
+                            slashed,
+                            ..
+                        } if *event_id == attestation_id => Some(*slashed),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let challenge_reason = Self::challenge_reason();
+                let insurance = T::InsuranceAccount::get();
+                if attestation_upheld {
+                    let slashed = challenge_bond / 2 + challenge_bond % 2;
+                    if slashed > 0 {
+                        T::Currency::transfer_on_hold(
+                            &challenge_reason,
+                            &Self::from_core(challenger),
+                            &insurance,
+                            slashed,
+                            Precision::Exact,
+                            Restriction::Free,
+                            Fortitude::Force,
+                        )?;
+                    }
+                    let refund = challenge_bond.saturating_sub(slashed);
+                    if refund > 0 {
+                        T::Currency::release(
+                            &challenge_reason,
+                            &Self::from_core(challenger),
+                            refund,
+                            Precision::Exact,
+                        )?;
+                    }
+                } else {
+                    T::Currency::release(
+                        &challenge_reason,
+                        &Self::from_core(challenger),
+                        challenge_bond,
+                        Precision::Exact,
+                    )?;
+                    if slashed > 0 {
+                        T::Currency::transfer_on_hold(
+                            &Self::attestor_reason(),
+                            &Self::from_core(attestation.attestor),
+                            &insurance,
+                            slashed,
+                            Precision::Exact,
+                            Restriction::Free,
+                            Fortitude::Force,
+                        )?;
+                    }
+                }
+                Self::persist(&registry)?;
+                Self::drain_events(&mut registry);
+                Ok(())
+            })
+        }
+
+        /// Remove an attestor with an explicit cause and revoke every
+        /// unexecuted record atomically (06 §7, contract v10).
+        #[pallet::call_index(4)]
+        #[pallet::weight(T::WeightInfo::remove_for_cause())]
+        pub fn remove_for_cause(
+            origin: OriginFor<T>,
+            who: T::AccountId,
+            cause_hash: futarchy_primitives::H256,
+        ) -> DispatchResult {
+            T::ValuesOrigin::ensure_origin(origin)?;
+            frame_support::storage::with_storage_layer(|| {
+                let mut registry = Self::load().ok_or(Error::<T>::NotInitialized)?;
+                registry
+                    .remove_for_cause(
+                        AttestorOrigin::ConstitutionalValues,
+                        Self::to_core_authorized(&who)?,
+                        cause_hash,
+                        T::ProposalStatus::has_executed,
+                    )
+                    .map_err(Self::map_core_error)?;
+                let raw_who = Self::to_core_authorized(&who)?;
+                let no_retained_records = !registry
+                    .attestations
+                    .iter()
+                    .any(|record| record.attestor == raw_who)
+                    && !registry
+                        .revocations
+                        .iter()
+                        .any(|record| record.attestor == raw_who);
+                if no_retained_records {
+                    if let Some(index) = registry
+                        .liabilities
+                        .iter()
+                        .position(|liability| liability.account == raw_who)
+                    {
+                        let liability = registry.liabilities.remove(index);
+                        if liability.bond > 0 {
+                            T::Currency::release(
+                                &Self::attestor_reason(),
+                                &who,
+                                liability.bond,
+                                Precision::Exact,
+                            )?;
+                        }
+                    }
+                }
+                Self::persist(&registry)?;
+                Self::drain_events(&mut registry);
+                Ok(())
+            })
+        }
+
+        /// Permissionlessly reap a terminal, settled record and release the
+        /// departing attestor's remaining bond basis when its last record is
+        /// gone.
+        #[pallet::call_index(5)]
+        #[pallet::weight(T::WeightInfo::reap_attestation())]
+        pub fn reap_attestation(
+            origin: OriginFor<T>,
+            attestation_id: AttestationId,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+            frame_support::storage::with_storage_layer(|| {
+                let mut registry = Self::load().ok_or(Error::<T>::NotInitialized)?;
+                let released = registry
+                    .reap_attestation(attestation_id, Self::now(), T::ProposalStatus::is_terminal)
+                    .map_err(Self::map_core_error)?;
+                if let Some(liability) = released {
+                    if liability.bond > 0 {
+                        T::Currency::release(
+                            &Self::attestor_reason(),
+                            &Self::from_core(liability.account),
+                            liability.bond,
+                            Precision::Exact,
+                        )?;
+                    }
+                }
+                Self::persist(&registry)?;
+                Self::drain_events(&mut registry);
+                Ok(())
+            })
         }
     }
 
@@ -365,6 +644,13 @@ pub mod pallet {
                 "attestor genesis: at least three unique members required (06 §7)"
             );
             if let Ok(registry) = registry {
+                let reason: T::RuntimeHoldReason = HoldReason::AttestorBond.into();
+                for member in &self.members {
+                    assert!(
+                        T::Currency::hold(&reason, member, T::Params::get().bond).is_ok(),
+                        "attestor genesis: each member must fund the attestor bond"
+                    );
+                }
                 Members::<T>::put(BoundedVec::truncate_from(registry.members));
                 NextAttestationId::<T>::put(registry.next_attestation_id);
             }
@@ -403,7 +689,9 @@ pub mod pallet {
         fn empty_core() -> AttestorRegistry {
             AttestorRegistry {
                 members: Vec::new(),
+                liabilities: Vec::new(),
                 attestations: Vec::new(),
+                revocations: Vec::new(),
                 next_attestation_id: 0,
                 events: Vec::new(),
             }
@@ -413,12 +701,17 @@ pub mod pallet {
         /// registry has not been initialized.
         fn load() -> Option<AttestorRegistry> {
             let members = Members::<T>::get();
-            if members.is_empty() {
+            let liabilities = Liabilities::<T>::get();
+            let attestations = Attestations::<T>::get();
+            let revocations = Revocations::<T>::get();
+            if members.is_empty() && liabilities.is_empty() && attestations.is_empty() {
                 return None;
             }
             Some(AttestorRegistry {
                 members: members.into_inner(),
-                attestations: Attestations::<T>::get().into_inner(),
+                liabilities: liabilities.into_inner(),
+                attestations: attestations.into_inner(),
+                revocations: revocations.into_inner(),
                 next_attestation_id: NextAttestationId::<T>::get(),
                 events: Vec::new(),
             })
@@ -431,9 +724,15 @@ pub mod pallet {
                 .map_err(|_| Error::<T>::TooManyAttestors)?;
             let attestations = BoundedVec::try_from(registry.attestations.clone())
                 .map_err(|_| Error::<T>::TooManyAttestations)?;
+            let liabilities = BoundedVec::try_from(registry.liabilities.clone())
+                .map_err(|_| Error::<T>::TooManyLiabilities)?;
+            let revocations = BoundedVec::try_from(registry.revocations.clone())
+                .map_err(|_| Error::<T>::TooManyRevocations)?;
 
             Members::<T>::put(members);
+            Liabilities::<T>::put(liabilities);
             Attestations::<T>::put(attestations);
+            Revocations::<T>::put(revocations);
             NextAttestationId::<T>::put(registry.next_attestation_id);
             Ok(())
         }
@@ -483,6 +782,23 @@ pub mod pallet {
                             who: Self::from_core(who),
                         });
                     }
+                    CoreEvent::AttestorRemovedForCause { who, cause_hash } => {
+                        Self::deposit_event(Event::AttestorRemovedForCause {
+                            who: Self::from_core(who),
+                            cause_hash,
+                        });
+                    }
+                    CoreEvent::AttestationRevoked {
+                        attestation_id,
+                        pid,
+                        attestor,
+                        cause_hash,
+                    } => Self::deposit_event(Event::AttestationRevoked {
+                        attestation_id,
+                        pid,
+                        attestor: Self::from_core(attestor),
+                        cause_hash,
+                    }),
                 }
             }
         }
@@ -517,6 +833,23 @@ pub mod pallet {
                 .unwrap_or(false)
         }
 
+        /// Execute-time record quorum; unlike queue-time `has_quorum`, this
+        /// does not read the current active roster.
+        pub fn has_record_quorum(
+            pid: futarchy_primitives::ProposalId,
+            artifact_hash: futarchy_primitives::H256,
+        ) -> bool {
+            Self::load()
+                .map(|registry| registry.has_record_quorum(pid, artifact_hash, Self::now()))
+                .unwrap_or(false)
+        }
+
+        pub fn is_revoked(attestation_id: AttestationId) -> bool {
+            Revocations::<T>::get()
+                .iter()
+                .any(|revocation| revocation.attestation_id == attestation_id)
+        }
+
         /// Rebuild the aggregate and run the core validator plus defensive
         /// FRAME-side bound assertions (15 §1).
         pub fn do_try_state() -> Result<(), TryRuntimeError> {
@@ -527,6 +860,14 @@ pub mod pallet {
             ensure!(
                 Attestations::<T>::get().len() as u32 <= MAX_ATTESTATIONS,
                 TryRuntimeError::Other("attestor: Attestations over bound")
+            );
+            ensure!(
+                Liabilities::<T>::get().len() as u32 <= MAX_LIABILITIES,
+                TryRuntimeError::Other("attestor: Liabilities over bound")
+            );
+            ensure!(
+                Revocations::<T>::get().len() as u32 <= MAX_ATTESTATIONS,
+                TryRuntimeError::Other("attestor: Revocations over bound")
             );
             if let Some(registry) = Self::load() {
                 registry.try_state().map_err(|_| {
@@ -551,8 +892,23 @@ pub mod pallet {
                 CoreError::QuorumMissing => Error::<T>::QuorumMissing.into(),
                 CoreError::NoOpenChallenge => Error::<T>::NoOpenChallenge.into(),
                 CoreError::EjectedMemberActive => Error::<T>::EjectedMemberActive.into(),
+                CoreError::LiabilityExists => Error::<T>::LiabilityExists.into(),
+                CoreError::LiabilityNotFound => Error::<T>::LiabilityNotFound.into(),
+                CoreError::ProposalNotTerminal => Error::<T>::ProposalNotTerminal.into(),
+                CoreError::ChallengeOpen => Error::<T>::ChallengeOpen.into(),
+                CoreError::ReapNotAllowed => Error::<T>::ReapNotAllowed.into(),
+                CoreError::TooManyLiabilities => Error::<T>::TooManyLiabilities.into(),
+                CoreError::TooManyRevocations => Error::<T>::TooManyRevocations.into(),
                 CoreError::Overflow => Error::<T>::Overflow.into(),
             }
+        }
+
+        fn attestor_reason() -> T::RuntimeHoldReason {
+            HoldReason::AttestorBond.into()
+        }
+
+        fn challenge_reason() -> T::RuntimeHoldReason {
+            HoldReason::ChallengeBond.into()
         }
     }
 

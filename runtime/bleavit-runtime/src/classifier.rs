@@ -725,11 +725,13 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
         },
         RuntimeCall::Attestor(call) => match call {
             pallet_attestor::Call::set_members { .. }
-            | pallet_attestor::Call::resolve_challenge { .. } => {
+            | pallet_attestor::Call::resolve_challenge { .. }
+            | pallet_attestor::Call::remove_for_cause { .. } => {
                 leaf(CallDomain::ConstitutionalValues)
             }
             pallet_attestor::Call::attest { .. }
-            | pallet_attestor::Call::challenge_attestation { .. } => leaf(CallDomain::Public),
+            | pallet_attestor::Call::challenge_attestation { .. }
+            | pallet_attestor::Call::reap_attestation { .. } => leaf(CallDomain::Public),
             pallet_attestor::Call::__Ignore(_, _) => denied(),
         },
         RuntimeCall::Epoch(call) => match call {
@@ -738,6 +740,7 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_epoch::Call::tick { .. }
             | pallet_epoch::Call::decide { .. }
             | pallet_epoch::Call::settle_cohort { .. }
+            | pallet_epoch::Call::bind_ratification { .. }
             // 06 §3.2 authority matrix: the SQ-320 orphan-Baseline crank is a
             // permissionless Signed row, alongside the other epoch cranks.
             | pallet_epoch::Call::finalize_epoch_baseline { .. } => leaf(CallDomain::Public),
@@ -1151,6 +1154,7 @@ pub fn is_values_enactment_leaf(call: &RuntimeCall) -> bool {
             | RuntimeCall::Guardian(pallet_guardian::Call::set_playbook_registered { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::set_members { .. })
             | RuntimeCall::Attestor(pallet_attestor::Call::resolve_challenge { .. })
+            | RuntimeCall::Attestor(pallet_attestor::Call::remove_for_cause { .. })
             | RuntimeCall::Oracle(pallet_oracle::Call::adjudicate { .. })
             // Both registry instances gate `resolve_challenge` on
             // `EnsureOracleResolution` (SQ-295). Now that the classifier states

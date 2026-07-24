@@ -392,6 +392,28 @@ impl ExecutionGuard {
         Ok(())
     }
 
+    /// Bind the referendum that will be required for a future CODE/META
+    /// queue entry without marking that referendum as passed. The FRAME shell
+    /// owns the pre-queue bounded join; this method is the queue-side half and
+    /// deliberately preserves `ratification_passed` until `ratify` enacts.
+    pub fn bind_ratification(
+        &mut self,
+        pid: ProposalId,
+        referendum_index: u32,
+    ) -> Result<(), Error> {
+        let q = self
+            .queue
+            .iter_mut()
+            .find(|q| q.pid == pid)
+            .ok_or(Error::NotFound)?;
+        ensure!(
+            q.ratify_ref.is_none() || q.ratify_ref == Some(referendum_index),
+            Error::NotRatified
+        );
+        q.ratify_ref = Some(referendum_index);
+        Ok(())
+    }
+
     pub fn ratify(
         &mut self,
         origin: GuardOrigin,

@@ -8,7 +8,7 @@ use attestor_core::{
     AttestorParams, ChallengeStatus, ATTESTOR_BOND, CHALLENGE_BOND, CHALLENGE_WINDOW_BLOCKS,
     FALSE_EJECTION_THRESHOLD,
 };
-use frame_support::{assert_noop, assert_ok};
+use frame_support::{assert_noop, assert_ok, traits::fungible::InspectHold};
 use sp_runtime::DispatchError;
 
 fn hash(n: u8) -> futarchy_primitives::H256 {
@@ -314,6 +314,8 @@ fn challenge_is_signed_only_and_checks_id_bond_window_and_single_open_case() {
             hash(3),
             CHALLENGE_BOND,
         ));
+        let challenge_reason: RuntimeHoldReason = crate::HoldReason::ChallengeBond.into();
+        assert_eq!(Balances::balance_on_hold(&challenge_reason, &acct(8)), 0);
         assert_noop!(
             Attestor::challenge_attestation(
                 RuntimeOrigin::signed(acct(8)),
@@ -322,6 +324,11 @@ fn challenge_is_signed_only_and_checks_id_bond_window_and_single_open_case() {
                 CHALLENGE_BOND,
             ),
             Error::<Test>::ChallengeAlreadyOpen
+        );
+        assert_eq!(
+            Balances::balance_on_hold(&challenge_reason, &acct(8)),
+            0,
+            "a failed challenge must not strand its native hold"
         );
     });
 
@@ -814,18 +821,17 @@ fn recall_retains_a_liable_attestor_so_an_open_challenge_still_resolves() {
         ));
 
         // Governance authority is gone immediately: the recalled attestor is
-        // retained but inactive, and cannot attest again.
-        let retained = Members::<Test>::get()
+        // held in the independent liability vector and cannot attest again.
+        let retained = Liabilities::<Test>::get()
             .into_iter()
             .find(|member| member.account == core_acct(1))
             .expect("a liable attestor is retained as the slash basis");
-        assert!(!retained.active);
         assert_eq!(retained.bond, ATTESTOR_BOND);
         assert_noop!(
             Attestor::attest(RuntimeOrigin::signed(acct(1)), 2, hash(1), hash(2)),
             Error::<Test>::NotMember
         );
-        // The retained row does not count toward the active registry floor.
+        // The liability row does not count toward the active registry floor.
         assert_eq!(
             Members::<Test>::get()
                 .iter()
@@ -836,10 +842,10 @@ fn recall_retains_a_liable_attestor_so_an_open_challenge_still_resolves() {
 
         // The adverse verdict now lands against the retained basis.
         assert_ok!(Attestor::resolve_challenge(ratify_origin(), 0, false));
-        let after = Members::<Test>::get()
+        let after = Liabilities::<Test>::get()
             .into_iter()
             .find(|member| member.account == core_acct(1))
-            .expect("still retained until the record settles");
+            .expect("still retained until the record is reaped");
         assert_eq!(after.false_count, 1);
         assert_eq!(after.bond, ATTESTOR_BOND - (ATTESTOR_BOND / 2));
         assert!(matches!(
@@ -847,6 +853,80 @@ fn recall_retains_a_liable_attestor_so_an_open_challenge_still_resolves() {
             Some(ChallengeStatus::Rejected)
         ));
         assert_ok!(Attestor::do_try_state());
+    });
+}
+
+#[test]
+fn cause_removal_revokes_records_and_reap_releases_native_hold() {
+    new_test_ext().execute_with(|| {
+        set_block(1);
+        assert_ok!(Attestor::attest(
+            RuntimeOrigin::signed(acct(1)),
+            41,
+            hash(41),
+            hash(42),
+        ));
+        let reason: RuntimeHoldReason = crate::HoldReason::AttestorBond.into();
+        assert_eq!(Balances::balance_on_hold(&reason, &acct(1)), ATTESTOR_BOND);
+
+        assert_ok!(Attestor::remove_for_cause(
+            values_origin(),
+            acct(1),
+            hash(99),
+        ));
+        assert!(!Members::<Test>::get()
+            .iter()
+            .any(|member| member.account == core_acct(1)));
+        assert!(Liabilities::<Test>::get()
+            .iter()
+            .any(|liability| liability.account == core_acct(1)));
+        assert!(Revocations::<Test>::get()
+            .iter()
+            .any(|revocation| revocation.attestation_id == 0));
+        assert!(attestor_events().iter().any(|event| matches!(
+            event,
+            Event::AttestorRemovedForCause { who, .. } if *who == acct(1)
+        )));
+
+        ProposalTerminal::set(true);
+        set_block(u64::from(CHALLENGE_WINDOW_BLOCKS + 2));
+        assert_ok!(Attestor::reap_attestation(
+            RuntimeOrigin::signed(acct(9)),
+            0
+        ));
+        assert!(Attestations::<Test>::get().is_empty());
+        assert!(Liabilities::<Test>::get().is_empty());
+        assert!(Revocations::<Test>::get().is_empty());
+        assert_eq!(Balances::balance_on_hold(&reason, &acct(1)), 0);
+        assert_ok!(Attestor::do_try_state());
+    });
+}
+
+#[test]
+fn record_quorum_survives_rotation_but_cause_revocation_fails_closed() {
+    new_test_ext().execute_with(|| {
+        set_block(1);
+        attest_two(42, hash(42));
+        set_block(u64::from(CHALLENGE_WINDOW_BLOCKS + 2));
+        assert_ok!(Attestor::set_members(
+            values_origin(),
+            vec![acct(3), acct(4), acct(5)],
+        ));
+        assert!(!Attestor::has_quorum(42, hash(42)));
+        assert!(Attestor::has_record_quorum(42, hash(42)));
+    });
+
+    new_test_ext().execute_with(|| {
+        set_block(1);
+        attest_two(42, hash(42));
+        // A cause-aware departure invalidates a committed record before the
+        // routine rotation, and the record-only quorum then fails closed.
+        assert_ok!(Attestor::remove_for_cause(
+            values_origin(),
+            acct(1),
+            hash(88)
+        ));
+        assert!(!Attestor::has_record_quorum(42, hash(42)));
     });
 }
 

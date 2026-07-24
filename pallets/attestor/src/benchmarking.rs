@@ -62,6 +62,7 @@ mod benches {
 
     #[benchmark]
     fn set_members() {
+        T::BenchmarkHelper::prime_funds();
         // Worst case for the SQ-262 unsettled-liability scan. Since `load`
         // (`pallets/attestor/src/lib.rs`) rebuilds the core registry from
         // `Members` *and* `Attestations`, and the core `set_members` runs one
@@ -80,7 +81,7 @@ mod benches {
         // The sole unsettled record is placed LAST and owned by a departing
         // member: `has_unsettled_liability` therefore traverses the entire 256
         // for that member before returning (no early `any()` exit), and the
-        // member is retained as an inactive row (SQ-262). The other 255 records
+        // member is moved to an independent liability row. The other 255 records
         // are owned by a non-member sentinel, so every member's scan runs to the
         // end. Attributing the unsettled record early, or spreading it across
         // members, would let `any()` short-circuit and measure a *smaller* scan
@@ -120,16 +121,16 @@ mod benches {
         Attestations::<T>::put(BoundedVec::truncate_from(attestations));
         NextAttestationId::<T>::put(MAX_ATTESTATIONS);
 
-        // 15 fresh members disjoint from the previous roster and the sentinel;
-        // with the one retained liable member this refills the 16-member bound.
-        let members = (0..MAX_ATTESTORS - 1)
-            .map(|i| member::<T>((i + 16) as u8))
+        // 16 fresh members disjoint from the previous roster and the sentinel;
+        // the independent liability remains outside the replacement roster.
+        let members = (0..MAX_ATTESTORS)
+            .map(|i| member::<T>((i + 17) as u8))
             .collect::<Vec<_>>();
 
         #[extrinsic_call]
         _(T::BenchmarkHelper::values() as T::RuntimeOrigin, members);
 
-        // 15 new + 1 retained (inactive, liable) departing member = full bound.
+        // 15 new + 1 liable departing member = full bound.
         assert_eq!(Members::<T>::get().len(), MAX_ATTESTORS as usize);
     }
 
@@ -150,6 +151,7 @@ mod benches {
 
     #[benchmark]
     fn challenge_attestation() {
+        T::BenchmarkHelper::prime_funds();
         let id = seed_attestations::<T>(MAX_ATTESTATIONS, false);
 
         #[extrinsic_call]
@@ -168,6 +170,7 @@ mod benches {
 
     #[benchmark]
     fn resolve_challenge() {
+        T::BenchmarkHelper::prime_funds();
         let id = seed_attestations::<T>(MAX_ATTESTATIONS, true);
 
         #[extrinsic_call]

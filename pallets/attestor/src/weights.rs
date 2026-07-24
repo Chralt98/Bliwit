@@ -13,6 +13,8 @@ pub trait WeightInfo {
     fn attest() -> Weight;
     fn challenge_attestation() -> Weight;
     fn resolve_challenge() -> Weight;
+    fn remove_for_cause() -> Weight;
+    fn reap_attestation() -> Weight;
 }
 
 pub struct SubstrateWeight<T>(PhantomData<T>);
@@ -41,6 +43,18 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(3))
             .saturating_add(T::DbWeight::get().writes(3))
     }
+
+    fn remove_for_cause() -> Weight {
+        Weight::from_parts(55_000_000, 24_000)
+            .saturating_add(T::DbWeight::get().reads(5))
+            .saturating_add(T::DbWeight::get().writes(5))
+    }
+
+    fn reap_attestation() -> Weight {
+        Weight::from_parts(45_000_000, 18_000)
+            .saturating_add(T::DbWeight::get().reads(5))
+            .saturating_add(T::DbWeight::get().writes(5))
+    }
 }
 
 impl WeightInfo for () {
@@ -66,5 +80,17 @@ impl WeightInfo for () {
         Weight::from_parts(40_000_000, 12_000)
             .saturating_add(RocksDbWeight::get().reads(3))
             .saturating_add(RocksDbWeight::get().writes(3))
+    }
+
+    fn remove_for_cause() -> Weight {
+        Weight::from_parts(55_000_000, 24_000)
+            .saturating_add(RocksDbWeight::get().reads(5))
+            .saturating_add(RocksDbWeight::get().writes(5))
+    }
+
+    fn reap_attestation() -> Weight {
+        Weight::from_parts(45_000_000, 18_000)
+            .saturating_add(RocksDbWeight::get().reads(5))
+            .saturating_add(RocksDbWeight::get().writes(5))
     }
 }

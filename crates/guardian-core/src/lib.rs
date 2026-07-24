@@ -533,7 +533,7 @@ impl Guardian {
             .find(|review| review.action_id == action_id)
             .ok_or(Error::ReviewNotFound)?;
         ensure!(
-            !review.ratified && !review.recall_scheduled && epoch >= review.deadline_epoch,
+            !review.ratified && !review.recall_scheduled && epoch > review.deadline_epoch,
             Error::ReviewNotFound
         );
         let approvers = review.approvers;
@@ -557,7 +557,7 @@ impl Guardian {
             .reviews
             .iter()
             .filter(|review| {
-                !review.ratified && !review.recall_scheduled && epoch >= review.deadline_epoch
+                !review.ratified && !review.recall_scheduled && epoch > review.deadline_epoch
             })
             .map(|review| review.action_id)
             .collect::<Vec<_>>();
@@ -618,13 +618,42 @@ impl Guardian {
     /// council after 64 lifetime proposals / 128 lifetime actions (A10
     /// spec-reviewer majors). Driven by the maintenance crank each block.
     pub fn reap_terminal(&mut self, now: BlockNumber) {
+        self.reap_terminal_with_veto(now, |_| true);
+    }
+
+    /// Reap terminal records while allowing the FRAME shell to identify which
+    /// failed delay reviews still have a live `uphold_veto` referendum. The
+    /// frame-free core cannot inspect pallet storage, so the shell supplies
+    /// that bounded join explicitly (SQ-311).
+    pub fn reap_terminal_with_veto<F>(&mut self, now: BlockNumber, veto_live: F)
+    where
+        F: Fn(ActionId) -> bool,
+    {
+        // A failed `delay_once` review retains its upheld-veto verdict until
+        // T12 leaves `Suspended`; the other failed reviews are terminal at the
+        // deadline. Keep this action/review pair as the bounded T24 admission
+        // record rather than reaping it with ordinary failed reviews.
+        let veto_actions = self
+            .pending
+            .iter()
+            .filter(|action| {
+                matches!(action.power, GuardianPower::DelayOnce { .. })
+                    && self
+                        .reviews
+                        .iter()
+                        .any(|review| review.action_id == action.id && review.recall_scheduled)
+                    && veto_live(action.id)
+            })
+            .map(|action| action.id)
+            .collect::<Vec<_>>();
         let mut reaped: Vec<ActionId> = Vec::new();
         self.pending.retain(|a| {
             let review_live = self
                 .reviews
                 .iter()
                 .any(|r| r.action_id == a.id && !r.ratified && !r.recall_scheduled);
-            let terminal = (a.dispatched && !review_live) || (!a.dispatched && now > a.expires_at);
+            let terminal = (a.dispatched && !review_live && !veto_actions.contains(&a.id))
+                || (!a.dispatched && now > a.expires_at);
             if terminal {
                 reaped.push(a.id);
             }
@@ -633,7 +662,39 @@ impl Guardian {
         if !reaped.is_empty() {
             self.approvals.retain(|(id, _)| !reaped.contains(id));
         }
-        self.reviews.retain(|r| !(r.ratified || r.recall_scheduled));
+        self.reviews.retain(|r| {
+            !(r.ratified || (r.recall_scheduled && !veto_actions.contains(&r.action_id)))
+        });
+    }
+
+    /// Close a failed delay review once T12 has left `Suspended`. The pallet
+    /// settles the surviving referendum deposit; the core only retires the
+    /// bounded action/review/approval records that made T24 admissible.
+    pub fn close_failed_review(
+        &mut self,
+        origin: GuardianOrigin,
+        action_id: ActionId,
+    ) -> Result<(), Error> {
+        ensure!(
+            matches!(origin, GuardianOrigin::ConstitutionalValues),
+            Error::BadOrigin
+        );
+        ensure!(
+            self.reviews
+                .iter()
+                .any(|review| { review.action_id == action_id && review.recall_scheduled }),
+            Error::ReviewNotFound
+        );
+        ensure!(
+            self.pending.iter().any(|action| {
+                action.id == action_id && matches!(action.power, GuardianPower::DelayOnce { .. })
+            }),
+            Error::ReviewNotFound
+        );
+        self.reviews.retain(|review| review.action_id != action_id);
+        self.pending.retain(|action| action.id != action_id);
+        self.approvals.retain(|(id, _)| *id != action_id);
+        Ok(())
     }
     pub fn try_state(&self) -> Result<(), Error> {
         validate_seats(&self.members)?;
@@ -1326,6 +1387,10 @@ mod tests {
             g.ratify_action(GuardianOrigin::Signed, id),
             Err(Error::BadOrigin)
         );
+        // The strict epoch-index fallback must not confiscate at the deadline
+        // boundary itself (SQ-45); failure is observed only once it is passed.
+        g.enforce_reviews(2).unwrap();
+        assert!(g.member_bonds[..5].iter().all(|b| *b == GUARDIAN_BOND));
         g.enforce_reviews(3).unwrap();
         assert!(g.member_bonds[..5].iter().all(|b| *b == GUARDIAN_BOND / 2));
         assert!(g.member_bonds[5..].iter().all(|b| *b == GUARDIAN_BOND));

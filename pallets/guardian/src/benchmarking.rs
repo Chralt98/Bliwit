@@ -321,7 +321,10 @@ mod benches {
     fn on_initialize() -> Result<(), BenchmarkError> {
         seed_council::<T>();
         T::BenchmarkHelper::prime_for_worst_case();
-        let overdue = action_at_four::<T>(GuardianPower::DelayOnce { pid: 1 });
+        // Use a non-delay action here so the benchmark exercises the full
+        // terminal reap path. A delayed action intentionally retains its veto
+        // referendum until T12 (SQ-311) and is covered by pallet tests.
+        let overdue = action_at_four::<T>(GuardianPower::SuspendOnGate);
         Pallet::<T>::approve_action(T::BenchmarkHelper::signed([5; 32]), overdue)
             .map_err(|_| BenchmarkError::Stop("dispatch"))?;
         let deadline = ReviewDeadlines::<T>::get()
@@ -329,7 +332,7 @@ mod benches {
             .find(|review| review.action_id == overdue)
             .map(|review| review.deadline_epoch)
             .ok_or(BenchmarkError::Stop("overdue review deadline"))?;
-        T::BenchmarkHelper::prime_maintenance_epoch(deadline);
+        T::BenchmarkHelper::prime_maintenance_epoch(deadline.saturating_add(1));
         let approvers = [[1; 32], [2; 32], [3; 32], [4; 32], [5; 32]];
         PendingActions::<T>::mutate(|actions| {
             for id in 1..MAX_PENDING_ACTIONS {
@@ -349,8 +352,8 @@ mod benches {
                 let mut terminal = review(id, 0);
                 // Terminal reviews exercise the full bounded reap without
                 // inventing unreachable fronting records for 128 simultaneous
-                // failures. The real `overdue` record exercises both verdict
-                // cancellations/refunds and the slash/recall path.
+                // failures. The real `overdue` record exercises cancellation,
+                // refund, slash and recall at the strict deadline boundary.
                 terminal.ratified = true;
                 reviews.try_push(terminal).expect("review bound");
             }

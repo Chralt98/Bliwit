@@ -1245,4 +1245,17 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 			.saturating_add(Weight::from_parts(0, 0))
 			.saturating_add(T::DbWeight::get().writes(1))
 	}
+	/// Bounded proposer-side referendum binding. The epoch aggregate is loaded
+	/// and persisted, while the runtime adapter validates one referendum and
+	/// the guard writes one bounded join.
+	fn bind_ratification() -> Weight {
+		// Saturated aggregate load/persist plus the bounded referendum/preimage
+		// and execution-guard join path. This deliberately matches the
+		// conservative worst-case shape of `decide` until a fresh benchmark is
+		// generated with the production adapter enabled.
+		Weight::from_parts(2_009_204_000, 0)
+			.saturating_add(Weight::from_parts(0, 183055))
+			.saturating_add(T::DbWeight::get().reads(234))
+			.saturating_add(T::DbWeight::get().writes(135))
+	}
 }

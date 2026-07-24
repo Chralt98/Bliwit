@@ -1,6 +1,89 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  cat <<'EOF'
+Usage: tools/ci/rust-workspace-gates.sh [--changed [PACKAGE...]]
+
+With no arguments, run the exhaustive Rust workspace gate.  --changed runs
+fmt plus clippy/tests only for packages changed against RUST_GATE_BASE (or
+origin/main), and accepts explicit package names to form a local shard.  The
+reduced mode is a feedback loop, not a replacement for the exhaustive gate.
+EOF
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+# Avoid duplicate local Cargo work. CI remains free to fan out its independent
+# jobs, while two developers (or two shells) cannot accidentally compile the
+# same full workspace concurrently on one checkout.
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"${TMPDIR:-/tmp}/bleavit-rust-workspace-gates.lock"
+  if ! flock -n 9; then
+    echo "Another rust-workspace-gates.sh invocation is already running; refusing a duplicate Cargo job." >&2
+    exit 2
+  fi
+fi
+
+if [[ "${1:-}" == "--changed" ]]; then
+  shift
+  if [[ $# -gt 0 ]]; then
+    changed_packages=("$@")
+  else
+    gate_base="${RUST_GATE_BASE:-origin/main}"
+    mapfile -t changed_packages < <(python3 - "$gate_base" <<'PY'
+import json
+import os
+import subprocess
+import sys
+
+base = sys.argv[1]
+try:
+    files = subprocess.check_output(
+        ["git", "diff", "--name-only", base], text=True
+    ).splitlines()
+except subprocess.CalledProcessError:
+    files = subprocess.check_output(
+        ["git", "diff", "--name-only"], text=True
+    ).splitlines()
+
+meta = json.loads(subprocess.check_output(
+    ["cargo", "metadata", "--locked", "--no-deps", "--format-version=1"],
+    text=True,
+))
+cwd = os.getcwd()
+for package in meta["packages"]:
+    root = os.path.dirname(os.path.relpath(package["manifest_path"], cwd))
+    if any(path == root or path.startswith(root + os.sep) for path in files):
+        print(package["name"])
+PY
+    )
+  fi
+
+  if [[ ${#changed_packages[@]} -eq 0 ]]; then
+    echo "Changed-scope Rust gate: no workspace packages changed; nothing to compile."
+    exit 0
+  fi
+
+  package_args=()
+  for package in "${changed_packages[@]}"; do
+    package_args+=( -p "$package" )
+  done
+  echo "Changed-scope Rust gate: ${changed_packages[*]}"
+  cargo fmt --all -- --check
+  cargo clippy --all-targets --locked "${package_args[@]}" -- -D warnings
+  cargo test --all-targets --locked "${package_args[@]}"
+  exit 0
+fi
+
+if [[ $# -gt 0 ]]; then
+  usage >&2
+  exit 2
+fi
+
 # Native node dependencies use bindgen. Point it at LLVM's library directory
 # when distributions do not install an unversioned libclang in the default path.
 if [[ -z "${LIBCLANG_PATH:-}" ]] && command -v llvm-config >/dev/null 2>&1; then

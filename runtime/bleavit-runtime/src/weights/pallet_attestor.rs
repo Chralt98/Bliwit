@@ -116,4 +116,14 @@ impl<T: frame_system::Config> pallet_attestor::WeightInfo for WeightInfo<T> {
 			.saturating_add(T::DbWeight::get().reads(3))
 			.saturating_add(T::DbWeight::get().writes(3))
 	}
+	fn remove_for_cause() -> Weight {
+		Weight::from_parts(80_000_000, 90_000)
+			.saturating_add(T::DbWeight::get().reads(8))
+			.saturating_add(T::DbWeight::get().writes(8))
+	}
+	fn reap_attestation() -> Weight {
+		Weight::from_parts(60_000_000, 70_000)
+			.saturating_add(T::DbWeight::get().reads(7))
+			.saturating_add(T::DbWeight::get().writes(7))
+	}
 }

@@ -76,6 +76,18 @@ pub(crate) fn account(seed: u8) -> AccountId {
     AccountId::new([seed; 32])
 }
 
+/// Runtime fixtures seat arbitrary accounts, so explicitly endow the native
+/// attestor bond before exercising the production pallet's custody path.
+pub(crate) fn fund_attestor_members(members: &[AccountId]) {
+    for member in members {
+        assert_ok!(Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            member.clone().into(),
+            pallet_attestor::ATTESTOR_BOND.saturating_add(Balances::minimum_balance()),
+        ));
+    }
+}
+
 fn xcm_holding_amount(holding: &AssetsInHolding, id: &staging_xcm::latest::Location) -> u128 {
     holding
         .fungible_assets_iter()
@@ -683,6 +695,7 @@ fn enqueue_attested_code_upgrade_pending_ratification(
     candidate: &[u8],
 ) -> Option<(BlockNumber, H256)> {
     let members = [account(90), account(91), account(92)];
+    fund_attestor_members(&members);
     assert_ok!(Attestor::set_members(
         pallet_origins::Origin::ConstitutionalValues.into(),
         members.to_vec(),
@@ -814,6 +827,9 @@ fn enqueue_attested_code_upgrade(
     referendum_index: u32,
 ) -> Option<(BlockNumber, H256)> {
     let setup = enqueue_attested_code_upgrade_pending_ratification(pid, candidate)?;
+    assert_ok!(
+        pallet_execution_guard::Pallet::<Runtime>::bind_ratification(pid, referendum_index,)
+    );
     assert_ok!(ExecutionGuard::ratify(
         pallet_origins::Origin::ConstitutionalValues.into(),
         pid,
@@ -1944,7 +1960,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 9);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 10);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -2469,6 +2485,7 @@ fn attestation_creation_snapshots_the_live_constitution_window() {
         ));
 
         let members = [account(51), account(52), account(53)];
+        fund_attestor_members(&members);
         assert_ok!(Attestor::set_members(
             pallet_origins::Origin::ConstitutionalValues.into(),
             members.to_vec(),
@@ -5750,6 +5767,15 @@ fn code_queue_admits_before_ratification_and_binds_a_later_pass_before_execute()
         );
         assert!(pallet_execution_guard::Queue::<Runtime>::contains_key(PID));
 
+        assert_noop!(
+            ExecutionGuard::ratify(
+                pallet_origins::Origin::ConstitutionalValues.into(),
+                PID,
+                RATIFY_REF,
+            ),
+            pallet_execution_guard::Error::<Runtime>::NotRatified
+        );
+        assert_ok!(pallet_execution_guard::Pallet::<Runtime>::bind_ratification(PID, RATIFY_REF,));
         assert_ok!(ExecutionGuard::ratify(
             pallet_origins::Origin::ConstitutionalValues.into(),
             PID,
@@ -5812,6 +5838,7 @@ fn ratification_views_agree_and_never_understate_an_unratified_code_upgrade() {
         );
         assert_eq!(summary_status(PID), queue_status(PID));
 
+        assert_ok!(pallet_execution_guard::Pallet::<Runtime>::bind_ratification(PID, RATIFY_REF,));
         assert_ok!(ExecutionGuard::ratify(
             pallet_origins::Origin::ConstitutionalValues.into(),
             PID,
@@ -6588,6 +6615,7 @@ fn code_queue_rejects_real_under_quorum_attestation_without_storage_changes() {
         const PID: futarchy_primitives::ProposalId = 6_004;
         let candidate = b"bleavit-b6-under-quorum-candidate".to_vec();
         let members = [account(94), account(95), account(96)];
+        fund_attestor_members(&members);
         assert_ok!(Attestor::set_members(
             pallet_origins::Origin::ConstitutionalValues.into(),
             members.to_vec(),
@@ -6711,7 +6739,7 @@ fn code_queue_rejects_real_under_quorum_attestation_without_storage_changes() {
 }
 
 #[test]
-fn code_execution_losing_live_attestor_quorum_is_a_storage_noop() {
+fn code_execution_after_cause_revocation_is_a_storage_noop() {
     upgrade_ext().execute_with(|| {
         const PID: futarchy_primitives::ProposalId = 6_002;
         let candidate = b"bleavit-b6-unattested-runtime-v2".to_vec();
@@ -6722,13 +6750,14 @@ fn code_execution_losing_live_attestor_quorum_is_a_storage_noop() {
                 return;
             }
         };
-        // Member 91 supplied one of the two attestations. Replacing it makes
-        // the still-present record live-below-quorum before execution.
-        assert_ok!(Attestor::set_members(
+        // Routine roster rotation no longer invalidates a committed record;
+        // an explicit cause revocation is the fail-closed adverse path.
+        assert_ok!(Attestor::remove_for_cause(
             pallet_origins::Origin::ConstitutionalValues.into(),
-            vec![account(90), account(92), account(93)],
+            account(91),
+            [0x93; 32],
         ));
-        assert!(!Attestor::has_quorum(
+        assert!(!Attestor::has_record_quorum(
             PID,
             sp_io::hashing::blake2_256(&candidate),
         ));
@@ -6751,6 +6780,50 @@ fn code_execution_losing_live_attestor_quorum_is_a_storage_noop() {
         assert_eq!(release_channel_raw(), release_before);
         assert!(System::authorized_upgrade().is_none());
         assert!(pallet_execution_guard::pallet::PendingUpgrade::<Runtime>::get().is_none());
+    });
+}
+
+#[test]
+fn failed_execution_remains_reap_protected_during_retry_window() {
+    upgrade_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 6_003;
+        let candidate = b"bleavit-b19-retryable-failed-execution-v2".to_vec();
+        let _ = match enqueue_attested_code_upgrade(PID, &candidate, 73) {
+            Some(setup) => setup,
+            None => {
+                assert!(false, "attested upgrade fixture must be constructible");
+                return;
+            }
+        };
+        let account_91: [u8; 32] = account(91).into();
+        let record_id = match pallet_attestor::Attestations::<Runtime>::get()
+            .into_iter()
+            .find(|record| record.pid == PID && record.attestor == account_91)
+        {
+            Some(record) => record.id,
+            None => {
+                assert!(false, "fixture must include account 91's attestation");
+                return;
+            }
+        };
+        pallet_epoch::Proposals::<Runtime>::mutate(PID, |proposal| {
+            proposal.as_mut().expect("queued fixture proposal").state =
+                ProposalState::FailedExecuted;
+        });
+
+        // FailedExecuted is retryable until the retry window expires. A
+        // cause-aware departure must still revoke its record, but a signed
+        // reap must not remove it before the retry path has been exhausted.
+        assert_ok!(Attestor::remove_for_cause(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            account(91),
+            [0x94; 32],
+        ));
+        assert!(pallet_attestor::Pallet::<Runtime>::is_revoked(record_id));
+        assert_noop!(
+            Attestor::reap_attestation(RuntimeOrigin::signed(account(78)), record_id),
+            pallet_attestor::Error::<Runtime>::ProposalNotTerminal
+        );
     });
 }
 
@@ -7297,13 +7370,17 @@ fn epoch_call_samples() -> Vec<RuntimeCall> {
         RuntimeCall::Epoch(pallet_epoch::Call::force_reject_process_hold { pid: 0 }),
         RuntimeCall::Epoch(pallet_epoch::Call::void_cohort { epoch: 0 }),
         RuntimeCall::Epoch(pallet_epoch::Call::finalize_epoch_baseline { epoch: 0 }),
+        RuntimeCall::Epoch(pallet_epoch::Call::bind_ratification {
+            pid: 0,
+            referendum_index: 0,
+        }),
     ]
 }
 
 #[test]
 fn epoch_classifier_rows_and_closed_privileged_wrappers_match_the_authority_matrix() {
     let calls = epoch_call_samples();
-    assert_eq!(calls.len(), 14);
+    assert_eq!(calls.len(), 15);
 
     for call in &calls[0..5] {
         assert!(RuntimeBaseCallFilter::contains(call));
@@ -8310,6 +8387,153 @@ fn assert_guardian_review_referendum(index: u32, action: u32, uphold_veto: bool)
     }
 }
 
+fn submit_ratification_referendum(
+    pid: futarchy_primitives::ProposalId,
+) -> Result<u32, DispatchError> {
+    let guardian = crate::configs::guardian_account();
+    Balances::force_set_balance(
+        RuntimeOrigin::root(),
+        MultiAddress::Id(guardian.clone()),
+        20_000 * currency::VIT,
+    )?;
+    let referendum_index = pallet_referenda::ReferendumCount::<Runtime>::get();
+    let call = RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::ratify {
+        pid,
+        referendum_index,
+    });
+    let proposal = <Preimage as StorePreimage>::bound(call)?;
+    let ratify_origin: RuntimeOrigin = crate::track_origins::Origin::Ratify.into();
+    Referenda::submit(
+        RuntimeOrigin::signed(guardian.clone()),
+        Box::new(ratify_origin.caller().clone()),
+        proposal,
+        frame_support::traits::schedule::DispatchTime::After(0),
+    )?;
+    Referenda::place_decision_deposit(RuntimeOrigin::signed(guardian), referendum_index)
+        .map_err(|error| error.error)?;
+    Ok(referendum_index)
+}
+
+#[test]
+fn proposer_binds_exact_ratification_before_pass_and_queue_admission() {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 8_021;
+        assert!(
+            enqueue_attested_code_upgrade_pending_ratification(PID, b"b18-bind-queued").is_some(),
+            "queued CODE fixture must be constructible"
+        );
+        let referendum = submit_ratification_referendum(PID).expect("ratification referendum");
+
+        assert_noop!(
+            Epoch::bind_ratification(RuntimeOrigin::signed(account(71)), PID, referendum),
+            DispatchError::BadOrigin
+        );
+        assert_ok!(Epoch::bind_ratification(
+            RuntimeOrigin::signed(account(70)),
+            PID,
+            referendum,
+        ));
+        assert_eq!(
+            pallet_execution_guard::PendingRatifications::<Runtime>::get(PID),
+            Some(referendum)
+        );
+        assert_eq!(
+            pallet_execution_guard::Queue::<Runtime>::get(PID).and_then(|queued| queued.ratify_ref),
+            Some(referendum)
+        );
+        assert!(!pallet_execution_guard::Queue::<Runtime>::get(PID)
+            .is_some_and(|queued| queued.ratification_passed));
+
+        assert_noop!(
+            Epoch::bind_ratification(RuntimeOrigin::signed(account(70)), PID, referendum + 1),
+            pallet_epoch::Error::<Runtime>::ExecutionGuard
+        );
+        // Repeating the same proposer call is idempotent while the referendum
+        // is still ongoing.
+        assert_ok!(Epoch::bind_ratification(
+            RuntimeOrigin::signed(account(70)),
+            PID,
+            referendum,
+        ));
+
+        assert_ok!(ExecutionGuard::ratify(
+            pallet_origins::Origin::ConstitutionalValues.into(),
+            PID,
+            referendum,
+        ));
+        assert!(!pallet_execution_guard::PendingRatifications::<Runtime>::contains_key(PID));
+        assert_eq!(
+            pallet_execution_guard::Ratifications::<Runtime>::get(PID)
+                .map(|record| record.referendum_index),
+            Some(referendum)
+        );
+        assert!(ExecutionGuard::do_try_state().is_ok());
+    });
+}
+
+#[test]
+fn proposer_binding_rejects_an_oversized_lookup_before_fetch() {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 8_022;
+        assert!(
+            enqueue_attested_code_upgrade_pending_ratification(PID, b"b18-bind-cap").is_some(),
+            "queued CODE fixture must be constructible"
+        );
+        let referendum = submit_ratification_referendum(PID).expect("ratification referendum");
+        pallet_referenda::ReferendumInfoFor::<Runtime>::mutate(referendum, |info| {
+            let Some(pallet_referenda::ReferendumInfo::Ongoing(status)) = info else {
+                panic!("fresh ratification referendum must be ongoing");
+            };
+            status.proposal = frame_support::traits::Bounded::Lookup {
+                hash: H256::zero(),
+                len: pallet_execution_guard::MAX_PAYLOAD_BYTES.saturating_add(1),
+            };
+        });
+
+        assert_noop!(
+            Epoch::bind_ratification(RuntimeOrigin::signed(account(70)), PID, referendum),
+            pallet_epoch::Error::<Runtime>::ExecutionGuard
+        );
+        assert!(!pallet_execution_guard::PendingRatifications::<Runtime>::contains_key(PID));
+    });
+}
+
+#[test]
+fn proposer_binds_ratification_before_code_proposal_reaches_queue() {
+    development_ext().execute_with(|| {
+        let proposer = account(172);
+        let pid = pallet_epoch::NextProposalId::<Runtime>::get();
+        let (payload_hash, payload_len) =
+            note_runtime_batch(vec![RuntimeCall::System(frame_system::Call::remark {
+                remark: b"b18-bind-prequeue".to_vec(),
+            })])
+            .expect("code payload fits the bounded batch");
+        let bond = crate::configs::balance_param(b"prop.bond.code");
+        assert_ok!(ForeignAssets::mint_into(usdc_location(), &proposer, bond));
+        let mut proposal = empty_param_proposal(pid, proposer.clone(), payload_hash, payload_len);
+        proposal.class = ProposalClass::Code;
+        proposal.bond = bond;
+        assert_ok!(Epoch::submit(
+            RuntimeOrigin::signed(proposer.clone()),
+            proposal
+        ));
+        assert!(pallet_epoch::IntakeProposals::<Runtime>::contains_key(pid));
+
+        let referendum = submit_ratification_referendum(pid).expect("ratification referendum");
+        assert_ok!(Epoch::bind_ratification(
+            RuntimeOrigin::signed(proposer),
+            pid,
+            referendum,
+        ));
+        assert_eq!(
+            pallet_execution_guard::PendingRatifications::<Runtime>::get(pid),
+            Some(referendum)
+        );
+        assert!(!pallet_execution_guard::Queue::<Runtime>::contains_key(pid));
+        assert!(ExecutionGuard::do_try_state().is_ok());
+    });
+}
+
 #[test]
 fn guardian_review_votes_and_enacts_on_ratify_track_with_bonds_restored() {
     development_ext().execute_with(|| {
@@ -8354,11 +8578,26 @@ fn guardian_review_votes_and_enacts_on_ratify_track_with_bonds_restored() {
             );
         }
 
-        let Some(deadline) = pallet_epoch::GuardianReviewDeadlines::<Runtime>::get(PID) else {
-            assert!(false, "ratification keeps the T12 review deadline");
+        let Some(window) = pallet_epoch::GuardianReviewWindows::<Runtime>::get(PID) else {
+            assert!(false, "ratification keeps the T12 opening window");
             return;
         };
-        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| clock.index = deadline);
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        let seed_offset = schedule
+            .next_length
+            .saturating_mul(4)
+            .saturating_div(21)
+            .saturating_add(1);
+        System::set_block_number(seed_offset);
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = window;
+            clock.phase = futarchy_primitives::EpochPhase::Seed;
+        });
+        pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
+            schedule.length = schedule.next_length;
+            schedule.epoch_start_block =
+                seed_offset.saturating_sub(schedule.length.saturating_mul(4) / 21);
+        });
         let Ok(batch) = pallet_epoch::TickBatch::try_from(vec![PID]) else {
             assert!(false, "one proposal fits the tick bound");
             return;
@@ -8369,6 +8608,77 @@ fn guardian_review_votes_and_enacts_on_ratify_track_with_bonds_restored() {
             Some(ProposalState::Rerun),
             "ratifying the delay preserves the ordinary T12 rerun path"
         );
+        assert_ok!(Guardian::do_try_state());
+    });
+}
+
+#[test]
+fn guardian_t12_tick_closes_veto_but_keeps_ordinary_review_accountable() {
+    development_ext().execute_with(|| {
+        const PID: futarchy_primitives::ProposalId = 8_012;
+        let Some((members, action, referendum, veto_referendum)) =
+            seed_guardian_delay_action(PID, 82)
+        else {
+            assert!(false, "delay action must schedule both review verdicts");
+            return;
+        };
+        let action_epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        let seed_offset = schedule
+            .next_length
+            .saturating_mul(4)
+            .saturating_div(21)
+            .saturating_add(1);
+        System::set_block_number(seed_offset);
+        pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
+            schedule.length = schedule.next_length;
+            schedule.epoch_start_block =
+                seed_offset.saturating_sub(schedule.length.saturating_mul(4) / 21);
+        });
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = action_epoch.saturating_add(1);
+            clock.phase = futarchy_primitives::EpochPhase::Seed;
+        });
+        let batch = pallet_epoch::TickBatch::try_from(vec![PID]).expect("single tick fits");
+        assert_ok!(Epoch::tick(RuntimeOrigin::signed(account(182)), batch));
+
+        assert_eq!(
+            pallet_epoch::Proposals::<Runtime>::get(PID).map(|proposal| proposal.state),
+            Some(ProposalState::Rerun)
+        );
+        assert!(!pallet_guardian::VetoReviewActions::<Runtime>::contains_key(PID));
+        assert!(!pallet_guardian::VetoReviewReferenda::<Runtime>::contains_key(action));
+        assert_eq!(
+            pallet_guardian::ReviewReferenda::<Runtime>::get(action),
+            Some(referendum)
+        );
+        let fronting = pallet_guardian::ReviewFrontingOf::<Runtime>::get(action)
+            .expect("ordinary review remains fronted after T12");
+        assert_eq!(
+            fronting.slices.iter().copied().sum::<u128>(),
+            1_001 * currency::VIT
+        );
+        assert!(matches!(
+            pallet_referenda::ReferendumInfoFor::<Runtime>::get(veto_referendum),
+            Some(pallet_referenda::ReferendumInfo::Cancelled(_, None, None))
+        ));
+        assert_ok!(Guardian::do_try_state());
+
+        // The ordinary accountability referendum remains enactable after T12
+        // and restores the remaining fronting normally.
+        enact_passing_referendum(referendum);
+        assert!(!pallet_guardian::ReviewReferenda::<Runtime>::contains_key(
+            action
+        ));
+        assert!(!pallet_guardian::ReviewFrontingOf::<Runtime>::contains_key(
+            action
+        ));
+        for member in members.iter().take(5) {
+            assert_eq!(
+                Balances::balance_on_hold(&pallet_guardian::HoldReason::SeatBond.into(), member),
+                pallet_guardian::GUARDIAN_BOND
+            );
+        }
         assert_ok!(Guardian::do_try_state());
     });
 }
@@ -8619,6 +8929,10 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
             pallet_guardian::VetoReviewReferenda::<Runtime>::get(action),
             Some(before_referenda.saturating_add(1)),
         );
+        assert_eq!(
+            pallet_epoch::GuardianReviewWindows::<Runtime>::get(PID),
+            Some(review_start_epoch.saturating_add(1)),
+        );
         assert_guardian_review_referendum(before_referenda, action, false);
         assert_guardian_review_referendum(before_referenda.saturating_add(1), action, true);
         let deadline = match pallet_epoch::GuardianReviewDeadlines::<Runtime>::get(PID) {
@@ -8633,11 +8947,22 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
             review_start_epoch.saturating_add(amended_review_deadline),
         );
         assert!(
-            !<crate::configs::RuntimeEpochGuardian as pallet_epoch::GuardianAccess>::review_window_closed(PID),
+            !<crate::configs::RuntimeEpochGuardian as pallet_epoch::GuardianAccess>::review_window_closed(
+                PID,
+                pallet_epoch::EpochOf::<Runtime>::get().index,
+                pallet_epoch::EpochOf::<Runtime>::get().phase,
+            ),
         );
-        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| clock.index = deadline);
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = review_start_epoch.saturating_add(1);
+            clock.phase = futarchy_primitives::EpochPhase::Seed;
+        });
         assert!(
-            <crate::configs::RuntimeEpochGuardian as pallet_epoch::GuardianAccess>::review_window_closed(PID),
+            <crate::configs::RuntimeEpochGuardian as pallet_epoch::GuardianAccess>::review_window_closed(
+                PID,
+                review_start_epoch.saturating_add(1),
+                futarchy_primitives::EpochPhase::Seed,
+            ),
         );
 
         let bonds_before = pallet_guardian::MemberBonds::<Runtime>::get();
@@ -8645,7 +8970,17 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
         let guardian_before = <Balances as FungibleInspect<AccountId>>::total_balance(
             &crate::configs::guardian_account(),
         );
+        // The accountability boundary itself is not overdue under SQ-45.
         pallet_epoch::EpochOf::<Runtime>::mutate(|clock| clock.index = deadline);
+        let boundary_bonds = pallet_guardian::MemberBonds::<Runtime>::get();
+        let _ = Guardian::on_initialize(System::block_number());
+        assert_eq!(
+            pallet_guardian::MemberBonds::<Runtime>::get(),
+            boundary_bonds,
+            "the review remains valid at grd.review_dl"
+        );
+
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| clock.index = deadline.saturating_add(1));
         let _ = Guardian::on_initialize(System::block_number());
         let bonds_after = pallet_guardian::MemberBonds::<Runtime>::get();
         let slash = pallet_guardian::GUARDIAN_BOND
@@ -8661,8 +8996,13 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
             assert_eq!(bonds_after[index], bonds_before[index]);
         }
         let reason: crate::RuntimeHoldReason = pallet_guardian::HoldReason::SeatBond.into();
-        for member in members.iter().take(5) {
-            assert_eq!(Balances::balance_on_hold(&reason, member), slash);
+        let residual = pallet_guardian::ReviewFrontingOf::<Runtime>::get(action)
+            .expect("failed delay retains veto fronting");
+        for (position, member) in members.iter().take(5).enumerate() {
+            assert_eq!(
+                Balances::balance_on_hold(&reason, member) + residual.slices[position],
+                slash
+            );
         }
         for member in members.iter().skip(5) {
             assert_eq!(
@@ -8670,14 +9010,15 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
                 pallet_guardian::GUARDIAN_BOND
             );
         }
-        assert!(pallet_guardian::ReviewDeadlines::<Runtime>::get().is_empty());
+        assert!(pallet_guardian::ReviewDeadlines::<Runtime>::get()
+            .iter()
+            .any(|review| review.action_id == action && review.recall_scheduled));
         assert!(!pallet_guardian::ReviewReferenda::<Runtime>::contains_key(action));
-        assert!(!pallet_guardian::VetoReviewReferenda::<Runtime>::contains_key(
-            action
-        ));
-        assert!(!pallet_guardian::ReviewFrontingOf::<Runtime>::contains_key(
-            action
-        ));
+        assert_eq!(
+            pallet_guardian::VetoReviewReferenda::<Runtime>::get(action),
+            Some(before_referenda.saturating_add(1))
+        );
+        assert!(pallet_guardian::ReviewFrontingOf::<Runtime>::contains_key(action));
         assert!(matches!(
             pallet_referenda::ReferendumInfoFor::<Runtime>::get(before_referenda),
             Some(pallet_referenda::ReferendumInfo::Cancelled(_, None, None))
@@ -8686,7 +9027,7 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
             pallet_referenda::ReferendumInfoFor::<Runtime>::get(
                 before_referenda.saturating_add(1)
             ),
-            Some(pallet_referenda::ReferendumInfo::Cancelled(_, None, None))
+            Some(pallet_referenda::ReferendumInfo::Ongoing(_))
         ));
         let failed = pallet_guardian::FailedActions::<Runtime>::get(action)
             .expect("deadline writes the recall substrate");
@@ -8712,8 +9053,8 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
             <Balances as FungibleInspect<AccountId>>::total_balance(
                 &crate::configs::guardian_account()
             ),
-            recall_deposits,
-            "only the recall deposits may remain with the guardian sovereign"
+            recall_deposits.saturating_add(1_001 * currency::VIT),
+            "the recall deposits and the still-live T24 veto fronting remain with the guardian sovereign"
         );
         assert_eq!(
             Balances::balance(&crate::genesis::treasury_account()),
@@ -8741,6 +9082,23 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
         )));
         assert_ok!(Guardian::do_try_state());
 
+        // T12 now closes the surviving veto referendum and returns its
+        // residual fronting before the separate guardian recall is enacted.
+        assert_ok!(Guardian::close_review_window(PID));
+        assert!(!pallet_guardian::VetoReviewActions::<Runtime>::contains_key(PID));
+        assert!(!pallet_guardian::VetoReviewReferenda::<Runtime>::contains_key(action));
+        assert!(!pallet_guardian::ReviewFrontingOf::<Runtime>::contains_key(action));
+        assert!(matches!(
+            pallet_referenda::ReferendumInfoFor::<Runtime>::get(
+                before_referenda.saturating_add(1)
+            ),
+            Some(pallet_referenda::ReferendumInfo::Cancelled(_, None, None))
+        ));
+        for member in members.iter().take(5) {
+            assert_eq!(Balances::balance_on_hold(&reason, member), slash);
+        }
+        assert_ok!(Guardian::do_try_state());
+
         enact_passing_referendum(recall);
         let seated = Guardian::members().expect("council remains initialized");
         assert_eq!(seated.iter().filter(|member| member.is_some()).count(), 2);
@@ -8752,7 +9110,7 @@ fn fifth_guardian_delay_approval_dispatches_epoch_effect_and_schedules_real_revi
         );
 
         pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
-            clock.index = deadline.saturating_add(1)
+            clock.index = deadline.saturating_add(2)
         });
         let _ = Guardian::on_initialize(System::block_number());
         for member in members.iter().take(5) {
@@ -8850,8 +9208,29 @@ fn suspended_code_rerun_preserves_ratification_attestation_and_one_continuous_pi
             PID,
             H256::repeat_byte(61).into(),
         ));
-        let current_epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
-        pallet_epoch::GuardianReviewDeadlines::<Runtime>::insert(PID, current_epoch);
+        let action_epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        pallet_epoch::GuardianReviewDeadlines::<Runtime>::insert(
+            PID,
+            action_epoch.saturating_add(2),
+        );
+        pallet_epoch::GuardianReviewWindows::<Runtime>::insert(PID, action_epoch.saturating_add(1));
+        let target_epoch = pallet_epoch::CurrentEpoch::<Runtime>::get().saturating_add(1);
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        let seed_offset = schedule
+            .next_length
+            .saturating_mul(4)
+            .saturating_div(21)
+            .saturating_add(1);
+        System::set_block_number(seed_offset);
+        pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
+            schedule.length = schedule.next_length;
+            schedule.epoch_start_block =
+                seed_offset.saturating_sub(schedule.length.saturating_mul(4) / 21);
+        });
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = target_epoch;
+            clock.phase = futarchy_primitives::EpochPhase::Seed;
+        });
         let batch = match pallet_epoch::TickBatch::try_from(vec![PID]) {
             Ok(batch) => batch,
             Err(_) => {
@@ -9205,8 +9584,29 @@ fn tick_t20_from_rerun_releases_every_retained_guard_record() {
             PID,
             H256::repeat_byte(63).into(),
         ));
-        let current_epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
-        pallet_epoch::GuardianReviewDeadlines::<Runtime>::insert(PID, current_epoch);
+        let action_epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        pallet_epoch::GuardianReviewDeadlines::<Runtime>::insert(
+            PID,
+            action_epoch.saturating_add(2),
+        );
+        pallet_epoch::GuardianReviewWindows::<Runtime>::insert(PID, action_epoch.saturating_add(1));
+        let target_epoch = pallet_epoch::CurrentEpoch::<Runtime>::get().saturating_add(1);
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        let seed_offset = schedule
+            .next_length
+            .saturating_mul(4)
+            .saturating_div(21)
+            .saturating_add(1);
+        System::set_block_number(seed_offset);
+        pallet_epoch::Schedule::<Runtime>::mutate(|schedule| {
+            schedule.length = schedule.next_length;
+            schedule.epoch_start_block =
+                seed_offset.saturating_sub(schedule.length.saturating_mul(4) / 21);
+        });
+        pallet_epoch::EpochOf::<Runtime>::mutate(|clock| {
+            clock.index = target_epoch;
+            clock.phase = futarchy_primitives::EpochPhase::Seed;
+        });
         let batch = match pallet_epoch::TickBatch::try_from(vec![PID]) {
             Ok(batch) => batch,
             Err(_) => {
@@ -9674,6 +10074,7 @@ fn never_queued_ratification_is_reaped_on_withdraw_and_after_intake_reap() {
             RuntimeOrigin::signed(proposer.clone()),
             proposal,
         ));
+        assert_ok!(pallet_execution_guard::Pallet::<Runtime>::bind_ratification(pid, 104,));
         assert_ok!(ExecutionGuard::ratify(
             pallet_origins::Origin::ConstitutionalValues.into(),
             pid,
@@ -9755,6 +10156,7 @@ fn ratified_prequeue_trading_reject_releases_epoch_pin_and_ratification() {
         pallet_epoch::QualificationPreimageRequests::<Runtime>::insert(PID, payload_hash.0);
         <Preimage as StorePreimage>::unnote(&payload_hash);
         assert_eq!(preimage_request_count(payload_hash), 1);
+        assert_ok!(pallet_execution_guard::Pallet::<Runtime>::bind_ratification(PID, 105,));
         assert_ok!(ExecutionGuard::ratify(
             pallet_origins::Origin::ConstitutionalValues.into(),
             PID,
@@ -15231,6 +15633,7 @@ fn view_proposal_summaries_sorts_and_joins_passed_ratification() {
                 return;
             }
         };
+        assert_ok!(pallet_execution_guard::Pallet::<Runtime>::bind_ratification(1, 77));
         assert_ok!(ExecutionGuard::ratify(
             pallet_origins::Origin::ConstitutionalValues.into(),
             1,

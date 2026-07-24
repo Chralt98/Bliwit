@@ -25,8 +25,8 @@ use core::marker::PhantomData;
 use frame_support::pallet_prelude::{DispatchError, DispatchResult};
 use futarchy_primitives::{
     keeper::{CrankClass, KeeperRebateSink},
-    Balance, BlockNumber, EpochId, FixedU64, MarketId, MarketSet, MetricSpecVersion, Proposal,
-    ProposalClass, ProposalId, RejectReason, RuntimeVersionConstraint, H256,
+    Balance, BlockNumber, EpochId, EpochPhase, FixedU64, MarketId, MarketSet, MetricSpecVersion,
+    Proposal, ProposalClass, ProposalId, RejectReason, RuntimeVersionConstraint, H256,
 };
 
 pub use epoch_core::{
@@ -148,7 +148,15 @@ pub trait OracleAccess {
 pub trait GuardianAccess {
     fn hold_active(pid: ProposalId) -> bool;
     fn dead_man_engaged() -> bool;
-    fn review_window_closed(pid: ProposalId) -> bool;
+    /// Whether the T12 review window has elapsed in the phase currently being
+    /// processed.  The phase is passed from the in-memory clock state so a
+    /// stale persisted phase cannot close a review outside the first Seed
+    /// boundary.
+    fn review_window_closed(pid: ProposalId, epoch: EpochId, phase: EpochPhase) -> bool;
+    /// Retire the guardian review's surviving veto referendum and fronting
+    /// liability after T12 leaves `Suspended`. The call is idempotent for
+    /// proposals without a failed delay review.
+    fn close_review_window(pid: ProposalId) -> DispatchResult;
 }
 
 pub trait AttestationAccess {
@@ -209,6 +217,13 @@ pub trait PreimageAccess {
 
 /// A8 → A11 producer seam. Only an adopted decision invokes this endpoint.
 pub trait ExecutionGuardAccess {
+    /// Freeze a CODE/META referendum identity before queue admission. The
+    /// runtime implementation owns the bounded pre-queue join and queue-side
+    /// mirror; test seams may leave the default no-op when they do not model
+    /// execution-guard storage.
+    fn bind_ratification(_pid: ProposalId, _referendum_index: u32) -> DispatchResult {
+        Ok(())
+    }
     fn enqueue(
         pid: ProposalId,
         payload_hash: H256,
@@ -286,6 +301,9 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     fn prime_recovery_qualification(_: &mut Proposal<AccountId>) {}
     /// Saturate the real execution-guard aggregate before a decision enqueues.
     fn prime_guard_enqueue(pid: ProposalId);
+    /// Seed the exact ratification referendum consumed by the benchmark-only
+    /// bind fixture. Runtime implementations may leave this a no-op.
+    fn prime_ratification(_: ProposalId, _: u32) {}
     fn prime_settlement(epoch: EpochId);
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
@@ -309,7 +327,7 @@ pub mod pallet {
     use futarchy_primitives::{Branch, CohortSummary, DecisionOutcome, EpochPhase, ProposalState};
     use sp_runtime::{SaturatedConversion, TryRuntimeError};
 
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -603,6 +621,13 @@ pub mod pallet {
     pub type GuardianReviewDeadlines<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, ProposalId, EpochId, OptionQuery>;
 
+    /// Purpose-specific T12 opening window. This is deliberately separate from
+    /// [`GuardianReviewDeadlines`], which retains the live `grd.review_dl`
+    /// accountability/slashing horizon (SQ-310).
+    #[pallet::storage]
+    pub type GuardianReviewWindows<T: Config> =
+        CountedStorageMap<_, Blake2_128Concat, ProposalId, EpochId, OptionQuery>;
+
     /// Explicit qualification-era preimage ownership. State alone is not an
     /// ownership proof once a rerun transfers the pin to the execution guard.
     #[pallet::storage]
@@ -803,6 +828,53 @@ pub mod pallet {
                 futarchy_primitives::kernel::TICK_BATCH,
                 "epoch tick batch must match the kernel cap"
             );
+        }
+
+        /// Backfill the purpose-specific T12 opening window for a live chain
+        /// upgraded from the pre-B18 layout. Older rows carry only the
+        /// accountability deadline; the conservative repair opens the window
+        /// on the next observed epoch (or immediately when that deadline has
+        /// already passed), never extending a suspended hold indefinitely.
+        fn on_runtime_upgrade() -> Weight {
+            let version = StorageVersion::get::<Pallet<T>>();
+            if version != StorageVersion::new(0) {
+                return Weight::zero();
+            }
+            let current = EpochOf::<T>::get().index;
+            let entries = GuardianReviewDeadlines::<T>::iter()
+                .take((MAX_LIVE_PROPOSALS_BOUND as usize).saturating_add(1))
+                .collect::<Vec<_>>();
+            let reads = 2u64.saturating_add((entries.len() as u64).saturating_mul(3));
+            if entries.len() > MAX_LIVE_PROPOSALS_BOUND as usize {
+                // Leave the version at 0 so a subsequent upgrade attempt can
+                // retry after an operator has repaired the bounded state.
+                return T::DbWeight::get().reads(reads);
+            }
+            let mut writes = 0u64;
+            for (pid, deadline) in entries {
+                if !Proposals::<T>::get(pid)
+                    .is_some_and(|proposal| proposal.state == ProposalState::Suspended)
+                {
+                    // Do not advance over an orphaned or non-suspended legacy
+                    // deadline.  The reverse join must be repaired before the
+                    // new try-state invariant can be made live.
+                    return T::DbWeight::get().reads(reads);
+                }
+                if !GuardianReviewWindows::<T>::contains_key(pid) {
+                    let window = if deadline > current {
+                        current.saturating_add(1)
+                    } else {
+                        current
+                    };
+                    GuardianReviewWindows::<T>::insert(pid, window);
+                    writes = writes.saturating_add(1);
+                }
+            }
+            StorageVersion::new(1).put::<Pallet<T>>();
+            writes = writes.saturating_add(1);
+            T::DbWeight::get()
+                .reads(reads)
+                .saturating_add(T::DbWeight::get().writes(writes))
         }
 
         #[cfg(feature = "try-runtime")]
@@ -1031,7 +1103,11 @@ pub mod pallet {
                                 preimage_ok,
                                 active_metric_spec_version: active_metric_spec,
                                 markets,
-                                review_window_closed: T::Guardian::review_window_closed(pid),
+                                review_window_closed: T::Guardian::review_window_closed(
+                                    pid,
+                                    state.epoch.index,
+                                    state.epoch.phase,
+                                ),
                                 queue_reject_reason: T::ExecutionGuard::queue_reject_reason(pid),
                                 retry_exhausted: T::ExecutionGuard::retry_exhausted(pid),
                             },
@@ -1055,35 +1131,55 @@ pub mod pallet {
                             .skip(events_before)
                             .any(|event| !matches!(event, CoreEvent::NoOp));
                         if proposal.state == ProposalState::Suspended
-                            && state.proposal_view(pid)?.state != ProposalState::Suspended
-                        {
-                            GuardianReviewDeadlines::<T>::remove(pid);
-                        }
-                        if proposal.state == ProposalState::Suspended
                             && state_after == ProposalState::Rerun
                         {
                             T::ExecutionGuard::dequeue_for_rerun(pid)
                                 .map_err(|_| CoreError::ExecutionGuard)?;
-                        } else if Self::is_terminal(state_after)
-                            || (matches!(
-                                proposal.state,
-                                ProposalState::Queued
-                                    | ProposalState::FailedExecuted
-                                    | ProposalState::Suspended
-                            ) && !matches!(
-                                state_after,
-                                ProposalState::Queued
-                                    | ProposalState::FailedExecuted
-                                    | ProposalState::Suspended
-                                    | ProposalState::Rerun
-                            ))
-                        {
-                            // Universal idempotent terminal hook. This also reaps
-                            // pre-queue ratification/attestation records where no
-                            // Queue entry ever existed, and retained Rerun pins on
-                            // T20 paths that state-based ownership inference misses.
-                            T::ExecutionGuard::dequeue_terminal(pid)
-                                .map_err(|_| CoreError::ExecutionGuard)?;
+                            // T12 has now left `Suspended`; close the separate
+                            // guardian veto window before dropping both epoch
+                            // joins. A failed review's ordinary referendum was
+                            // already settled at `grd.review_dl`, while the
+                            // upheld-veto referendum remains live exactly to
+                            // this boundary (SQ-311).
+                            T::Guardian::close_review_window(pid)
+                                .map_err(|_| CoreError::TryStateViolation)?;
+                            GuardianReviewDeadlines::<T>::remove(pid);
+                            GuardianReviewWindows::<T>::remove(pid);
+                        } else {
+                            if proposal.state == ProposalState::Suspended
+                                && state_after != ProposalState::Suspended
+                            {
+                                // T20/void/terminal paths can leave the
+                                // suspended state without traversing T12.  A
+                                // terminal proposal cannot later enact T24,
+                                // so retire the surviving veto/fronting before
+                                // dropping the two epoch joins.
+                                T::Guardian::close_review_window(pid)
+                                    .map_err(|_| CoreError::TryStateViolation)?;
+                                GuardianReviewDeadlines::<T>::remove(pid);
+                                GuardianReviewWindows::<T>::remove(pid);
+                            }
+                            if Self::is_terminal(state_after)
+                                || (matches!(
+                                    proposal.state,
+                                    ProposalState::Queued
+                                        | ProposalState::FailedExecuted
+                                        | ProposalState::Suspended
+                                ) && !matches!(
+                                    state_after,
+                                    ProposalState::Queued
+                                        | ProposalState::FailedExecuted
+                                        | ProposalState::Suspended
+                                        | ProposalState::Rerun
+                                ))
+                            {
+                                // Universal idempotent terminal hook. This also reaps
+                                // pre-queue ratification/attestation records where no
+                                // Queue entry ever existed, and retained Rerun pins on
+                                // T20 paths that state-based ownership inference misses.
+                                T::ExecutionGuard::dequeue_terminal(pid)
+                                    .map_err(|_| CoreError::ExecutionGuard)?;
+                            }
                         }
                         if state.events.iter().any(
                         |event| matches!(event, CoreEvent::RerunOpened(opened) if *opened == pid),
@@ -1419,13 +1515,23 @@ pub mod pallet {
         pub fn force_reject_process_hold(origin: OriginFor<T>, pid: ProposalId) -> DispatchResult {
             T::GuardianOrigin::ensure_origin(origin)?;
             Self::mutate(|state, ledger| {
+                let was_suspended = state.proposal_view(pid)?.state == ProposalState::Suspended;
                 // Direct T20 guardian path: when the target is `Queued`/`FailedExecuted`
                 // (or a `Suspended` proposal that was queued) A11 still owns the queue
                 // entry. Force-rejecting it is terminal, so release the guard state in
                 // lockstep (idempotent — a no-op for pre-queue states with no entry).
                 state.force_reject_process_hold(CoreOrigin::GuardianHold, ledger, pid)?;
+                if was_suspended {
+                    // T20 can terminate a delayed proposal without passing
+                    // through the normal T12 branch. Retire the surviving
+                    // guardian veto and its fronting before dropping the
+                    // epoch-owned review joins.
+                    T::Guardian::close_review_window(pid)
+                        .map_err(|_| CoreError::TryStateViolation)?;
+                }
                 Self::release_qualification_preimage(pid);
                 GuardianReviewDeadlines::<T>::remove(pid);
+                GuardianReviewWindows::<T>::remove(pid);
                 T::ExecutionGuard::dequeue_terminal(pid).map_err(|_| CoreError::ExecutionGuard)
             })
         }
@@ -1436,6 +1542,15 @@ pub mod pallet {
             T::VoidAuthority::ensure_origin(origin)?;
             Self::mutate(|state, ledger| {
                 let proposals = state.void_affected_proposals(epoch)?;
+                let suspended = proposals
+                    .iter()
+                    .copied()
+                    .filter(|pid| {
+                        state
+                            .proposal_view(*pid)
+                            .is_ok_and(|proposal| proposal.state == ProposalState::Suspended)
+                    })
+                    .collect::<Vec<_>>();
                 let mut welfare = WelfareAdapter::<T>(PhantomData);
                 state.void_cohort(
                     CoreOrigin::VoidAuthority,
@@ -1444,9 +1559,17 @@ pub mod pallet {
                     epoch,
                     Self::now(),
                 )?;
+                for pid in suspended {
+                    // PB-ORACLE-VOID also includes Suspended proposals in its
+                    // affected set. Close their independent veto horizon
+                    // before the terminal guard/epoch joins are reaped.
+                    T::Guardian::close_review_window(pid)
+                        .map_err(|_| CoreError::TryStateViolation)?;
+                }
                 for pid in proposals {
                     Self::release_qualification_preimage(pid);
                     GuardianReviewDeadlines::<T>::remove(pid);
+                    GuardianReviewWindows::<T>::remove(pid);
                     T::ExecutionGuard::dequeue_terminal(pid)
                         .map_err(|_| CoreError::ExecutionGuard)?;
                 }
@@ -1511,6 +1634,47 @@ pub mod pallet {
                 T::KeeperRebate::rebate(&who, CrankClass::General);
             }
             result
+        }
+
+        /// Proposer-authorized binding for the CODE/META values referendum.
+        /// The referendum may still be ongoing; the execution guard records
+        /// the submitted index separately from the eventual passed
+        /// `RatificationRecord` (06 §2.2, 09 §1.1(4), SQ-145). Keeping this
+        /// endpoint on epoch makes the proposer check independent of the
+        /// guard's internal origin seams and permits a pre-queue binding.
+        #[pallet::call_index(16)]
+        #[pallet::weight(T::WeightInfo::bind_ratification())]
+        pub fn bind_ratification(
+            origin: OriginFor<T>,
+            pid: ProposalId,
+            referendum_index: u32,
+        ) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            Self::mutate(|state, _| {
+                let proposal = state
+                    .proposal_view(pid)
+                    .map_err(|_| CoreError::UnknownProposal)?
+                    .clone();
+                ensure!(proposal.proposer == who, CoreError::BadOrigin);
+                ensure!(
+                    matches!(proposal.class, ProposalClass::Code | ProposalClass::Meta),
+                    CoreError::BadDecisionInput
+                );
+                ensure!(
+                    !matches!(
+                        proposal.state,
+                        ProposalState::Rejected(_)
+                            | ProposalState::Executed
+                            | ProposalState::Measuring
+                            | ProposalState::Settled
+                            | ProposalState::Cancelled
+                            | ProposalState::Expired
+                    ),
+                    CoreError::BadState
+                );
+                T::ExecutionGuard::bind_ratification(pid, referendum_index)
+                    .map_err(|_| CoreError::ExecutionGuard)
+            })
         }
     }
 
@@ -1853,17 +2017,27 @@ pub mod pallet {
             });
             if result.is_ok() {
                 GuardianReviewDeadlines::<T>::remove(pid);
+                GuardianReviewWindows::<T>::remove(pid);
             }
             result
         }
 
-        /// Bind the retrospective-review deadline to a delayed proposal. This
-        /// durable join survives guardian action-record maintenance and is
-        /// consumed by T12/T24.
-        pub fn note_guardian_review_deadline(pid: ProposalId, deadline: EpochId) -> DispatchResult {
+        /// Bind both retrospective-review horizons to a delayed proposal. The
+        /// accountability deadline snapshots `grd.review_dl`; the independent
+        /// T12 window is normally `action_epoch + 1` (SQ-310). Both joins
+        /// survive guardian action-record maintenance and are consumed by the
+        /// epoch/guardian handoff.
+        pub fn note_guardian_review_window(
+            pid: ProposalId,
+            deadline: EpochId,
+            window: EpochId,
+        ) -> DispatchResult {
             let proposal = Proposals::<T>::get(pid).ok_or(Error::<T>::UnknownProposal)?;
             ensure!(
-                proposal.state == ProposalState::Suspended && deadline > EpochOf::<T>::get().index,
+                proposal.state == ProposalState::Suspended
+                    && deadline > EpochOf::<T>::get().index
+                    && window > EpochOf::<T>::get().index
+                    && window <= deadline,
                 Error::<T>::BadState
             );
             ensure!(
@@ -1871,8 +2045,25 @@ pub mod pallet {
                     || GuardianReviewDeadlines::<T>::count() < MAX_LIVE_PROPOSALS_BOUND,
                 Error::<T>::TryStateViolation
             );
+            ensure!(
+                GuardianReviewWindows::<T>::contains_key(pid)
+                    || GuardianReviewWindows::<T>::count() < MAX_LIVE_PROPOSALS_BOUND,
+                Error::<T>::TryStateViolation
+            );
             GuardianReviewDeadlines::<T>::insert(pid, deadline);
+            GuardianReviewWindows::<T>::insert(pid, window);
             Ok(())
+        }
+
+        /// Compatibility wrapper for test/seam callers that only have the
+        /// accountability horizon. Production writes both values through
+        /// [`Self::note_guardian_review_window`].
+        pub fn note_guardian_review_deadline(pid: ProposalId, deadline: EpochId) -> DispatchResult {
+            let window = EpochOf::<T>::get()
+                .index
+                .checked_add(1)
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            Self::note_guardian_review_window(pid, deadline, window)
         }
 
         #[cfg(any(test, feature = "runtime-benchmarks"))]
@@ -2729,6 +2920,11 @@ pub mod pallet {
                     "epoch guardian-review deadline bound exceeded",
                 ));
             }
+            if GuardianReviewWindows::<T>::count() > MAX_LIVE_PROPOSALS_BOUND {
+                return Err(TryRuntimeError::Other(
+                    "epoch guardian-review window bound exceeded",
+                ));
+            }
             let qualification_count = QualificationPreimageRequests::<T>::iter_keys().count();
             let auxiliary_count = QualificationAuxiliaryPreimageRequests::<T>::iter_keys().count();
             if QualificationPreimageRequests::<T>::count() > MAX_LIVE_PROPOSALS_BOUND
@@ -2811,6 +3007,22 @@ pub mod pallet {
                 {
                     return Err(TryRuntimeError::Other(
                         "epoch guardian-review deadline lacks suspended proposal",
+                    ));
+                }
+                if !GuardianReviewWindows::<T>::contains_key(pid) {
+                    return Err(TryRuntimeError::Other(
+                        "epoch guardian-review deadline has no opening window",
+                    ));
+                }
+            }
+            for (pid, window) in GuardianReviewWindows::<T>::iter() {
+                if !GuardianReviewDeadlines::<T>::contains_key(pid)
+                    || !Proposals::<T>::get(pid)
+                        .is_some_and(|proposal| proposal.state == ProposalState::Suspended)
+                    || window < EpochOf::<T>::get().index
+                {
+                    return Err(TryRuntimeError::Other(
+                        "epoch guardian-review window is orphaned or expired",
                     ));
                 }
             }

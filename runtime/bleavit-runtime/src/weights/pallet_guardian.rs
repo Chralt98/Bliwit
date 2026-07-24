@@ -582,13 +582,13 @@ impl<T: frame_system::Config> pallet_guardian::WeightInfo for WeightInfo<T> {
 	/// Storage: `ConditionalLedger::SplitPausedUntil` (r:0 w:1)
 	/// Proof: `ConditionalLedger::SplitPausedUntil` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn on_initialize() -> Weight {
-		// Proof Size summary in bytes:
-		//  Measured:  `55606`
-		//  Estimated: `125304`
-		// Minimum execution time: 960_180_000 picoseconds.
-		Weight::from_parts(974_420_000, 0)
-			.saturating_add(Weight::from_parts(0, 125304))
-			.saturating_add(T::DbWeight::get().reads(46))
-			.saturating_add(T::DbWeight::get().writes(48))
+		// B18's failed DelayOnce retention checks the bounded veto join while
+		// reaping maintenance records.  The old single-review benchmark did not
+		// cover the saturated per-block sweep, so retain the conservative pallet
+		// fallback envelope until the next full guardian benchmark refresh.
+		Weight::from_parts(1_950_000_000, 0)
+			.saturating_add(Weight::from_parts(0, 183055))
+			.saturating_add(T::DbWeight::get().reads(220))
+			.saturating_add(T::DbWeight::get().writes(150))
 	}
 }

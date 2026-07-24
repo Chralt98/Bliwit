@@ -24,6 +24,7 @@ pub trait WeightInfo {
     fn void_cohort(items: u32) -> Weight;
     fn set_intake_paused() -> Weight;
     fn finalize_epoch_baseline() -> Weight;
+    fn bind_ratification() -> Weight;
 }
 
 const STATE_POV: u64 = 48_000;
@@ -78,6 +79,14 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     }
     fn finalize_epoch_baseline() -> Weight {
         base::<T>(40_000_000, 12, 10)
+    }
+    fn bind_ratification() -> Weight {
+        // Binding is an epoch aggregate mutation, not a single-key write:
+        // worst case it loads and rewrites both bounded proposal halves and
+        // cohorts, then validates the referendum/preimage and updates the
+        // guard join. Keep the fallback conservative until the next assembled
+        // runtime benchmark refresh.
+        base::<T>(2_100_000_000, 240, 140)
     }
 }
 
@@ -135,6 +144,9 @@ impl WeightInfo for () {
     }
     fn finalize_epoch_baseline() -> Weight {
         rocks(40_000_000, 12, 10)
+    }
+    fn bind_ratification() -> Weight {
+        rocks(2_100_000_000, 240, 140)
     }
 }
 

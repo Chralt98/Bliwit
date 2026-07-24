@@ -161,8 +161,11 @@ disputed cohort began has zero weight — the UI shows each voter's snapshot-eli
 
 **Ratification** (CODE/META): a `ratify` referendum can be submitted any time after the
 artifact hash is committed, runs concurrently with trading/timelock, and is checked only at
-`execute()` dispatch. Missing ⇒ proposal stays Queued (retry until `grace_end`), then
-`Rejected(NotRatified)` with bond refund.
+`execute()` dispatch. After submission, the proposer freezes the exact referendum index with
+`epoch.bind_ratification`; a proposal with no submitted referendum may queue without a binding,
+but the queue never invents or replaces one, and an unbound referendum cannot dispatch the
+guard's `ratify` call. Missing/unfinished ratification ⇒ proposal stays Queued (retry until
+`grace_end`), then `Rejected(NotRatified)` with bond refund.
 
 ## 7. Guardians, playbooks, attestors (06 §5–§7)
 
@@ -180,7 +183,11 @@ artifact hash is committed, runs concurrently with trading/timelock, and is chec
   trigger + expiry countdown.
 - **Attestors**: ≥ 3 bonded members (25k VIT); CODE/META upgrades need a 2-of-N signed
   attestation (reproducible build + kernel invariants preserved), challengeable for 72 h.
-  UI: "2 of 3 attested" progress on upgrade proposals.
+  Routine rotation affects queue admission only; committed records use matured record
+  quorum plus durable cause revocations. `remove_for_cause` moves the held basis into
+  a bounded liability row and emits per-record revocations; permissionless
+  `reap_attestation` removes terminal records and releases the last liability hold.
+  UI: "2 of 3 attested" progress on upgrade proposals, with cause/revocation status.
 
 ## 8. Oracle game & registries (07)
 

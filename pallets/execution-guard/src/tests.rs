@@ -114,6 +114,7 @@ fn enqueue_upgrade_payload(
     AttestationArtifact::set(Some((attestation_id, primary_hash)));
     let (payload_hash, payload_len) = prepare_upgrade_payload(primary_hash);
     commit_payload(pid, payload_hash);
+    GuardPallet::bind_ratification(pid, referendum)?;
     GuardPallet::qualify_recovery_image(RuntimeOrigin::signed(keeper()), pid)?;
     let mut item = queued_item(
         pid,
@@ -742,7 +743,9 @@ fn ordered_check_5_fails_closed_for_forged_underquorum_and_challenged_attestatio
         let code_hash = hash(code);
         AttestationQuorum::set(false);
         assert_noop!(
-            enqueue_upgrade_payload(1, code_hash, 7, 7),
+            frame_support::storage::with_storage_layer(|| {
+                enqueue_upgrade_payload(1, code_hash, 7, 7)
+            }),
             Error::<Test>::AttestationMissing
         );
     });
@@ -1122,6 +1125,7 @@ fn recovery_qualification_is_operational_caches_the_exact_descriptor_and_bounds_
         AttestationArtifact::set(Some((7, primary_hash)));
         let (payload_hash, payload_len) = prepare_upgrade_payload(primary_hash);
         commit_payload(1, payload_hash);
+        assert_ok!(GuardPallet::bind_ratification(1, 77));
 
         let call = Call::<Test>::qualify_recovery_image { pid: 1 };
         assert_eq!(call.get_dispatch_info().class, DispatchClass::Operational);
@@ -1179,6 +1183,7 @@ fn recovery_enqueue_requires_an_exact_qualification_match() {
         AttestationArtifact::set(Some((7, primary_hash)));
         let (payload_hash, payload_len) = prepare_upgrade_payload(primary_hash);
         commit_payload(1, payload_hash);
+        assert_ok!(GuardPallet::bind_ratification(1, 77));
         let item = || {
             let mut item = queued_item(
                 1,
@@ -1400,6 +1405,7 @@ fn upgrade_admission_requires_one_distinct_attested_recovery_image() {
             recovery_commit_call(same_hash, same_len, 3, TEST_RECOVERY_ATTESTATION_ID),
         ]);
         commit_payload(2, payload_hash);
+        assert_ok!(GuardPallet::bind_ratification(2, 78));
         let mut item = queued_item(
             2,
             futarchy_primitives::ProposalClass::Code,
@@ -1772,6 +1778,82 @@ fn prequeue_ratification_is_bound_consumed_and_epoch_reap_is_narrow() {
 }
 
 #[test]
+fn prequeue_ratification_identity_is_frozen_before_pass_and_reaped_at_pass() {
+    new_test_ext().execute_with(|| {
+        let code = b"prequeue-bound-runtime";
+        let code_hash = hash(code);
+        let (payload_hash, _) = prepare_upgrade_payload(code_hash);
+        commit_payload(1, payload_hash);
+
+        assert_ok!(GuardPallet::bind_ratification(1, 77));
+        assert_eq!(PendingRatifications::<Test>::get(1), Some(77));
+        assert_noop!(
+            GuardPallet::bind_ratification(1, 78),
+            Error::<Test>::NotRatified
+        );
+        assert_noop!(
+            GuardPallet::ratify(ratify_origin(), 1, 78),
+            Error::<Test>::NotRatified
+        );
+
+        assert_ok!(enqueue_upgrade_payload(1, code_hash, 7, 77));
+        let queued = Queue::<Test>::get(1).expect("queue entry");
+        assert_eq!(queued.ratify_ref, Some(77));
+        assert!(!queued.ratification_passed);
+        // Keep the bounded join while queued so a guardian rerun can carry the
+        // still-ongoing referendum identity into its next queue entry.
+        assert_eq!(PendingRatifications::<Test>::get(1), Some(77));
+
+        assert_ok!(GuardPallet::ratify(ratify_origin(), 1, 77));
+        assert!(
+            Queue::<Test>::get(1)
+                .expect("queue entry")
+                .ratification_passed
+        );
+        assert!(!PendingRatifications::<Test>::contains_key(1));
+    });
+}
+
+#[test]
+fn binding_a_passed_record_refuses_a_malformed_queue_mirror() {
+    new_test_ext().execute_with(|| {
+        let code = b"malformed-ratification-mirror";
+        let code_hash = hash(code);
+        assert_ok!(enqueue_upgrade_payload(1, code_hash, 7, 77));
+        assert_ok!(GuardPallet::ratify(ratify_origin(), 1, 77));
+        Queue::<Test>::mutate(1, |queued| {
+            queued.as_mut().expect("queued").ratify_ref = None;
+        });
+
+        assert_noop!(
+            GuardPallet::bind_ratification(1, 77),
+            Error::<Test>::NotRatified
+        );
+    });
+}
+
+#[test]
+fn enqueue_rejects_unbound_or_non_ratification_references() {
+    new_test_ext().execute_with(|| {
+        let (payload_hash, payload_len) = put_preimage(&[param_call(4)]);
+        commit_payload(1, payload_hash);
+        let mut item = queued_item(
+            1,
+            ProposalClass::Param,
+            payload_hash,
+            payload_len,
+            vec![CallDomain::Param],
+        );
+        item.ratify_ref = Some(9);
+        assert_noop!(
+            GuardPallet::enqueue(RuntimeOrigin::signed(epoch_account()), item, false),
+            Error::<Test>::CapabilityDenied
+        );
+        assert!(!Queue::<Test>::contains_key(1));
+    });
+}
+
+#[test]
 fn r2_dequeue_terminal_is_idempotent_and_clears_all_guard_owned_state() {
     new_test_ext().execute_with(|| {
         let code = b"terminal-cleanup-runtime";
@@ -2125,6 +2207,7 @@ fn bad_upgrade_payload_and_arithmetic_overflow_are_pre_dispatch_noops() {
         let calls = vec![authorize_call(code_hash), authorize_call(code_hash)];
         let (payload_hash, payload_len) = put_preimage(&calls);
         commit_payload(1, payload_hash);
+        assert_ok!(GuardPallet::bind_ratification(1, 1));
         AttestationArtifact::set(Some((7, code_hash)));
         let mut item = queued_item(
             1,
@@ -2222,6 +2305,7 @@ fn code_spacing_exact_boundary_and_expedited_zero_spacing_are_recorded() {
         AttestationArtifact::set(Some((7, code_hash)));
         let (payload_hash, payload_len) = prepare_upgrade_payload(code_hash);
         commit_payload(1, payload_hash);
+        assert_ok!(GuardPallet::bind_ratification(1, 9));
         assert_ok!(GuardPallet::qualify_recovery_image(
             RuntimeOrigin::signed(keeper()),
             1,

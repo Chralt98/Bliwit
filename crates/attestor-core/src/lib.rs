@@ -123,6 +123,48 @@ pub struct Attestation {
     pub challenge: Option<ChallengeStatus>,
 }
 
+/// Bond basis retained after an attestor leaves the active roster.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub struct AttestorLiability {
+    pub account: AccountId,
+    pub bond: Balance,
+    pub false_count: u8,
+    pub ejected: bool,
+}
+
+/// Durable cause marker for a record whose signer lost authority. The
+/// original `Attestation` shape remains frozen; this auxiliary vector is the
+/// contract-v10 addition.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub struct AttestationRevocation {
+    pub attestation_id: AttestationId,
+    pub pid: ProposalId,
+    pub attestor: AccountId,
+    pub cause_hash: H256,
+}
+
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
 pub enum Event {
     MembersSet {
@@ -148,6 +190,16 @@ pub enum Event {
     AttestorEjected {
         who: AccountId,
     },
+    AttestorRemovedForCause {
+        who: AccountId,
+        cause_hash: H256,
+    },
+    AttestationRevoked {
+        attestation_id: AttestationId,
+        pid: ProposalId,
+        attestor: AccountId,
+        cause_hash: H256,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
@@ -168,13 +220,22 @@ pub enum Error {
     /// try-state only: a member at or past the ejection threshold is still
     /// marked active (06 §7 ejection is terminal while the strike count stands).
     EjectedMemberActive,
+    LiabilityExists,
+    LiabilityNotFound,
+    ProposalNotTerminal,
+    ChallengeOpen,
+    ReapNotAllowed,
+    TooManyLiabilities,
+    TooManyRevocations,
     Overflow,
 }
 
 #[derive(Clone, Debug, Decode, Encode, Eq, PartialEq, TypeInfo)]
 pub struct AttestorRegistry {
     pub members: Vec<AttestorInfo>,
+    pub liabilities: Vec<AttestorLiability>,
     pub attestations: Vec<Attestation>,
+    pub revocations: Vec<AttestationRevocation>,
     pub next_attestation_id: AttestationId,
     pub events: Vec<Event>,
 }
@@ -184,7 +245,9 @@ impl AttestorRegistry {
         let infos = validate_and_infos(members, params.bond)?;
         Ok(Self {
             members: infos,
+            liabilities: Vec::new(),
             attestations: Vec::new(),
+            revocations: Vec::new(),
             next_attestation_id: 0,
             events: Vec::new(),
         })
@@ -200,20 +263,9 @@ impl AttestorRegistry {
     ///   06 §7 resets strikes, and resetting them made one no-op re-election wipe
     ///   the ejection threshold, so the "ejection on the second adjudicated-false
     ///   attestation" discipline was unreachable in practice.
-    /// * A departing member that still carries an **unsettled liability** — an
-    ///   open challenge, or an attestation whose challenge window has not closed
-    ///   — is **retained as an inactive row**. Governance authority ends
-    ///   immediately (an inactive member cannot attest and never counts toward
-    ///   quorum or the active registry floor), but the slash basis the adverse
-    ///   verdict reads survives until the record settles. Dropping the row
-    ///   instead left the challenge permanently unresolvable (`NotMember` on the
-    ///   adverse branch), which both suppressed the attestation from quorum
-    ///   forever and shielded the attestor from the strike a for-cause recall is
-    ///   meant to record.
-    ///
-    /// Retention is bounded by open windows, so retained rows drain on their own;
-    /// a seating whose result would exceed the registry's storage bound is
-    /// rejected whole by the FRAME shell (G-1).
+    /// * A departing member with an unsettled record moves to `liabilities`.
+    ///   Governance authority ends immediately, while the slash basis remains
+    ///   available to challenge resolution and permissionless reap.
     pub fn set_members(
         &mut self,
         origin: AttestorOrigin,
@@ -239,14 +291,27 @@ impl AttestorRegistry {
                 info.active = previous.false_count < FALSE_EJECTION_THRESHOLD;
             }
         }
-        for previous in self.members.iter() {
+        for info in infos.iter() {
+            ensure!(
+                !self
+                    .liabilities
+                    .iter()
+                    .any(|liability| liability.account == info.account),
+                Error::LiabilityExists
+            );
+        }
+        let previous_members = core::mem::take(&mut self.members);
+        for previous in previous_members.iter() {
             let seated = infos.iter().any(|info| info.account == previous.account);
             if seated || !self.has_unsettled_liability(previous.account, now) {
                 continue;
             }
-            let mut retained = *previous;
-            retained.active = false;
-            infos.push(retained);
+            self.liabilities.push(AttestorLiability {
+                account: previous.account,
+                bond: previous.bond,
+                false_count: previous.false_count,
+                ejected: !previous.active,
+            });
         }
         self.members = infos;
         self.events.push(Event::MembersSet { members });
@@ -267,6 +332,25 @@ impl AttestorRegistry {
                 None => now <= attestation.challenge_deadline,
                 Some(ChallengeStatus::Upheld) | Some(ChallengeStatus::Rejected) => false,
             })
+    }
+
+    pub fn bond_basis(&self, who: AccountId) -> Option<Balance> {
+        self.members
+            .iter()
+            .find(|member| member.account == who)
+            .map(|member| member.bond)
+            .or_else(|| {
+                self.liabilities
+                    .iter()
+                    .find(|liability| liability.account == who)
+                    .map(|liability| liability.bond)
+            })
+    }
+
+    pub fn is_revoked(&self, id: AttestationId) -> bool {
+        self.revocations
+            .iter()
+            .any(|revocation| revocation.attestation_id == id)
     }
     pub fn attest(
         &mut self,
@@ -325,12 +409,7 @@ impl AttestorRegistry {
             .find(|attestation| attestation.id == id)
             .map(|attestation| attestation.attestor)
             .ok_or(Error::AttestationNotFound)?;
-        let stored_bond = self
-            .members
-            .iter()
-            .find(|member| member.account == attestor)
-            .map(|member| member.bond)
-            .ok_or(Error::NotMember)?;
+        let stored_bond = self.bond_basis(attestor).ok_or(Error::NotMember)?;
         ensure!(bond >= half_ceil(stored_bond), Error::ChallengeBondTooSmall);
         let att = self
             .attestations
@@ -357,6 +436,16 @@ impl AttestorRegistry {
         id: AttestationId,
         attestation_upheld: bool,
     ) -> Result<(), Error> {
+        self.resolve_challenge_with(origin, id, attestation_upheld, |_| false)
+    }
+
+    pub fn resolve_challenge_with<F: FnMut(ProposalId) -> bool>(
+        &mut self,
+        origin: AttestorOrigin,
+        id: AttestationId,
+        attestation_upheld: bool,
+        mut is_executed: F,
+    ) -> Result<(), Error> {
         ensure!(
             matches!(origin, AttestorOrigin::RatifyTrack),
             Error::BadOrigin
@@ -380,12 +469,7 @@ impl AttestorRegistry {
         let slashed = if attestation_upheld {
             half_ceil(bond)
         } else {
-            let stored_bond = self
-                .members
-                .iter()
-                .find(|member| member.account == loser)
-                .map(|member| member.bond)
-                .ok_or(Error::NotMember)?;
+            let stored_bond = self.bond_basis(loser).ok_or(Error::NotMember)?;
             half_ceil(stored_bond)
         };
         if attestation_upheld {
@@ -393,13 +477,31 @@ impl AttestorRegistry {
         } else {
             self.attestations[idx].challenge = Some(ChallengeStatus::Rejected);
             let attestor = self.attestations[idx].attestor;
+            let mut ejected = false;
             if let Some(info) = self.members.iter_mut().find(|m| m.account == attestor) {
                 info.bond = info.bond.saturating_sub(slashed);
                 info.false_count = info.false_count.saturating_add(1);
                 if info.false_count >= FALSE_EJECTION_THRESHOLD {
                     info.active = false;
-                    self.events.push(Event::AttestorEjected { who: attestor });
+                    ejected = true;
                 }
+            } else if let Some(liability) = self
+                .liabilities
+                .iter_mut()
+                .find(|liability| liability.account == attestor)
+            {
+                liability.bond = liability.bond.saturating_sub(slashed);
+                liability.false_count = liability.false_count.saturating_add(1);
+                if liability.false_count >= FALSE_EJECTION_THRESHOLD {
+                    liability.ejected = true;
+                    ejected = true;
+                }
+            } else {
+                return Err(Error::NotMember);
+            }
+            if ejected {
+                self.events.push(Event::AttestorEjected { who: attestor });
+                self.revoke_records(attestor, [0; 32], &mut is_executed)?;
             }
         }
         self.events.push(Event::ChallengeResolved {
@@ -425,7 +527,10 @@ impl AttestorRegistry {
             .iter()
             .filter(|a| a.pid == pid && a.artifact_hash == artifact_hash)
         {
-            if distinct.contains(&att.attestor) || !self.is_active_member(att.attestor) {
+            if distinct.contains(&att.attestor)
+                || !self.is_active_member(att.attestor)
+                || self.is_revoked(att.id)
+            {
                 continue;
             }
             if self.attestation_counts(att, now) {
@@ -433,6 +538,136 @@ impl AttestorRegistry {
             }
         }
         distinct.len() >= QUORUM
+    }
+
+    /// Execute-time quorum over the committed record set. Routine roster
+    /// rotation cannot invalidate it; durable revocation and challenge state
+    /// still fail closed.
+    pub fn has_record_quorum(
+        &self,
+        pid: ProposalId,
+        artifact_hash: H256,
+        now: BlockNumber,
+    ) -> bool {
+        let mut distinct: Vec<AccountId> = Vec::new();
+        for att in self
+            .attestations
+            .iter()
+            .filter(|a| a.pid == pid && a.artifact_hash == artifact_hash)
+        {
+            if distinct.contains(&att.attestor) || self.is_revoked(att.id) {
+                continue;
+            }
+            if self.attestation_counts(att, now) {
+                distinct.push(att.attestor);
+            }
+        }
+        distinct.len() >= QUORUM
+    }
+
+    pub fn remove_for_cause<F: FnMut(ProposalId) -> bool>(
+        &mut self,
+        origin: AttestorOrigin,
+        who: AccountId,
+        cause_hash: H256,
+        mut is_executed: F,
+    ) -> Result<(), Error> {
+        ensure!(
+            matches!(origin, AttestorOrigin::ConstitutionalValues),
+            Error::BadOrigin
+        );
+        let index = self
+            .members
+            .iter()
+            .position(|member| member.account == who)
+            .ok_or(Error::NotMember)?;
+        let member = self.members.remove(index);
+        self.liabilities.push(AttestorLiability {
+            account: who,
+            bond: member.bond,
+            false_count: member.false_count,
+            ejected: true,
+        });
+        self.revoke_records(who, cause_hash, &mut is_executed)?;
+        self.events
+            .push(Event::AttestorRemovedForCause { who, cause_hash });
+        Ok(())
+    }
+
+    fn revoke_records<F: FnMut(ProposalId) -> bool>(
+        &mut self,
+        who: AccountId,
+        cause_hash: H256,
+        is_executed: &mut F,
+    ) -> Result<(), Error> {
+        let records: Vec<(AttestationId, ProposalId)> = self
+            .attestations
+            .iter()
+            .filter(|attestation| {
+                attestation.attestor == who
+                    && !is_executed(attestation.pid)
+                    && !matches!(attestation.challenge, Some(ChallengeStatus::Rejected))
+                    && !self.is_revoked(attestation.id)
+            })
+            .map(|attestation| (attestation.id, attestation.pid))
+            .collect();
+        for (attestation_id, pid) in records {
+            self.revocations.push(AttestationRevocation {
+                attestation_id,
+                pid,
+                attestor: who,
+                cause_hash,
+            });
+            self.events.push(Event::AttestationRevoked {
+                attestation_id,
+                pid,
+                attestor: who,
+                cause_hash,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn reap_attestation<F: FnMut(ProposalId) -> bool>(
+        &mut self,
+        id: AttestationId,
+        now: BlockNumber,
+        mut is_terminal: F,
+    ) -> Result<Option<AttestorLiability>, Error> {
+        let index = self
+            .attestations
+            .iter()
+            .position(|attestation| attestation.id == id)
+            .ok_or(Error::AttestationNotFound)?;
+        let attestation = self.attestations[index];
+        ensure!(is_terminal(attestation.pid), Error::ProposalNotTerminal);
+        ensure!(
+            !matches!(attestation.challenge, Some(ChallengeStatus::Open { .. })),
+            Error::ChallengeOpen
+        );
+        ensure!(
+            attestation.challenge.is_some() || now > attestation.challenge_deadline,
+            Error::ReapNotAllowed
+        );
+        self.attestations.remove(index);
+        self.revocations
+            .retain(|revocation| revocation.attestation_id != id);
+        let who = attestation.attestor;
+        let still_present = self
+            .attestations
+            .iter()
+            .any(|record| record.attestor == who)
+            || self.revocations.iter().any(|record| record.attestor == who);
+        if !still_present {
+            if let Some(index) = self
+                .liabilities
+                .iter()
+                .position(|liability| liability.account == who)
+            {
+                return Ok(Some(self.liabilities.remove(index)));
+            }
+        }
+        Ok(None)
     }
     pub fn require_quorum(
         &self,
@@ -447,7 +682,6 @@ impl AttestorRegistry {
         Ok(())
     }
     pub fn try_state(&self) -> Result<(), Error> {
-        ensure!(self.members.len() >= MIN_MEMBERS, Error::TooFewMembers);
         for i in 0..self.members.len() {
             for j in (i + 1)..self.members.len() {
                 ensure!(
@@ -474,6 +708,21 @@ impl AttestorRegistry {
                 Error::EjectedMemberActive
             );
         }
+        for i in 0..self.liabilities.len() {
+            ensure!(
+                !self
+                    .members
+                    .iter()
+                    .any(|member| member.account == self.liabilities[i].account),
+                Error::LiabilityExists
+            );
+            for j in (i + 1)..self.liabilities.len() {
+                ensure!(
+                    self.liabilities[i].account != self.liabilities[j].account,
+                    Error::LiabilityExists
+                );
+            }
+        }
         // Every open challenge must still have a slash basis to resolve against
         // (SQ-262): seating retains a liable member as an inactive row, so an
         // `Open` challenge whose attestor has no row at all is unresolvable on
@@ -481,12 +730,20 @@ impl AttestorRegistry {
         for attestation in self.attestations.iter() {
             if matches!(attestation.challenge, Some(ChallengeStatus::Open { .. })) {
                 ensure!(
-                    self.members
-                        .iter()
-                        .any(|member| member.account == attestation.attestor),
+                    self.bond_basis(attestation.attestor).is_some(),
                     Error::NotMember
                 );
             }
+        }
+        for revocation in self.revocations.iter() {
+            ensure!(
+                self.attestations.iter().any(|attestation| {
+                    attestation.id == revocation.attestation_id
+                        && attestation.pid == revocation.pid
+                        && attestation.attestor == revocation.attestor
+                }),
+                Error::AttestationNotFound
+            );
         }
         Ok(())
     }
@@ -526,10 +783,9 @@ fn validate_and_infos(
     }
     // Fresh rows only. `set_members` is the sole production caller and layers
     // the continuity rules of SQ-262 on top of this: it carries `false_count`
-    // forward for continuing members and retains departing members that still
-    // carry an unsettled liability. What remains deferred to the real
-    // per-account bond system (B-track, PLAN SQ-263/SQ-293) is *custody* —
-    // `bond` here is still an arithmetic magnitude, not value held.
+    // forward for continuing members and moves departing liabilities into the
+    // independent liability vector. The FRAME shell owns the real hold/slash
+    // custody; this core only applies the deterministic state transition.
     Ok(members
         .into_iter()
         .map(|account| AttestorInfo {
@@ -751,7 +1007,9 @@ mod tests {
         });
         let mut r = AttestorRegistry {
             members: previous,
+            liabilities: Vec::new(),
             attestations,
+            revocations: Vec::new(),
             next_attestation_id: LEDGER_BOUND,
             events: Vec::new(),
         };
@@ -762,18 +1020,60 @@ mod tests {
         r.set_members(AttestorOrigin::ConstitutionalValues, fresh, 0, params())
             .unwrap();
 
-        // 15 new + exactly the one liable departing member, retained inactive.
-        assert_eq!(r.members.len(), ROSTER_BOUND);
-        let retained = r
-            .members
+        // 15 new + exactly one independent liability for the departing member.
+        assert_eq!(r.members.len(), ROSTER_BOUND - 1);
+        assert!(r
+            .liabilities
             .iter()
-            .find(|m| m.account == acct(1))
-            .expect("liable departing member is retained");
-        assert!(!retained.active);
-        // A liability-free departing member is dropped, not retained.
-        assert!(!r.members.iter().any(|m| m.account == acct(2)));
-        // Bounded and valid: retention keeps the open challenge resolvable.
+            .any(|liability| liability.account == acct(1)));
+        assert!(!r
+            .liabilities
+            .iter()
+            .any(|liability| liability.account == acct(2)));
         assert!(r.members.len() <= ROSTER_BOUND);
-        assert!(r.try_state().is_ok());
+        assert_eq!(r.try_state(), Ok(()));
+    }
+
+    #[test]
+    fn cause_removal_revokes_unexecuted_records_and_reap_releases_liability() {
+        let mut r =
+            AttestorRegistry::new(vec![acct(1), acct(2), acct(3), acct(4)], params()).unwrap();
+        r.attest(acct(1), 7, [7; 32], [8; 32], 0, params()).unwrap();
+        r.remove_for_cause(
+            AttestorOrigin::ConstitutionalValues,
+            acct(1),
+            [55; 32],
+            |_| false,
+        )
+        .unwrap();
+        assert!(!r.is_active_member(acct(1)));
+        assert!(r.is_revoked(0));
+        assert_eq!(r.liabilities.len(), 1);
+        assert!(!r.has_record_quorum(7, [7; 32], CHALLENGE_WINDOW_BLOCKS + 1));
+
+        let released = r
+            .reap_attestation(0, CHALLENGE_WINDOW_BLOCKS + 1, |_| true)
+            .unwrap();
+        assert_eq!(released.unwrap().account, acct(1));
+        assert!(r.attestations.is_empty());
+        assert!(r.liabilities.is_empty());
+        assert!(r.revocations.is_empty());
+        assert_eq!(r.try_state(), Ok(()));
+    }
+
+    #[test]
+    fn execute_record_quorum_survives_roster_rotation_without_revocation() {
+        let mut r = AttestorRegistry::new(members(), params()).unwrap();
+        r.attest(acct(1), 8, [8; 32], [1; 32], 0, params()).unwrap();
+        r.attest(acct(2), 8, [8; 32], [2; 32], 0, params()).unwrap();
+        r.set_members(
+            AttestorOrigin::ConstitutionalValues,
+            vec![acct(3), acct(4), acct(5)],
+            CHALLENGE_WINDOW_BLOCKS + 1,
+            params(),
+        )
+        .unwrap();
+        assert!(!r.has_quorum(8, [8; 32], CHALLENGE_WINDOW_BLOCKS + 1));
+        assert!(r.has_record_quorum(8, [8; 32], CHALLENGE_WINDOW_BLOCKS + 1));
     }
 }

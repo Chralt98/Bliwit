@@ -47,7 +47,7 @@ Conventions: **D-n** = a decision made here. Finding IDs (X-n, B-n, F-n) refer t
 
 ### D-5. Values-ratification: single execute-time deadline (B-11)
 
-- One deadline: **checked at `execute()` dispatch time**. The ratification referendum is submitted any time after the artifact hash is committed (queue time) and runs during the timelock.
+- One deadline: **checked at `execute()` dispatch time**. The ratification referendum is submitted any time after the artifact hash is committed at proposal submission and runs during the market/timelock process.
 - Plumbing added: `ratify(proposal_id, referendum_index)` admissible call for the ratify track's `Contains` filter; execution-guard dispatch check; `RejectReason::NotRatified`; a §14.2-equivalent decision-table row; attestation-presence check in the decision pseudocode.
 
 ### D-6. Deep history: chain-served recent window + committed operator window + gap-tolerant index (X-3, F-1, F-2, X-4)
