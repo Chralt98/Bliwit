@@ -45,10 +45,10 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(Self::collator_compensation())
     }
     fn collator_compensation() -> Weight {
-        // Maximum 100-author payout: one bounded treasury state update plus
+        // Maximum 120-author payout: one bounded treasury state update plus
         // two ForeignAssets account accesses per recipient. This is charged
         // on every tick because phase entry is only known after dispatch.
-        base::<T>(1_500_000_000, 205, 205)
+        base::<T>(1_800_000_000, 245, 245)
     }
     fn decide() -> Weight {
         base::<T>(140_000_000, 24, 14)
@@ -117,7 +117,7 @@ impl WeightInfo for () {
             .saturating_add(Self::collator_compensation())
     }
     fn collator_compensation() -> Weight {
-        rocks(1_500_000_000, 205, 205)
+        rocks(1_800_000_000, 245, 245)
     }
     fn decide() -> Weight {
         rocks(140_000_000, 24, 14)

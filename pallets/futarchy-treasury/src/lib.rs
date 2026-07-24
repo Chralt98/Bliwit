@@ -89,8 +89,8 @@ pub const MAX_POL_COMMITMENTS_BOUND: u32 = MAX_POL_COMMITMENTS as u32;
 /// See [`MAX_BUDGET_LINES_BOUND`].
 pub const MAX_FUNDED_CORETIME_BOUND: u32 = MAX_FUNDED_CORETIME_PERIODS as u32;
 /// 13 §4 bound on the bounded authored-share accumulator. The assembled
-/// runtime keeps this equal to CollatorSelection's 100-candidate ceiling.
-pub const MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND: u32 = 100;
+/// runtime admits up to 100 candidates plus 20 invulnerables in one session.
+pub const MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND: u32 = 120;
 
 /// Rollout-phase seam for the Phase≤4 ops-multisig funding path (08 §2.1).
 pub trait TreasuryPhase {
@@ -545,6 +545,12 @@ pub mod pallet {
     #[pallet::storage]
     pub type CollatorAuthoredEpoch<T: Config> = StorageValue<_, EpochId, OptionQuery>;
 
+    /// Registered collator count snapshotted when the pending epoch's first
+    /// authored block is observed. Retries must use the earning epoch's set,
+    /// not a later live session size.
+    #[pallet::storage]
+    pub type CollatorAuthoredRegisteredCount<T: Config> = StorageValue<_, u32, OptionQuery>;
+
     /// Sticky fail-closed marker for an authored-share accumulator overflow.
     /// A payout is never attempted while this is set, so omitted authors can
     /// never be silently underpaid.
@@ -855,29 +861,31 @@ pub mod pallet {
                     Error::<T>::BootstrapOpsFundingLimit
                 );
             }
-            Self::mutate(|t| t.fund_budget_line(Origin::FutarchyTreasury, line, amount))?;
-            // Zero retains the core's established bookkeeping/event semantics,
-            // but has no custody movement to perform. Skipping the seam cannot
-            // strand or double-move value and avoids making a zero funding call
-            // depend on an external custody adapter.
-            if amount != 0 {
-                let payout_line = match line {
-                    BudgetLine::Keeper => Some(PayoutLine::Keeper),
-                    BudgetLine::Oracle => Some(PayoutLine::Oracle),
-                    BudgetLine::Rewards => Some(PayoutLine::Rewards),
-                    BudgetLine::OpsCollators => Some(PayoutLine::OpsCollators),
-                    _ => None,
-                };
-                if let Some(payout_line) = payout_line {
-                    T::PotFunding::fund(payout_line, amount)?;
+            frame_support::storage::with_storage_layer(|| {
+                Self::mutate(|t| t.fund_budget_line(Origin::FutarchyTreasury, line, amount))?;
+                // Zero retains the core's established bookkeeping/event semantics,
+                // but has no custody movement to perform. Skipping the seam cannot
+                // strand or double-move value and avoids making a zero funding call
+                // depend on an external custody adapter.
+                if amount != 0 {
+                    let payout_line = match line {
+                        BudgetLine::Keeper => Some(PayoutLine::Keeper),
+                        BudgetLine::Oracle => Some(PayoutLine::Oracle),
+                        BudgetLine::Rewards => Some(PayoutLine::Rewards),
+                        BudgetLine::OpsCollators => Some(PayoutLine::OpsCollators),
+                        _ => None,
+                    };
+                    if let Some(payout_line) = payout_line {
+                        T::PotFunding::fund(payout_line, amount)?;
+                    }
                 }
-            }
-            if treasury_origin && line == BudgetLine::OpsReserveProbe && amount > 0 {
-                // The successful binding-governance refill is the irreversible
-                // handover point. Any later disarm cannot recreate authority.
-                BootstrapOpsFundingClosed::<T>::put(true);
-            }
-            Ok(())
+                if treasury_origin && line == BudgetLine::OpsReserveProbe && amount > 0 {
+                    // The successful binding-governance refill is the irreversible
+                    // handover point. Any later disarm cannot recreate authority.
+                    BootstrapOpsFundingClosed::<T>::put(true);
+                }
+                Ok(())
+            })
         }
 
         /// `treasury.spend(line, dest, amount)` — a direct in-cap grant
@@ -1272,6 +1280,7 @@ pub mod pallet {
                 }
             } else {
                 CollatorAuthoredEpoch::<T>::put(epoch);
+                CollatorAuthoredRegisteredCount::<T>::put(T::RegisteredCollatorCount::get());
             }
             CollatorAuthoredBlocks::<T>::mutate(|shares| {
                 if let Some((_, blocks)) = shares.iter_mut().find(|(who, _)| *who == author) {
@@ -1302,6 +1311,9 @@ pub mod pallet {
             if CollatorAuthoredOverflowed::<T>::get() {
                 return;
             }
+            let Some(registered_collators) = CollatorAuthoredRegisteredCount::<T>::get() else {
+                return;
+            };
             let shares = CollatorAuthoredBlocks::<T>::get();
             let mut treasury = Self::load();
             let Ok(payouts) = treasury.collator_compensation(
@@ -1310,7 +1322,7 @@ pub mod pallet {
                     .map(|(who, blocks)| (Self::to_core_account(who.clone()), *blocks))
                     .collect::<Vec<_>>(),
                 T::Params::collator_comp_epoch(),
-                T::RegisteredCollatorCount::get(),
+                registered_collators,
             ) else {
                 return;
             };
@@ -1332,6 +1344,7 @@ pub mod pallet {
                 }
                 CollatorAuthoredBlocks::<T>::kill();
                 CollatorAuthoredEpoch::<T>::kill();
+                CollatorAuthoredRegisteredCount::<T>::kill();
                 CollatorAuthoredOverflowed::<T>::kill();
                 CollatorCompensationPaidEpoch::<T>::put(tracked_epoch);
                 Ok::<(), DispatchError>(())
@@ -1788,6 +1801,13 @@ pub mod pallet {
             if authored.is_empty() != CollatorAuthoredEpoch::<T>::get().is_none() {
                 return Err(TryRuntimeError::Other(
                     "treasury: collator authored-share epoch is not joined to its accumulator",
+                ));
+            }
+            if CollatorAuthoredEpoch::<T>::get().is_none()
+                != CollatorAuthoredRegisteredCount::<T>::get().is_none()
+            {
+                return Err(TryRuntimeError::Other(
+                    "treasury: collator registered-count snapshot is not joined to its accumulator",
                 ));
             }
             if CollatorAuthoredOverflowed::<T>::get() {
