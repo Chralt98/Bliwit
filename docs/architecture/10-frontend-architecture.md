@@ -160,7 +160,7 @@ Retained exactly as reviewed *except* the promotion rule (deleted per §2.2): OF
 
 ### 5.1 Descriptor pipeline
 
-Descriptors are generated from built runtime artifacts (never a live node), committed per `spec_version`, tied to metadata hashes and source commits in `release.json`, drift-gated in CI. Every primary runtime and its exact paired terminal-recovery runtime are separate live-capable `spec_version`s and MUST both have published descriptors before the primary is eligible (contract v11 / A12; paired recovery was added by B16). Three additions:
+Descriptors are generated from built runtime artifacts (never a live node), committed per `spec_version`, tied to metadata hashes and source commits in `release.json`, drift-gated in CI. Every primary runtime and its exact paired terminal-recovery runtime are separate live-capable `spec_version`s and MUST both have published descriptors before the primary is eligible (contract v12 / A12; paired recovery was added by B16). Three additions:
 
 1. **The Asset Hub descriptor set is part of the pipeline** (D-12): the funding flow ([11-frontend-workflows.md](11-frontend-workflows.md)) opens a second light-client connection to Asset Hub; its pinned chain spec and descriptor set ride the same commitment, drift-gating and release discipline as the futarchy set.
 2. **v(N+1) descriptors are release-gated, not conventional** (D-14): they MUST be generated from the queue-time artifact commitment and live on the release channel **before execute maturity** — see §5.3.

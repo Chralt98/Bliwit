@@ -83,7 +83,7 @@ pub struct DecisionInputSnapshot<AccountId> {
 /// Qualification-frozen security sizing inputs (05 §5.2; 08 §5.3).
 ///
 /// The value is intentionally kept in epoch-owned storage rather than added to
-/// the frozen `Proposal` view.  It therefore does not change the v11 contract,
+/// the frozen `Proposal` view.  It therefore does not change the v12 contract,
 /// while still preventing a later Params or NAV change from changing the
 /// security certificate used by an admitted proposal.
 #[derive(

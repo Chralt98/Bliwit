@@ -143,7 +143,7 @@ The FE renders each of the 14 checks as a named row with expected/actual; any fa
 
 ---
 
-**Reaped Baseline books (normative; SQ-304; contract v11).** Successful market reap removes the Baseline book and its `BaselineMarketOf(e)` entry atomically. When cohort history identifies epoch `e` but that mapping is absent, the UI MUST label the book **reaped/archived**, MUST NOT render a missing or fail-closed zero quote as a market price, and MUST disable every trade action on it; cohort history continues to render from `RecentCohortSummaries`. A present mapping with an absent or mismatched book is corrupt chain state and triggers the compatibility hard block. Redemption of already-held Baseline positions is unaffected — it reads the vault, not the book.
+**Reaped Baseline books (normative; SQ-304; contract v12).** Successful market reap removes the Baseline book and its `BaselineMarketOf(e)` entry atomically. When cohort history identifies epoch `e` but that mapping is absent, the UI MUST label the book **reaped/archived**, MUST NOT render a missing or fail-closed zero quote as a market price, and MUST disable every trade action on it; cohort history continues to render from `RecentCohortSummaries`. A present mapping with an absent or mismatched book is corrupt chain state and triggers the compatibility hard block. Redemption of already-held Baseline positions is unaffected — it reads the vault, not the book.
 
 ## 11.6 VOID redemption workflow (X-6, D-1)
 

@@ -1961,7 +1961,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 11);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 12);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -5645,6 +5645,29 @@ fn metadata_exposes_only_allowed_attestor_and_guardian_constants() {
                         "PlaybookFreezeWindowBlocks",
                     ]
                 );
+
+                for pallet_name in ["IncidentRegistry", "MilestoneRegistry"] {
+                    let registry = $metadata
+                        .pallets
+                        .iter()
+                        .find(|pallet| pallet.name == pallet_name)
+                        .expect("registry pallet is present");
+                    let archive_delays = registry
+                        .constants
+                        .iter()
+                        .filter(|constant| constant.name == "ArchiveDelay")
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        archive_delays.len(),
+                        1,
+                        "registry exposes exactly one ArchiveDelay metadata constant"
+                    );
+                    let delay = archive_delays[0];
+                    assert_eq!(
+                        u32::decode(&mut &delay.value[..]).expect("registry archive delay is u32"),
+                        crate::configs::RegistryArchiveDelay::get()
+                    );
+                }
             }};
         }
 
@@ -14516,6 +14539,20 @@ fn live_param_adapters_resolve_their_registry_keys() {
         assert_eq!(crate::configs::MarketObsInterval::get(), 10);
         assert_eq!(crate::configs::MarketKappa::get(), 5_000_000);
         assert!(crate::configs::LedgerArchiveDelay::get() > 0);
+    });
+}
+
+#[test]
+fn registry_archive_delay_retains_the_money_deadline_floor() {
+    use frame_support::traits::Get;
+
+    development_ext().execute_with(|| {
+        let floor = 21u32.saturating_mul(kernel::BLOCKS_PER_DAY);
+        assert!(crate::configs::RegistryArchiveDelay::get() >= floor);
+        assert!(
+            crate::configs::RegistryArchiveDelay::get()
+                >= crate::configs::LedgerArchiveDelay::get()
+        );
     });
 }
 

@@ -20,7 +20,7 @@ Block-time basis for human-time conversions: **6 s/block, 14,400 blocks/day** (1
 | **VIT** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 VIT |
 | Prices / scores | fixed-point, **1e9 scale** at every API/event boundary; quote clamp [0.001, 0.999]; `p_S = 1 − p_L`; gate books map YES ↦ LONG |
 | Time | all deadlines are block numbers (`decide_at`, `maturity`, `grace_end`, `challenge_deadline`, `next_boundary`) — the UI computes countdowns from them |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 11`, a runtime constant, echoed in `release.json` |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 12`, a runtime constant, echoed in `release.json` |
 
 ### A2. What the UI can read and display (02 §3–§4, §7)
 

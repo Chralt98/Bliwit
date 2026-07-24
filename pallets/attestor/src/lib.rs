@@ -500,7 +500,7 @@ pub mod pallet {
         }
 
         /// Remove an attestor with an explicit cause and revoke every
-        /// unexecuted record atomically (06 §7, contract v11).
+        /// unexecuted record atomically (06 §7, contract v12).
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::remove_for_cause())]
         pub fn remove_for_cause(

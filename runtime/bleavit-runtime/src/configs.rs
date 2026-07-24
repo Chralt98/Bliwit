@@ -2110,6 +2110,17 @@ impl frame_support::traits::Get<u32> for LedgerArchiveDelay {
     }
 }
 
+/// Registry records must remain readable through the §11 money deadline even
+/// when governance lowers the shared ledger archive delay. The registry has
+/// no separate tunable: its contract binding is the live ledger value with
+/// the independent 21-day floor mandated by 07 §7 (SQ-76).
+pub struct RegistryArchiveDelay;
+impl frame_support::traits::Get<u32> for RegistryArchiveDelay {
+    fn get() -> u32 {
+        LedgerArchiveDelay::get().max(21u32.saturating_mul(kernel::BLOCKS_PER_DAY))
+    }
+}
+
 parameter_types! {
     pub const LedgerPalletId: PalletId = PalletId(*b"bl/ledgr");
     pub const MarketPalletId: PalletId = PalletId(*b"bl/mrket");
@@ -5072,8 +5083,9 @@ macro_rules! registry_config {
             type InsuranceAccount = InsuranceAccount;
             type PalletId = $id;
             type KeeperRebate = FutarchyTreasury;
-            // SQ-76: registry archive reuses the live ledger archive key.
-            type ArchiveDelay = LedgerArchiveDelay;
+            // SQ-76: registry archive follows the live ledger key but retains
+            // the independent 21-day money-deadline floor.
+            type ArchiveDelay = RegistryArchiveDelay;
             type MaxFilingsPerEpoch = ConstU32<{ kernel::REG_MAX_FILINGS_EPOCH }>;
             type MaxEvidenceLen = ConstU32<32>;
             type WeightInfo = crate::weights::pallet_registry::WeightInfo<Runtime>;

@@ -1,6 +1,6 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/11-frontend-workflows.md` (the frozen source of truth),
-> regenerated 2026-07-23 from integration contract v11 (A12 signed oracle escalation custody; B19 attestor lifecycle; B18 guardian-review and ratification-binding
+> regenerated 2026-07-23 from integration contract v12 (A12 signed oracle escalation custody; B19 attestor lifecycle; B18 guardian-review and ratification-binding
 > workflow), on top of the previous SQ-483 refresh at
 > commit `a893790`, for upload to Claude Design. If this copy and the source ever differ, the
 > source wins. Regenerate by re-copying the source file.
@@ -150,7 +150,7 @@ The FE renders each of the 14 checks as a named row with expected/actual; any fa
 
 ---
 
-**Reaped Baseline books (normative; SQ-304; contract v11).** Successful market reap removes the Baseline book and its `BaselineMarketOf(e)` entry atomically. When cohort history identifies epoch `e` but that mapping is absent, the UI MUST label the book **reaped/archived**, MUST NOT render a missing or fail-closed zero quote as a market price, and MUST disable every trade action on it; cohort history continues to render from `RecentCohortSummaries`. A present mapping with an absent or mismatched book is corrupt chain state and triggers the compatibility hard block. Redemption of already-held Baseline positions is unaffected — it reads the vault, not the book.
+**Reaped Baseline books (normative; SQ-304; contract v12).** Successful market reap removes the Baseline book and its `BaselineMarketOf(e)` entry atomically. When cohort history identifies epoch `e` but that mapping is absent, the UI MUST label the book **reaped/archived**, MUST NOT render a missing or fail-closed zero quote as a market price, and MUST disable every trade action on it; cohort history continues to render from `RecentCohortSummaries`. A present mapping with an absent or mismatched book is corrupt chain state and triggers the compatibility hard block. Redemption of already-held Baseline positions is unaffected — it reads the vault, not the book.
 
 ## 11.6 VOID redemption workflow (X-6, D-1)
 

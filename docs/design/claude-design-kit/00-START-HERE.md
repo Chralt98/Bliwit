@@ -1,7 +1,7 @@
 # Bleavit design-context pack — START HERE
 
 > Generated 2026-07-12 from the frozen specification in `docs/architecture/` at commit
-> `9f250be`; refreshed through integration contract v11 on 2026-07-23 (A12 signed oracle escalation custody). This pack exists
+> `9f250be`; refreshed through integration contract v12 on 2026-07-23 (A12 signed oracle escalation custody). This pack exists
 > because design tools cap attachments (Claude Design: 10 files)
 > and the full spec is ~677 KB across 17 documents. It compresses the spec into 7 files
 > without losing anything a frontend designer needs. **The spec always wins over this pack.**
