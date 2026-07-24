@@ -78,6 +78,10 @@ pub trait AttestorProposalStatus {
 /// Maps authority roles to concrete origins for the v2 benchmark harness.
 #[cfg(feature = "runtime-benchmarks")]
 pub trait BenchmarkHelper<RuntimeOrigin> {
+    /// Endow benchmark accounts and install the attestor/challenge holds
+    /// required by custody-aware extrinsics. Production genesis already
+    /// provisions these holds; the omni-bencher starts from an empty state.
+    fn prime_funds() {}
     /// Construct a signed origin for `who`.
     fn signed(who: CoreAccountId) -> RuntimeOrigin;
     /// Construct a `ConstitutionalValues` origin.

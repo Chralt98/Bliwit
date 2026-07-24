@@ -411,7 +411,7 @@ pub mod pallet {
         type RebatePayout: RebatePayout<Self::AccountId>;
 
         /// Runtime custody adapter which atomically moves real USDC from MAIN
-        /// into the KEEPER/ORACLE payout pot when its budget line is funded.
+        /// into the KEEPER/ORACLE/REWARDS payout pot when its budget line is funded.
         type PotFunding: PotFunding<Self::AccountId>;
 
         /// Custody seam for the 08 §1.2/§1.4 INSURANCE → `MAIN` sweep (SQ-207).
@@ -737,17 +737,28 @@ pub mod pallet {
 
         #[cfg(feature = "try-runtime")]
         fn pre_upgrade() -> Result<Vec<u8>, TryRuntimeError> {
+            let on_chain = StorageVersion::get::<Pallet<T>>();
             Ok((
-                StorageVersion::get::<Pallet<T>>() < STORAGE_VERSION,
+                on_chain < STORAGE_VERSION,
+                on_chain < StorageVersion::new(1),
                 T::TreasuryPhase::treasury_armed(),
                 BootstrapOpsFundingClosed::<T>::get(),
+                on_chain < StorageVersion::new(2) && !CommunityDistributionRemaining::<T>::exists(),
+                CommunityDistributionRemaining::<T>::get(),
             )
                 .encode())
         }
 
         #[cfg(feature = "try-runtime")]
         fn post_upgrade(state: Vec<u8>) -> Result<(), TryRuntimeError> {
-            let (migrated, treasury_was_armed, closed_before): (bool, bool, bool) =
+            let (
+                migrated,
+                initialize_bootstrap,
+                treasury_was_armed,
+                bootstrap_before,
+                initialize_community,
+                community_before,
+            ): (bool, bool, bool, bool, bool, Balance) =
                 Decode::decode(&mut &state[..]).map_err(|_| {
                     TryRuntimeError::Other("treasury v3 migration: invalid pre-upgrade state")
                 })?;
@@ -756,19 +767,37 @@ pub mod pallet {
                     StorageVersion::get::<Pallet<T>>() == STORAGE_VERSION,
                     "treasury v3 migration: storage version was not advanced"
                 );
-                frame_support::ensure!(
-                    BootstrapOpsFundingClosed::<T>::get() == treasury_was_armed,
-                    "treasury v3 migration: closure does not match existing phase"
-                );
-                frame_support::ensure!(
-                    CommunityDistributionRemaining::<T>::get()
-                        == T::CommunityDistributionAmount::get(),
-                    "treasury v3 migration: community allocation was not initialized"
-                );
+                if initialize_bootstrap {
+                    frame_support::ensure!(
+                        BootstrapOpsFundingClosed::<T>::get() == treasury_was_armed,
+                        "treasury v3 migration: bootstrap closure was not initialized"
+                    );
+                } else {
+                    frame_support::ensure!(
+                        BootstrapOpsFundingClosed::<T>::get() == bootstrap_before,
+                        "treasury v3 migration: existing bootstrap closure changed"
+                    );
+                }
+                if initialize_community {
+                    frame_support::ensure!(
+                        CommunityDistributionRemaining::<T>::get()
+                            == T::CommunityDistributionAmount::get(),
+                        "treasury v3 migration: community allocation was not initialized"
+                    );
+                } else {
+                    frame_support::ensure!(
+                        CommunityDistributionRemaining::<T>::get() == community_before,
+                        "treasury v3 migration: existing community allocation changed"
+                    );
+                }
             } else {
                 frame_support::ensure!(
-                    BootstrapOpsFundingClosed::<T>::get() == closed_before,
+                    BootstrapOpsFundingClosed::<T>::get() == bootstrap_before,
                     "treasury v3 migration: current-version latch changed"
+                );
+                frame_support::ensure!(
+                    CommunityDistributionRemaining::<T>::get() == community_before,
+                    "treasury v3 migration: current-version allocation changed"
                 );
             }
             Ok(())

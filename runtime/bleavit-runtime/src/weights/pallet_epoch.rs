@@ -279,6 +279,13 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 			.saturating_add(T::DbWeight::get().writes(630))
 			.saturating_add(T::DbWeight::get().writes((1_u64).saturating_mul(n.into())))
 			.saturating_add(Weight::from_parts(0, 2753).saturating_mul(n.into()))
+			.saturating_add(Self::collator_compensation())
+	}
+	fn collator_compensation() -> Weight {
+		Weight::from_parts(1_500_000_000, 0)
+			.saturating_add(Weight::from_parts(0, 48000))
+			.saturating_add(T::DbWeight::get().reads(205))
+			.saturating_add(T::DbWeight::get().writes(205))
 	}
 	/// Storage: `Constitution::Params` (r:41 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)

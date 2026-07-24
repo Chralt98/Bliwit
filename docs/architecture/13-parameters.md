@@ -225,6 +225,8 @@ The heading's ownership applies to the identity/supply table. The genesis protoc
 
 ---
 
+The A13 proposer-reward extension adds `treasury_rewards_account()` (`PalletId(*b"bl/trsry").into_sub_account_truncating(*b"REWARDS_")`) to this exact genesis-endowed set; its `REWARDS` line is custody-synced to that pot when funded.
+
 ## 4. Reconciled storage bounds (D-10 — one table, all budgets derive from it)
 
 | Bound | Value | Scope (the reconciliation) | Doc |

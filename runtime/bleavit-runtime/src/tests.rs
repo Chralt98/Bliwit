@@ -4502,7 +4502,7 @@ fn treasury_collator_compensation_uses_authored_share_and_dedicated_custody() {
         assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
             usdc_location(),
             &pot,
-            allocation + retained,
+            2 * allocation + retained,
         )
         .is_ok());
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
@@ -4511,9 +4511,11 @@ fn treasury_collator_compensation_uses_authored_share_and_dedicated_custody() {
                 .iter_mut()
                 .find(|(line, _)| *line == BudgetLine::OpsCollators)
             {
-                *balance = allocation;
+                *balance = 2 * allocation;
             } else {
-                let _ = state.lines.try_push((BudgetLine::OpsCollators, allocation));
+                let _ = state
+                    .lines
+                    .try_push((BudgetLine::OpsCollators, 2 * allocation));
             }
         });
 
@@ -4524,11 +4526,11 @@ fn treasury_collator_compensation_uses_authored_share_and_dedicated_custody() {
 
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &first),
-            allocation.saturating_mul(2) / 3
+            allocation.saturating_mul(4) / 3
         );
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &second),
-            allocation / 3
+            allocation.saturating_mul(2) / 3
         );
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &pot),
@@ -13753,9 +13755,9 @@ fn canonical_resource_key_universe_has_no_semantic_collisions() {
             pallet_constitution::Capability::SetReleaseChannel,
             pallet_constitution::Capability::AuthorizeUpgrade,
             pallet_constitution::Capability::TreasurySpend,
-            pallet_constitution::Capability::InsuranceSweep,
             pallet_constitution::Capability::OracleConfig,
             pallet_constitution::Capability::MarketTemplate,
+            pallet_constitution::Capability::InsuranceSweep,
         ];
         for class in classes {
             for capability in fixed_capabilities {
