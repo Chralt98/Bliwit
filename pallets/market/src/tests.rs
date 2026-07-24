@@ -6,8 +6,8 @@
 
 use crate::{
     mock::*, ActiveMarketCount, BaselineMarketOf, ClosedAt, DecisionWindowOwners, DecisionWindows,
-    Error, Event, MarketAccountProvider, MarketProtocolAccounts, Markets, SettlementObservedAt,
-    TwapCheckpoints,
+    Error, Event, MarketAccountProvider, MarketProtocolAccounts, Markets, SealedBaselineTwap,
+    SettlementObservedAt, TwapCheckpoints,
 };
 use frame_support::{
     assert_err, assert_noop, assert_ok,
@@ -2810,6 +2810,11 @@ fn shared_baseline_decisions_read_one_sealed_value_across_an_interleaved_trade()
         assert!(first_full_twap.is_some());
         assert!(first_trailing_twap.is_some());
         assert!(first_spot.is_some());
+        assert_eq!(
+            SealedBaselineTwap::<Test>::get(EPOCH),
+            first_full_twap,
+            "the carry source is captured from the sealed Baseline window"
+        );
 
         assert_ok!(Market::buy(
             signed(BOB),
@@ -2834,6 +2839,76 @@ fn shared_baseline_decisions_read_one_sealed_value_across_an_interleaved_trade()
             first_trailing_twap,
         );
         assert_eq!(Market::spot_at(BASELINE_ID, end), first_spot);
+        assert_try_state();
+    });
+}
+
+#[test]
+fn baseline_carry_snapshot_ignores_a_later_in_flight_window() {
+    new_test_ext().execute_with(|| {
+        create_baseline();
+        seed(BASELINE_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        let first_end = interval.saturating_mul(2);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            BASELINE_ID,
+            PROPOSAL,
+            0,
+            interval,
+            first_end,
+        ));
+        System::set_block_number(u64::from(interval));
+        assert_ok!(Market::crank_observe(signed(BOB), BASELINE_ID));
+        System::set_block_number(u64::from(first_end));
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            BASELINE_ID,
+            first_end,
+        ));
+        let first = Market::sealed_baseline_twap(EPOCH).expect("sealed first Baseline value");
+
+        // A later shared-window registration is live but not sealed. It must
+        // not replace the immutable carry value used by the next epoch.
+        let second_end = first_end.saturating_add(interval);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            BASELINE_ID,
+            PROPOSAL + 1,
+            interval,
+            first_end,
+            second_end,
+        ));
+        assert_eq!(Market::sealed_baseline_twap(EPOCH), Some(first));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn non_gradeable_baseline_window_does_not_capture_carry() {
+    new_test_ext().execute_with(|| {
+        create_baseline();
+        seed(BASELINE_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        let end = interval.saturating_mul(2);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            BASELINE_ID,
+            PROPOSAL,
+            0,
+            interval,
+            end,
+        ));
+        System::set_block_number(u64::from(interval));
+        assert_ok!(Market::crank_observe(signed(BOB), BASELINE_ID));
+        System::set_block_number(u64::from(end));
+        BASELINE_GRADE_ALLOWED.with(|allowed| allowed.set(false));
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            BASELINE_ID,
+            end,
+        ));
+        assert_eq!(Market::sealed_baseline_twap(EPOCH), None);
         assert_try_state();
     });
 }

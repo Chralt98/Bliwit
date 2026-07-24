@@ -10,6 +10,8 @@
 
 extern crate alloc;
 
+use futarchy_primitives::{BlockNumber, MarketId};
+
 pub use market_core as core_market;
 pub use pallet::*;
 pub use weights::WeightInfo;
@@ -82,6 +84,20 @@ pub trait PolCommitmentSync {
     fn pol_commitments_synced() -> bool;
 }
 
+/// Production decision-grade predicate for a sealed Baseline boundary.
+/// Baseline books are shared across proposal classes, so the runtime owns the
+/// governed coverage, convergence, POL and contest-floor inputs rather than
+/// hard-coding them in this generic pallet.
+pub trait BaselineGrade {
+    fn is_gradeable(market: MarketId, end: BlockNumber, window: BlockNumber) -> bool;
+}
+
+impl BaselineGrade for () {
+    fn is_gradeable(_: MarketId, _: BlockNumber, _: BlockNumber) -> bool {
+        true
+    }
+}
+
 impl PolCommitmentSync for () {
     fn sync_pol_commitments() -> frame_support::dispatch::DispatchResult {
         Ok(())
@@ -95,6 +111,7 @@ impl PolCommitmentSync for () {
 #[frame_support::pallet]
 pub mod pallet {
     use crate::weights::WeightInfo;
+    use crate::BaselineGrade;
     use crate::DecisionGradeFacts;
     use crate::MarketAccountProvider;
     use crate::PolCommitmentSync;
@@ -163,6 +180,11 @@ pub mod pallet {
         /// rolled back if its exact NAV obligation cannot be mirrored.
         type PolCommitmentSync: crate::PolCommitmentSync;
 
+        /// Runtime-owned decision-grade predicate for sealed Baseline carry.
+        /// The predicate is read-only and must fail closed when governed grade
+        /// inputs are unavailable.
+        type BaselineGrade: crate::BaselineGrade;
+
         /// Cross-pallet keeper-rebate fixture used only by runtime benchmarks.
         #[cfg(feature = "runtime-benchmarks")]
         type BenchmarkHelper: crate::BenchmarkHelper;
@@ -209,6 +231,17 @@ pub mod pallet {
     #[pallet::storage]
     pub type BaselineMarketOf<T: Config> =
         StorageMap<_, Blake2_128Concat, EpochId, MarketId, OptionQuery>;
+
+    /// Last sealed decision-window TWAP for each retained Baseline book.
+    ///
+    /// The epoch decision may need the previous epoch's Baseline before its
+    /// cohort summary is finalized at e+3. Capture the immutable value at the
+    /// market seal boundary instead of reading a live/in-flight window or
+    /// waiting for `RecentCohortSummaries` (05 §5.3, SQ-88). The entry follows
+    /// `BaselineMarketOf`'s market lifetime and is removed with that book.
+    #[pallet::storage]
+    pub type SealedBaselineTwap<T: Config> =
+        StorageMap<_, Blake2_128Concat, EpochId, FixedU64, OptionQuery>;
 
     /// Block at which a book closed, retained for the frozen integration
     /// surface and lifecycle observability. Reap delay is settlement-anchored.
@@ -781,6 +814,7 @@ pub mod pallet {
                         Error::<T>::TryStateViolation
                     );
                     BaselineMarketOf::<T>::remove(epoch);
+                    SealedBaselineTwap::<T>::remove(epoch);
                 }
                 Markets::<T>::remove(market);
                 ClosedAt::<T>::remove(market);
@@ -1720,6 +1754,13 @@ pub mod pallet {
             Self::seal_window(id, &book, end)
         }
 
+        /// Read the latest immutable Baseline value captured at a sealed
+        /// decision boundary. This is intentionally independent of any live
+        /// window currently registered on the same or a later Baseline book.
+        pub fn sealed_baseline_twap(epoch: EpochId) -> Option<FixedU64> {
+            SealedBaselineTwap::<T>::get(epoch)
+        }
+
         /// Market sovereign account used to sign the ledger's internal API.
         pub fn account_id() -> T::AccountId {
             <T as Config>::PalletId::get().into_account_truncating()
@@ -2070,6 +2111,25 @@ pub mod pallet {
                     window.sealed = true;
                 }
             });
+            if let BookKind::Baseline { epoch } = book.kind {
+                let window = DecisionWindows::<T>::get(id)
+                    .into_iter()
+                    .find(|window| window.end == end)
+                    .ok_or(Error::<T>::TryStateViolation)?;
+                let full = window
+                    .end
+                    .checked_sub(window.start)
+                    .ok_or(Error::<T>::TryStateViolation)?;
+                // A sealed but unobserved window remains a normal
+                // decision-grade failure. Preserve the existing seal
+                // semantics and leave the carry source absent rather than
+                // turning this status-quo path into a dispatch failure.
+                if T::BaselineGrade::is_gradeable(id, end, full) {
+                    if let Some(twap) = Self::twap_at(id, end, full) {
+                        SealedBaselineTwap::<T>::insert(epoch, twap);
+                    }
+                }
+            }
             Ok(())
         }
 
@@ -2304,6 +2364,16 @@ pub mod pallet {
                         Error::<T>::TryStateViolation
                     );
                 }
+            }
+            for (epoch, _) in SealedBaselineTwap::<T>::iter() {
+                let market =
+                    BaselineMarketOf::<T>::get(epoch).ok_or(Error::<T>::TryStateViolation)?;
+                ensure!(
+                    Markets::<T>::get(market).is_some_and(
+                        |book| matches!(book.kind, BookKind::Baseline { epoch: e } if e == epoch)
+                    ),
+                    Error::<T>::TryStateViolation
+                );
             }
             for (id, checkpoints) in TwapCheckpoints::<T>::iter() {
                 let _book = Markets::<T>::get(id).ok_or(Error::<T>::TryStateViolation)?;

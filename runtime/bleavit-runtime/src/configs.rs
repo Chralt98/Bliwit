@@ -2603,6 +2603,49 @@ pub(crate) fn decision_market_stats_for_view(
 }
 
 pub struct RuntimeMarketAccess;
+
+/// Runtime-owned Baseline carry predicate. A shared Baseline has no proposal
+/// class, so its sealed carry is graded at the fixed TREASURY-tier floor from
+/// 05 §5.2 rather than at any consumer proposal's effective floor.
+pub struct RuntimeBaselineGrade;
+
+#[cfg_attr(feature = "runtime-benchmarks", allow(unreachable_code))]
+impl pallet_market::BaselineGrade for RuntimeBaselineGrade {
+    fn is_gradeable(
+        market: futarchy_primitives::MarketId,
+        end: BlockNumber,
+        window: BlockNumber,
+    ) -> bool {
+        #[cfg(feature = "runtime-benchmarks")]
+        {
+            let _ = (market, end, window);
+            return true;
+        }
+        let Some(book) = pallet_market::Markets::<Runtime>::get(market) else {
+            return false;
+        };
+        if !matches!(
+            book.kind,
+            pallet_market::core_market::BookKind::Baseline { .. }
+        ) {
+            return false;
+        }
+        let params = <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+        let contest_floor =
+            params.v_min[proposal_class_index(futarchy_primitives::ProposalClass::Treasury)];
+        pallet_market::Pallet::<Runtime>::decision_grade_at(
+            market,
+            end,
+            window,
+            params.coverage_pct,
+            params.delta_max,
+            contest_floor,
+            balance_param(b"pol.b_baseline"),
+            true,
+        )
+    }
+}
+
 #[cfg_attr(feature = "runtime-benchmarks", allow(unreachable_code))]
 impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
     fn open_markets(
@@ -3386,10 +3429,22 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
 
     fn previous_settled_baseline_twap(epoch: EpochId) -> Option<FixedU64> {
         let previous = epoch.checked_sub(1)?;
-        pallet_epoch::RecentCohortSummaries::<Runtime>::get()
-            .iter()
-            .find(|summary| summary.epoch == previous && !summary.voided)
-            .map(|summary| summary.baseline_twap_1e9)
+        // 05 §5.3 / SQ-88: carry from the previous epoch's sealed Baseline
+        // decision window. Cohort summaries are finalized only at e+3, which
+        // is too late for an earlier decision in the next epoch; the market
+        // snapshot is captured at the immutable seal boundary and retained
+        // with BaselineMarketOf until reap.
+        // A cohort VOID is not a settled measurement (05 §5.3, §7(5)); its
+        // archived summary therefore invalidates the sealed snapshot as a
+        // carry source. Keep the absent-summary path for the pre-finalization
+        // next-epoch decision that SQ-88 explicitly supports.
+        if pallet_epoch::RecentCohortSummaries::<Runtime>::get()
+            .into_iter()
+            .any(|summary| summary.epoch == previous && summary.voided)
+        {
+            return None;
+        }
+        pallet_market::Pallet::<Runtime>::sealed_baseline_twap(previous)
     }
 }
 
@@ -3451,6 +3506,7 @@ impl pallet_market::Config for Runtime {
     type KeeperRebate = FutarchyTreasury;
     type InDecisionWindow = RuntimeInDecisionWindow;
     type PolCommitmentSync = RuntimePolCommitmentSync;
+    type BaselineGrade = RuntimeBaselineGrade;
 }
 
 pub struct RuntimeEpochOracle;
