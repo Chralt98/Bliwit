@@ -1012,6 +1012,70 @@ fn collator_compensation_defers_when_custody_is_underfunded() {
 }
 
 #[test]
+fn collator_compensation_retries_pending_after_third_epoch_overflow() {
+    funded_ext().execute_with(|| {
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::OpsCollators, 0);
+
+        // Epoch 0 is moved into the bounded pending slot by the first block
+        // observed in epoch 1. Its payout then remains deferred because the
+        // custody pot is empty.
+        set_epoch(0);
+        Treasury::note_collator_block(acc(7));
+        set_epoch(1);
+        Treasury::note_collator_block(acc(8));
+        Treasury::pay_collator_compensation();
+        assert_eq!(CollatorPendingEpoch::<Test>::get(), Some(0));
+        assert_eq!(rebate_payouts().len(), 1);
+        // The mock records attempted transfers before checking custody; clear
+        // that failed attempt so the assertions below count successful payout
+        // calls only. This leaves the collator pot unchanged.
+        reset_rebate_payout();
+
+        // The first block in epoch 2 would require a third accumulator while
+        // epoch 0 is still pending. It is correctly dropped and marked
+        // overflowed, but that marker must not wedge the retained epoch-0
+        // payout.
+        set_epoch(2);
+        Treasury::note_collator_block(acc(9));
+        assert!(CollatorAuthoredOverflowed::<Test>::get());
+        assert_eq!(CollatorAuthoredEpoch::<Test>::get(), Some(1));
+
+        // Restored custody lets Housekeeping settle epoch 0 exactly once,
+        // clearing both its accumulator and the overflow marker. Epoch 1
+        // remains separate and is paid by the next Housekeeping attempt.
+        set_rebate_pot_balance(PayoutLine::OpsCollators, 4_000 * USDC);
+        Treasury::pay_collator_compensation();
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 4_000 * USDC, PayoutLine::OpsCollators)]
+        );
+        assert!(CollatorPendingEpoch::<Test>::get().is_none());
+        assert!(!CollatorAuthoredOverflowed::<Test>::get());
+        assert_eq!(CollatorAuthoredEpoch::<Test>::get(), Some(1));
+
+        set_rebate_pot_balance(PayoutLine::OpsCollators, 4_000 * USDC);
+        Treasury::pay_collator_compensation();
+        assert_eq!(
+            rebate_payouts(),
+            vec![
+                (acc(7), 4_000 * USDC, PayoutLine::OpsCollators),
+                (acc(8), 4_000 * USDC, PayoutLine::OpsCollators),
+            ]
+        );
+        assert!(CollatorAuthoredEpoch::<Test>::get().is_none());
+        // Restore the mock's untouched custody backing for the line before
+        // exercising the pallet-wide solvency check; the test deliberately
+        // replaced the funded pot with only the two payout amounts above.
+        set_rebate_pot_balance(
+            PayoutLine::OpsCollators,
+            Treasury::line_balance(BudgetLine::OpsCollators),
+        );
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
 fn collator_boundary_block_starts_a_separate_epoch_accumulator() {
     funded_ext().execute_with(|| {
         reset_rebate_payout();
