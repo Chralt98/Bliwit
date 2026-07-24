@@ -153,7 +153,7 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for TestOracleBenchmarkHelper
 
 parameter_types! {
     pub const CurrentEpoch: EpochId = 0;
-    pub const TestMaxCollatorCompensationEntries: u32 = 100;
+    pub const TestMaxCollatorCompensationEntries: u32 = 120;
     pub const TestRegisteredCollatorCount: u32 = 1;
 }
 
@@ -229,6 +229,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type MaxCommunitySchedules = TestMaxCommunitySchedules;
     type MaxCollatorCompensationEntries = TestMaxCollatorCompensationEntries;
     type RegisteredCollatorCount = TestRegisteredCollatorCount;
+    type CollatorEpoch = ();
     type Params = TestTreasuryParams;
     type CurrentEpoch = CurrentEpoch;
     type TreasuryPhase = ();
