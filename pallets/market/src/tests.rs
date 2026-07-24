@@ -43,6 +43,7 @@ fn create_decision() {
             proposal: PROPOSAL,
             branch: Branch::Accept,
         },
+        EPOCH,
         BOOK,
         FEES,
         B,
@@ -57,6 +58,7 @@ fn create_decision_book(id: MarketId, proposal: u64) {
             proposal,
             branch: Branch::Accept,
         },
+        EPOCH,
         TestMarketAccounts::book(id),
         TestMarketAccounts::fees(id),
         B,
@@ -68,6 +70,7 @@ fn create_baseline() {
         signed(MARKET_ADMIN),
         BASELINE_ID,
         BookKind::Baseline { epoch: EPOCH },
+        EPOCH,
         BOOK,
         FEES,
         B,
@@ -170,6 +173,7 @@ fn accept_reject_pair_uses_one_dual_mint_split() {
                 proposal: PROPOSAL,
                 branch: Branch::Reject,
             },
+            EPOCH,
             POL,
             INSURANCE,
             B,
@@ -209,6 +213,7 @@ fn seed_failure_rolls_back_atomically_and_sets_no_flag() {
             signed(MARKET_ADMIN),
             30,
             BookKind::Baseline { epoch: 9 },
+            9,
             BOOK,
             FEES,
             big_b,
@@ -353,6 +358,7 @@ fn multi_book_proposal_shares_one_ledger_vault() {
                 signed(MARKET_ADMIN),
                 id,
                 kind,
+                EPOCH,
                 BOOK,
                 FEES,
                 B
@@ -464,6 +470,7 @@ fn reserve_pause_blocks_market_buys_for_every_book_kind_but_keeps_exits_open() {
                 branch: Branch::Accept,
                 gate: GateType::Survival,
             },
+            EPOCH,
             POL,
             INSURANCE,
             B,
@@ -714,6 +721,7 @@ fn live_market_bound_rejects_the_197th_book() {
                     proposal: 100_000,
                     branch: Branch::Accept,
                 },
+                EPOCH,
                 BOOK,
                 FEES,
                 B,
@@ -771,6 +779,7 @@ fn stored_market_bound_retains_archives_and_recycles_after_bounded_book_reap() {
                     proposal: 100_000,
                     branch: Branch::Accept,
                 },
+                EPOCH,
                 BOOK,
                 FEES,
                 B,
@@ -824,6 +833,7 @@ fn origins_are_narrow_for_trading_and_admin_operations() {
                 signed(ALICE),
                 99,
                 BookKind::Baseline { epoch: 99 },
+                99,
                 BOOK,
                 FEES,
                 B,
@@ -853,6 +863,7 @@ fn emergency_creation_freeze_is_bounded_origin_gated_and_lazily_expires() {
                     proposal: PROPOSAL,
                     branch: Branch::Accept,
                 },
+                EPOCH,
                 BOOK,
                 FEES,
                 B,
@@ -956,6 +967,7 @@ fn baseline_mapping_is_written_and_duplicate_epoch_is_rejected() {
                 signed(MARKET_ADMIN),
                 BASELINE_ID + 1,
                 BookKind::Baseline { epoch: EPOCH },
+                EPOCH,
                 BOOK,
                 FEES,
                 B,
@@ -964,6 +976,35 @@ fn baseline_mapping_is_written_and_duplicate_epoch_is_rejected() {
         );
         assert!(!Markets::<Test>::contains_key(BASELINE_ID + 1));
         assert_try_state();
+    });
+}
+
+#[test]
+fn market_created_uses_explicit_epoch_and_rejects_baseline_mismatch() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        assert!(market_events().iter().any(|event| matches!(
+            event,
+            Event::MarketCreated {
+                market: MARKET_ID,
+                epoch: EPOCH,
+                ..
+            }
+        )));
+
+        assert_noop!(
+            Market::create_market(
+                signed(MARKET_ADMIN),
+                BASELINE_ID + 1,
+                BookKind::Baseline { epoch: EPOCH },
+                EPOCH.saturating_add(1),
+                TestMarketAccounts::book(BASELINE_ID + 1),
+                TestMarketAccounts::fees(BASELINE_ID + 1),
+                B,
+            ),
+            E::EpochMismatch
+        );
+        assert!(!Markets::<Test>::contains_key(BASELINE_ID + 1));
     });
 }
 
@@ -1282,6 +1323,7 @@ fn reserved_protocol_membership_blocks_signed_ingress_before_during_and_after_re
                         proposal: PROPOSAL,
                         branch: Branch::Accept,
                     },
+                    EPOCH,
                     book,
                     fees,
                     B,

@@ -173,6 +173,7 @@ fn telemetry_market_book_loss_tracks_real_baseline_buy_and_sell_fee_custody(
             frame_system::RawOrigin::Signed(crate::configs::epoch_account()).into(),
             MARKET,
             BookKind::Baseline { epoch: EPOCH },
+            EPOCH,
             book_account.clone(),
             fees_account,
             b,
