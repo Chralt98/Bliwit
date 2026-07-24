@@ -78,9 +78,9 @@ pub trait AttestorProposalStatus {
 /// Maps authority roles to concrete origins for the v2 benchmark harness.
 #[cfg(feature = "runtime-benchmarks")]
 pub trait BenchmarkHelper<RuntimeOrigin> {
-    /// Endow benchmark accounts and install the attestor bond holds required
-    /// by custody-aware extrinsics. Production genesis already provisions
-    /// these holds; the omni-bencher starts from an empty benchmark state.
+    /// Endow benchmark accounts and install the attestor/challenge holds
+    /// required by custody-aware extrinsics. Production genesis already
+    /// provisions these holds; the omni-bencher starts from an empty state.
     fn prime_funds() {}
     /// Construct a signed origin for `who`.
     fn signed(who: CoreAccountId) -> RuntimeOrigin;
@@ -500,7 +500,7 @@ pub mod pallet {
         }
 
         /// Remove an attestor with an explicit cause and revoke every
-        /// unexecuted record atomically (06 §7, contract v10).
+        /// unexecuted record atomically (06 §7, contract v11).
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::remove_for_cause())]
         pub fn remove_for_cause(

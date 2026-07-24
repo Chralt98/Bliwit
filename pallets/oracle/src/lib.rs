@@ -89,13 +89,15 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // named (not glob — the pallet owns its own `Error`/`ReserveHealth` aliases).
 pub use oracle_core::{
-    round_bond, stored_round_bond, Error as CoreError, Event as CoreEvent, Oracle, OracleParams,
-    ReportInput, ReporterInfo, ReserveHealth as ReserveHealthValue, RoundKey, RoundState,
-    SettlePath, SettledComponent, StoredRoundSchedule, WatchtowerInfo, MAX_ACK_RECORDS,
+    round_bond, stored_round_bond, BondSettlement, Error as CoreError, Event as CoreEvent, Oracle,
+    OracleParams, ReportInput, ReporterInfo, ReserveHealth as ReserveHealthValue, RoundKey,
+    RoundState, SettlePath, SettledComponent, StoredRoundSchedule, WatchtowerInfo, MAX_ACK_RECORDS,
     MAX_COMPONENT_VALUES, MAX_REPORTERS, MAX_RESERVE_PROBE_QUERY_ID, MAX_ROUNDS, MAX_WATCHTOWERS,
     ORC_MAX_PROOF_BYTES, ORC_ROUNDS, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
 };
 
+#[cfg(feature = "runtime-benchmarks")]
+use futarchy_primitives::Balance;
 use futarchy_primitives::{BlockNumber, EpochId, MetricId, MetricSpecVersion};
 
 /// `MAX_REPORTERS` as a storage bound (07 §13 / 02 §7.2 — counted map).
@@ -117,6 +119,37 @@ pub const MAX_RECOMPUTABLE_BOUND: u32 = 64;
 /// `pallet-constitution::Params`.
 pub trait OracleParamsProvider {
     fn get() -> OracleParams;
+}
+
+/// Economic custody for the oracle's USDC registration stakes and round bonds
+/// (07 §§3–6, §13). The frame-free core remains amount-only; this adapter owns
+/// the actual asset movement and lets pallet tests use a deterministic no-op
+/// sink. Signed `counter_report` consent is required before any escalated
+/// reporter bond is added, so a keeper cannot create an unowned liability.
+pub trait OracleCustody<AccountId> {
+    fn hold(who: &AccountId, amount: futarchy_primitives::Balance) -> DispatchResult;
+    fn release(who: &AccountId, amount: futarchy_primitives::Balance) -> DispatchResult;
+    fn pay(who: &AccountId, amount: futarchy_primitives::Balance) -> DispatchResult;
+    fn slash_insurance(amount: futarchy_primitives::Balance) -> DispatchResult;
+    fn balance() -> futarchy_primitives::Balance;
+}
+
+impl<AccountId> OracleCustody<AccountId> for () {
+    fn hold(_: &AccountId, _: futarchy_primitives::Balance) -> DispatchResult {
+        Ok(())
+    }
+    fn release(_: &AccountId, _: futarchy_primitives::Balance) -> DispatchResult {
+        Ok(())
+    }
+    fn pay(_: &AccountId, _: futarchy_primitives::Balance) -> DispatchResult {
+        Ok(())
+    }
+    fn slash_insurance(_: futarchy_primitives::Balance) -> DispatchResult {
+        Ok(())
+    }
+    fn balance() -> futarchy_primitives::Balance {
+        futarchy_primitives::Balance::MAX
+    }
 }
 
 /// The three cross-pallet inputs `report` derives rather than trusting the caller
@@ -228,6 +261,10 @@ pub trait BenchmarkHelper<RuntimeOrigin> {
     /// Prime the real reserve-probe budget and sibling route before measuring
     /// the production dispatch path. Pallet-only mocks may no-op.
     fn prime_reserve_probe() {}
+    /// Prime a benchmark account with enough USDC for registration and round
+    /// custody. Pallet-only mocks may no-op; the assembled runtime mints a
+    /// bounded fixture balance into the account.
+    fn prime_custody(_: u8, _: Balance) {}
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 }
@@ -268,6 +305,10 @@ pub mod pallet {
 
         /// Live constitution-backed oracle and reserve-probe tunables.
         type Params: OracleParamsProvider;
+
+        /// Real USDC custody adapter for reporter/watchtower registration
+        /// stakes. A refused transfer leaves status quo (G-1).
+        type Custody: OracleCustody<Self::AccountId>;
 
         /// Upper bound on rounds closed per `crank_round_close` call — a
         /// keeper-batch cap that bounds the crank's PoV (07 §13 "bounded
@@ -391,6 +432,12 @@ pub mod pallet {
     #[pallet::storage]
     pub type WatchtowerActive<T: Config> =
         StorageValue<_, BoundedVec<[u8; 32], ConstU32<MAX_WATCHTOWERS_BOUND>>, ValueQuery>;
+
+    /// Internal d20 latch: a game whose money leg is neutralized remains here
+    /// until its retained bond stack reaches a terminal resolution (07 §11).
+    #[pallet::storage]
+    pub type MoneySettled<T: Config> =
+        StorageValue<_, BoundedVec<RoundKey, ConstU32<MAX_ROUNDS_BOUND>>, ValueQuery>;
 
     /// Internal (not FE-read): the `(component, frozen version)` pairs the
     /// MetricSpec registry declares deterministically recomputable (07 §2(4)/§9).
@@ -667,6 +714,30 @@ pub mod pallet {
                 spec_version,
             };
             Self::mutate_core(|o| o.challenge(who, now, key, counter_value, evidence_hash))
+        }
+
+        /// `oracle.counter_report` — the reporter's signed consent to advance
+        /// a challenged game. The keeper close path never creates this round or
+        /// its bond; the reporter must fund it explicitly (07 §5.3).
+        #[pallet::call_index(10)]
+        #[pallet::weight(T::WeightInfo::counter_report())]
+        pub fn counter_report(
+            origin: OriginFor<T>,
+            component: MetricId,
+            epoch: EpochId,
+            spec_version: MetricSpecVersion,
+            value: FixedU64,
+            evidence_hash: H256,
+        ) -> DispatchResult {
+            let who: [u8; 32] = ensure_signed(origin)?.into();
+            let now = Self::now();
+            let key = RoundKey {
+                component,
+                epoch,
+                spec_version,
+            };
+            let params = T::Params::get();
+            Self::mutate_core(|o| o.counter_report(who, now, key, value, evidence_hash, &params))
         }
 
         /// `oracle.recompute_proof` — permissionless mechanical resolution from
@@ -1066,6 +1137,8 @@ pub mod pallet {
                 ack_records: AckRecords::<T>::get().into_inner(),
                 recomputable_components: Recomputable::<T>::get().into_inner(),
                 watchtower_active: WatchtowerActive::<T>::get().into_inner(),
+                money_settled: MoneySettled::<T>::get().into_inner(),
+                bond_settlements: Vec::new(),
             }
         }
 
@@ -1126,6 +1199,7 @@ pub mod pallet {
                             | CoreEvent::WindowExtended { .. }
                     )
                 });
+                Self::apply_custody(&before, &oracle)?;
                 Self::persist(&before, &oracle);
                 // 08 §1.2 makes `spendable_nav` zero exactly while `R` is set, so
                 // the constitution mirror and the treasury haircut must move with
@@ -1137,6 +1211,142 @@ pub mod pallet {
                 Self::deposit_core_events(core::mem::take(&mut oracle.events));
                 Ok(rebate_progress)
             })
+        }
+
+        /// Reconcile registration-stake and round-bond liabilities with real
+        /// USDC movement. Cumulative counters are used for the latter so each
+        /// signed escalation adds exactly one held bond while the frozen
+        /// RoundState layout remains unchanged.
+        fn apply_custody(before: &Oracle, after: &Oracle) -> DispatchResult {
+            for (who, info) in &after.reporters {
+                match before.reporters.iter().find(|(a, _)| a == who) {
+                    None => T::Custody::hold(&T::AccountId::from(*who), info.stake)?,
+                    Some((_, old)) if info.stake < old.stake => {
+                        T::Custody::slash_insurance(old.stake - info.stake)?
+                    }
+                    _ => {}
+                }
+            }
+            for (who, info) in &before.reporters {
+                if !after.reporters.iter().any(|(a, _)| a == who) {
+                    let account = T::AccountId::from(*who);
+                    // Third-offense ejection removes the seat but does not
+                    // slash the remaining registration stake (07 §3). The
+                    // second-offense slash is already reflected in `info`.
+                    T::Custody::release(&account, info.stake)?;
+                }
+            }
+
+            for (who, info) in &after.watchtowers {
+                match before.watchtowers.iter().find(|(a, _)| a == who) {
+                    None => T::Custody::hold(&T::AccountId::from(*who), info.stake)?,
+                    Some((_, old)) if info.stake < old.stake => {
+                        T::Custody::slash_insurance(old.stake - info.stake)?
+                    }
+                    _ => {}
+                }
+            }
+            for (who, info) in &before.watchtowers {
+                if !after.watchtowers.iter().any(|(a, _)| a == who) {
+                    // The liveness sweep emits the exact 10% slash before
+                    // ejecting the seat. Slash only that amount and release
+                    // the remaining registration stake (07 §4).
+                    let slashed = after.events.iter().find_map(|event| match event {
+                        CoreEvent::WatchtowerSlashed { who: ev, amount } if ev == who => {
+                            Some(*amount)
+                        }
+                        _ => None,
+                    });
+                    if let Some(amount) = slashed {
+                        T::Custody::slash_insurance(amount)?;
+                        T::Custody::release(
+                            &T::AccountId::from(*who),
+                            info.stake.saturating_sub(amount),
+                        )?;
+                    } else {
+                        T::Custody::release(&T::AccountId::from(*who), info.stake)?;
+                    }
+                }
+            }
+
+            // Round-bond custody is reconciled from the cumulative counters,
+            // not from the current `bond` field: every consenting escalation
+            // adds exactly one new reporter/challenger liability while the
+            // frozen RoundState layout remains unchanged.
+            for after_round in &after.rounds {
+                let key = RoundKey {
+                    component: after_round.component,
+                    epoch: after_round.epoch,
+                    spec_version: after_round.spec_version,
+                };
+                let before_round = before.rounds.iter().find(|r| {
+                    r.component == key.component
+                        && r.epoch == key.epoch
+                        && r.spec_version == key.spec_version
+                });
+                let old_reporter = before_round
+                    .map(|r| r.cumulative_reporter_bond)
+                    .unwrap_or(0);
+                let old_challenger = before_round
+                    .map(|r| r.cumulative_challenger_bond)
+                    .unwrap_or(0);
+                if after_round.cumulative_reporter_bond > old_reporter {
+                    T::Custody::hold(
+                        &T::AccountId::from(after_round.reporter),
+                        after_round.cumulative_reporter_bond - old_reporter,
+                    )?;
+                }
+                if after_round.cumulative_challenger_bond > old_challenger {
+                    if let Some(challenger) = after_round.challenger {
+                        T::Custody::hold(
+                            &T::AccountId::from(challenger),
+                            after_round.cumulative_challenger_bond - old_challenger,
+                        )?;
+                    } else {
+                        return Err(DispatchError::Other(
+                            "oracle challenger custody owner missing",
+                        ));
+                    }
+                }
+            }
+            for settlement in &after.bond_settlements {
+                Self::settle_bond_custody(settlement)?;
+            }
+
+            Ok(())
+        }
+
+        fn settle_bond_custody(settlement: &BondSettlement) -> DispatchResult {
+            let reporter = T::AccountId::from(settlement.reporter);
+            if settlement.reporter_wins {
+                if settlement.challenger.is_some() {
+                    let winner_share = settlement.challenger_bond / 100 * 40
+                        + (settlement.challenger_bond % 100 * 40) / 100;
+                    if winner_share > 0 {
+                        T::Custody::pay(&reporter, winner_share)?;
+                    }
+                    T::Custody::slash_insurance(
+                        settlement.challenger_bond.saturating_sub(winner_share),
+                    )?;
+                    // `pay`/insurance transfers consume the challenger's whole
+                    // stack; the reporter's own stack is simply released.
+                }
+                T::Custody::release(&reporter, settlement.reporter_bond)?;
+            } else if let Some(challenger) = settlement.challenger.map(T::AccountId::from) {
+                let winner_share = settlement.reporter_bond / 100 * 40
+                    + (settlement.reporter_bond % 100 * 40) / 100;
+                if winner_share > 0 {
+                    T::Custody::pay(&challenger, winner_share)?;
+                }
+                T::Custody::slash_insurance(settlement.reporter_bond.saturating_sub(winner_share))?;
+                T::Custody::release(&challenger, settlement.challenger_bond)?;
+            } else {
+                // A mechanical proof without a registered challenger has no
+                // honest counterparty; keep the full loser stack in INSURANCE
+                // rather than creating an unowned claim.
+                T::Custody::slash_insurance(settlement.reporter_bond)?;
+            }
+            Ok(())
         }
 
         /// Write only what changed between `before` and `after` (minimal storage
@@ -1257,6 +1467,9 @@ pub mod pallet {
                 WatchtowerActive::<T>::put(BoundedVec::truncate_from(
                     after.watchtower_active.clone(),
                 ));
+            }
+            if before.money_settled != after.money_settled {
+                MoneySettled::<T>::put(BoundedVec::truncate_from(after.money_settled.clone()));
             }
         }
 
@@ -1495,6 +1708,28 @@ pub mod pallet {
             if ReserveProbeArmed::<T>::get() && oracle.reserve_health.last_query_id == 0 {
                 return Err(TryRuntimeError::Other(
                     "ReserveProbeArmed requires an opened v1 probe id",
+                ));
+            }
+            let mut liability = 0_u128;
+            for (_, info) in &oracle.reporters {
+                liability = liability
+                    .checked_add(info.stake)
+                    .ok_or(TryRuntimeError::Other("oracle custody liability overflow"))?;
+            }
+            for (_, info) in &oracle.watchtowers {
+                liability = liability
+                    .checked_add(info.stake)
+                    .ok_or(TryRuntimeError::Other("oracle custody liability overflow"))?;
+            }
+            for round in &oracle.rounds {
+                liability = liability
+                    .checked_add(round.cumulative_reporter_bond)
+                    .and_then(|total| total.checked_add(round.cumulative_challenger_bond))
+                    .ok_or(TryRuntimeError::Other("oracle custody liability overflow"))?;
+            }
+            if T::Custody::balance() < liability {
+                return Err(TryRuntimeError::Other(
+                    "oracle custody is under-collateralized (I-29)",
                 ));
             }
             oracle

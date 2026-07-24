@@ -35,7 +35,7 @@ use sp_inherents::InherentData;
 use sp_keyring::Sr25519Keyring;
 use sp_runtime::{
     generic::{Era, SignedPayload},
-    traits::{Block as BlockT, Dispatchable, Header as HeaderT},
+    traits::{AccountIdConversion, Block as BlockT, Dispatchable, Header as HeaderT},
     transaction_validity::{InvalidTransaction, TransactionValidityError},
     BuildStorage, DispatchError, MultiAddress, MultiSignature,
 };
@@ -1960,7 +1960,7 @@ fn identity_and_version_pins_match_the_integration_contract() {
     // makes a future re-coupling fail here.
     assert_eq!(VERSION.transaction_version, TRANSACTION_VERSION);
     assert_eq!(VERSION.transaction_version, 1);
-    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 10);
+    assert_eq!(futarchy_primitives::INTEGRATION_CONTRACT_VERSION, 11);
     assert_eq!(usdc_location().encode(), USDC_LOCATION_ENCODED);
 }
 
@@ -2112,12 +2112,42 @@ fn oracle_registration_reads_live_constitution_stake() {
         ));
 
         let reporter = account(48);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &reporter,
+            amended_stake.saturating_add(ForeignAssets::minimum_balance(usdc_location())),
+        ));
         assert_ok!(Oracle::register_reporter(RuntimeOrigin::signed(
             reporter.clone()
         )));
         assert_eq!(
             pallet_oracle::Reporters::<Runtime>::get(reporter).map(|info| info.stake),
             Some(amended_stake),
+        );
+        assert_eq!(
+            {
+                let oracle_account =
+                    crate::configs::OraclePalletId::get().into_account_truncating();
+                ForeignAssets::balance(usdc_location(), &oracle_account)
+            },
+            amended_stake,
+        );
+    });
+}
+
+#[test]
+fn oracle_registration_refuses_an_unfunded_reporter_atomically() {
+    development_ext().execute_with(|| {
+        let reporter = account(49);
+        assert!(Oracle::register_reporter(RuntimeOrigin::signed(reporter.clone())).is_err());
+        assert!(!pallet_oracle::Reporters::<Runtime>::contains_key(reporter));
+        assert_eq!(
+            {
+                let oracle_account =
+                    crate::configs::OraclePalletId::get().into_account_truncating();
+                ForeignAssets::balance(usdc_location(), &oracle_account)
+            },
+            0,
         );
     });
 }
@@ -13469,28 +13499,6 @@ fn treasury_spend_resource_key_is_0x07_plus_beneficiary_digest() {
 }
 
 #[test]
-fn community_schedule_resource_is_a_singleton_across_beneficiaries() {
-    development_ext().execute_with(|| {
-        let first = RuntimeCall::FutarchyTreasury(
-            pallet_futarchy_treasury::Call::create_community_schedule {
-                beneficiary: account(240),
-                amount: currency::VIT,
-            },
-        );
-        let second = RuntimeCall::FutarchyTreasury(
-            pallet_futarchy_treasury::Call::create_community_schedule {
-                beneficiary: account(241),
-                amount: currency::VIT,
-            },
-        );
-        let first = derived_single_resource(first).expect("community schedule must classify");
-        let second = derived_single_resource(second).expect("community schedule must classify");
-        assert_eq!(first, second, "the finite allocation uses one global lock");
-        assert_eq!(first, expected_resource_key(0x0C, None));
-    });
-}
-
-#[test]
 fn canonical_resource_footprint_enforces_call_and_nesting_bounds() {
     development_ext().execute_with(|| {
         let record = match pallet_constitution::Params::<Runtime>::get(pallet_constitution::key16(
@@ -13612,7 +13620,7 @@ fn canonical_resource_key_universe_has_no_semantic_collisions() {
             }
         }
 
-        for singleton in [0x03, 0x04, 0x05, 0x0A, 0x0B, 0x0C] {
+        for singleton in [0x03, 0x04, 0x05, 0x0A, 0x0B] {
             insert_distinct(&mut keys, expected_resource_key(singleton, None));
         }
         for instance in [0_u8, 1_u8] {

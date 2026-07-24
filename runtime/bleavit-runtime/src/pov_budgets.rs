@@ -196,7 +196,7 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
     all.extend(
         pallet_call_weights!(pallet_oracle as pallet_oracle::WeightInfo {
             register_reporter, deregister_reporter, register_watchtower, report,
-            challenge, adjudicate, ack_observed, crank_reserve_probe,
+            challenge, counter_report, adjudicate, ack_observed, crank_reserve_probe,
             recompute_proof(MAX_PROOF_BYTES_BOUND),
             crank_round_close(round_close_batch),
         }),
@@ -259,7 +259,7 @@ fn every_futarchy_call_and_hook_fits_the_normal_class() {
     // Exact count of the 12 futarchy pallets' WeightInfo functions — update
     // in lockstep when a trait gains or loses a function, so a silently
     // dropped inventory entry cannot pass.
-    assert_eq!(all.len(), 109, "call inventory drifted");
+    assert_eq!(all.len(), 110, "call inventory drifted");
     for (name, w) in all {
         assert_fits(name, w);
     }

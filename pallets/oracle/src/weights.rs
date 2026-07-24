@@ -22,6 +22,8 @@ pub trait WeightInfo {
     fn report() -> Weight;
     /// Weight of `challenge` (`Rounds` r:all w:1).
     fn challenge() -> Weight;
+    /// Weight of the reporter's consenting escalation call.
+    fn counter_report() -> Weight;
     /// Weight of `recompute_proof` over a `bytes`-long proof (07 §9).
     fn recompute_proof(bytes: u32) -> Weight;
     /// Weight of `register_watchtower` (`Watchtowers` r:all w:1).
@@ -61,6 +63,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
         Weight::from_parts(35_000_000, 8_000)
             .saturating_add(T::DbWeight::get().reads(4))
             .saturating_add(T::DbWeight::get().writes(1))
+    }
+    fn counter_report() -> Weight {
+        Weight::from_parts(40_000_000, 8_000)
+            .saturating_add(T::DbWeight::get().reads(5))
+            .saturating_add(T::DbWeight::get().writes(2))
     }
     fn recompute_proof(bytes: u32) -> Weight {
         Weight::from_parts(45_000_000, 8_000)
@@ -125,6 +132,11 @@ impl WeightInfo for () {
         Weight::from_parts(35_000_000, 8_000)
             .saturating_add(RocksDbWeight::get().reads(4))
             .saturating_add(RocksDbWeight::get().writes(1))
+    }
+    fn counter_report() -> Weight {
+        Weight::from_parts(40_000_000, 8_000)
+            .saturating_add(RocksDbWeight::get().reads(5))
+            .saturating_add(RocksDbWeight::get().writes(2))
     }
     fn recompute_proof(bytes: u32) -> Weight {
         Weight::from_parts(45_000_000, 8_000)

@@ -655,6 +655,7 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_oracle::Call::deregister_reporter { .. }
             | pallet_oracle::Call::report { .. }
             | pallet_oracle::Call::challenge { .. }
+            | pallet_oracle::Call::counter_report { .. }
             | pallet_oracle::Call::recompute_proof { .. }
             | pallet_oracle::Call::register_watchtower { .. }
             | pallet_oracle::Call::ack_observed { .. }

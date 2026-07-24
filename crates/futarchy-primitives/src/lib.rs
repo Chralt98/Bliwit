@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 10;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 11;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1191,10 +1191,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_version_is_v10() {
-        // SQ-483 separates the active/POL and retained-book envelopes. A
-        // frozen-contract change bumps this value again.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 10);
+    fn contract_version_is_v11() {
+        // A12 adds the explicit challenger-default settlement path to the
+        // frozen oracle contract surface.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 11);
     }
 
     #[test]

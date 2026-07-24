@@ -117,6 +117,31 @@ fn sq_158_lowered_dis_merit_min_cannot_drop_below_the_frozen_game_bond() {
     });
 }
 
+/// A challenger remains recorded for later bond settlement, but only the
+/// current round's counter value makes it an active decision-time dispute.
+#[test]
+fn durable_challenger_without_current_counter_does_not_hold_decision() {
+    development_ext().execute_with(|| {
+        seed_open_challenged_round(FROZEN_B1);
+        pallet_oracle::Rounds::<Runtime>::mutate(
+            (
+                COMPONENT,
+                pallet_epoch::CurrentEpoch::<Runtime>::get(),
+                SPEC,
+            ),
+            |round| {
+                let round = round.as_mut().expect("seeded round");
+                round.counter_value = None;
+            },
+        );
+
+        assert!(
+            !crate::configs::RuntimeEpochOracle::any_open_dispute_touching(SPEC),
+            "a durable challenger without a current counter-report must not hold",
+        );
+    });
+}
+
 /// SQ-117 / SQ-158: the real runtime genesis seeds both formerly-unseeded rows,
 /// so B9's rebate pipeline reads a non-zero `keeper.rebate` and the dispute
 /// engine reads an independent `dis.merit_min`.

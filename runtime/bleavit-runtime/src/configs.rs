@@ -2097,6 +2097,7 @@ parameter_types! {
     pub const TreasuryPalletId: PalletId = PalletId(*b"bl/trsry");
     pub const IncidentPalletId: PalletId = PalletId(*b"bl/reg/i");
     pub const MilestonePalletId: PalletId = PalletId(*b"bl/reg/m");
+    pub const OraclePalletId: PalletId = PalletId(*b"bl/oracl");
 }
 pub fn market_account() -> AccountId {
     MarketPalletId::get().into_account_truncating()
@@ -2218,6 +2219,7 @@ fn is_canonical_protocol_account(who: &AccountId) -> bool {
         welfare_settlement_account(),
         epoch_account(),
         execution_guard_account(),
+        OraclePalletId::get().into_account_truncating(),
     ];
     accounts.contains(who)
 }
@@ -3353,12 +3355,14 @@ pub struct RuntimeEpochOracle;
 impl pallet_epoch::OracleAccess for RuntimeEpochOracle {
     fn any_open_dispute_touching(spec: futarchy_primitives::MetricSpecVersion) -> bool {
         // Rounds is core-bounded to 128 and try-state-covered. Only a live
-        // challenged round at or above the value-scaled round-one merit floor
-        // is a decision-time dispute (07 §12). Registry sub-games never
-        // enter this storage surface.
+        // challenged *round* at or above the value-scaled round-one merit
+        // floor is a decision-time dispute (07 §12). `challenger` is durable
+        // across the escalation ladder; `counter_value` identifies the active
+        // challenge for this round. Registry sub-games never enter this
+        // storage surface.
         pallet_oracle::Rounds::<Runtime>::iter().any(|(_, round)| {
             round.spec_version == spec
-                && round.challenger.is_some()
+                && round.counter_value.is_some()
                 && match pallet_oracle::RoundSchedules::<Runtime>::get((
                     round.component,
                     round.epoch,
@@ -4654,6 +4658,7 @@ impl pallet_oracle::Config for Runtime {
     type AdjudicationOrigin = pallet_origins::EnsureOracleResolution;
     type Reporting = RuntimeReporting;
     type Params = RuntimeOracleParams;
+    type Custody = RuntimeOracleCustody;
     type ProbeDispatch = RuntimeProbeDispatch;
     type ProbeTimeoutSink = OracleProbeTimeoutToWelfare;
     type ReserveHealthSink = RuntimeReserveHealthSink;
@@ -4662,6 +4667,61 @@ impl pallet_oracle::Config for Runtime {
     type WeightInfo = crate::weights::pallet_oracle::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
+}
+
+/// USDC custody for oracle registration stakes and signed round-bond collateral.
+/// The dedicated sovereign account is separate from the treasury oracle payout
+/// line: its balance is exactly the bounded I-29 liability set (apart from dust
+/// only after a terminal transfer has completed).
+pub struct RuntimeOracleCustody;
+impl pallet_oracle::OracleCustody<AccountId> for RuntimeOracleCustody {
+    fn hold(who: &AccountId, amount: Balance) -> DispatchResult {
+        <ForeignAssets as Mutate<AccountId>>::transfer(
+            usdc_location(),
+            who,
+            &OraclePalletId::get().into_account_truncating(),
+            amount,
+            Preservation::Preserve,
+        )
+        .map(|_| ())
+    }
+
+    fn release(who: &AccountId, amount: Balance) -> DispatchResult {
+        if amount == 0 {
+            return Ok(());
+        }
+        <ForeignAssets as Mutate<AccountId>>::transfer(
+            usdc_location(),
+            &OraclePalletId::get().into_account_truncating(),
+            who,
+            amount,
+            Preservation::Expendable,
+        )
+        .map(|_| ())
+    }
+
+    fn pay(who: &AccountId, amount: Balance) -> DispatchResult {
+        Self::release(who, amount)
+    }
+
+    fn slash_insurance(amount: Balance) -> DispatchResult {
+        if amount == 0 {
+            return Ok(());
+        }
+        <ForeignAssets as Mutate<AccountId>>::transfer(
+            usdc_location(),
+            &OraclePalletId::get().into_account_truncating(),
+            &insurance_account(),
+            amount,
+            Preservation::Expendable,
+        )
+        .map(|_| ())
+    }
+
+    fn balance() -> Balance {
+        let oracle_account: AccountId = OraclePalletId::get().into_account_truncating();
+        ForeignAssets::balance(usdc_location(), &oracle_account)
+    }
 }
 
 /// Oracle timeout folds share the router recorder's attribution and remain
@@ -7471,6 +7531,11 @@ impl pallet_oracle::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
                 specs: frame_support::BoundedVec::truncate_from(Vec::from([(1, version)])),
             },
         );
+    }
+    fn prime_custody(seed: u8, amount: Balance) {
+        benchmark_ensure_usdc();
+        let who = AccountId32::new([seed; 32]);
+        let _ = <ForeignAssets as Mutate<AccountId>>::mint_into(usdc_location(), &who, amount);
     }
 }
 #[cfg(feature = "runtime-benchmarks")]

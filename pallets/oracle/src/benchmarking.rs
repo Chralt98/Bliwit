@@ -1,7 +1,7 @@
 //! `frame-benchmarking` v2 benchmarks for every extrinsic (Track-A DoD, 15 §4.5).
 //!
 //! `pallet-oracle`'s only weight-bearing hook is the try-runtime `try_state`
-//! (not benchmarked; it is try-runtime-only), so the ten calls below are the
+//! (not benchmarked; it is try-runtime-only), so the eleven calls below are the
 //! complete benchmark surface. B5 turns the generated output into the
 //! PoV-calibrated `weights.rs`. The `QueryResponse` handler and
 //! `request_adjudication` are runtime-internal (not extrinsics) and are covered
@@ -32,6 +32,10 @@ fn account<T: Config>(seed: u8) -> T::AccountId {
 
 fn seed_reporter<T: Config>(seed: u8) -> T::AccountId {
     let who = account::<T>(seed);
+    T::BenchmarkHelper::prime_custody(
+        seed,
+        futarchy_primitives::currency::USDC.saturating_mul(1_000_000),
+    );
     Pallet::<T>::register_reporter(RawOrigin::Signed(who.clone()).into())
         .expect("register_reporter");
     who
@@ -227,9 +231,15 @@ fn seed_terminal<T: Config>(reporter: &T::AccountId, challenger: &T::AccountId) 
             .expect("round")
             .challenge_deadline;
         challenge(deadline - 1);
-        frame_system::Pallet::<T>::set_block_number(deadline.into());
-        Pallet::<T>::crank_round_close(RawOrigin::Signed(challenger.clone()).into(), 1)
-            .expect("crank");
+        Pallet::<T>::counter_report(
+            RawOrigin::Signed(reporter.clone()).into(),
+            COMPONENT,
+            EPOCH,
+            SPEC,
+            FixedU64(440_000_000),
+            [11u8; 32],
+        )
+        .expect("counter_report");
     }
     let deadline = Rounds::<T>::get((COMPONENT, EPOCH, SPEC))
         .expect("round")
@@ -246,6 +256,10 @@ mod benches {
         fill_reporters::<T>(2, (MAX_REPORTERS_BOUND - 1) as u8);
         fill_hydration::<T>(1, 16, 16, 0, false);
         let who = account::<T>(1);
+        T::BenchmarkHelper::prime_custody(
+            1,
+            futarchy_primitives::currency::USDC.saturating_mul(1_000_000),
+        );
 
         #[extrinsic_call]
         _(RawOrigin::Signed(who.clone()));
@@ -294,6 +308,10 @@ mod benches {
         seed_report::<T>(&reporter, FixedU64(500_000_000), [9u8; 32]);
         fill_hydration::<T>(2, 16, 16, 0, false);
         let challenger = account::<T>(2);
+        T::BenchmarkHelper::prime_custody(
+            2,
+            futarchy_primitives::currency::USDC.saturating_mul(1_000_000),
+        );
 
         #[extrinsic_call]
         _(
@@ -308,6 +326,47 @@ mod benches {
         assert!(Rounds::<T>::get((COMPONENT, EPOCH, SPEC))
             .map(|r| r.challenger.is_some())
             .unwrap_or(false));
+    }
+
+    #[benchmark]
+    fn counter_report() {
+        let reporter = seed_reporter::<T>(1);
+        fill_reporters::<T>(2, (MAX_REPORTERS_BOUND - 1) as u8);
+        seed_report::<T>(&reporter, FixedU64(500_000_000), [9u8; 32]);
+        fill_hydration::<T>(2, 16, 16, 0, false);
+        let challenger = account::<T>(2);
+        T::BenchmarkHelper::prime_custody(
+            2,
+            futarchy_primitives::currency::USDC.saturating_mul(1_000_000),
+        );
+        let deadline = Rounds::<T>::get((COMPONENT, EPOCH, SPEC))
+            .expect("round")
+            .challenge_deadline;
+        frame_system::Pallet::<T>::set_block_number((deadline - 1).into());
+        Pallet::<T>::challenge(
+            RawOrigin::Signed(challenger).into(),
+            COMPONENT,
+            EPOCH,
+            SPEC,
+            FixedU64(440_000_000),
+            [10u8; 32],
+        )
+        .expect("challenge");
+
+        #[extrinsic_call]
+        _(
+            RawOrigin::Signed(reporter),
+            COMPONENT,
+            EPOCH,
+            SPEC,
+            FixedU64(440_000_000),
+            [11u8; 32],
+        );
+
+        assert_eq!(
+            Rounds::<T>::get((COMPONENT, EPOCH, SPEC)).map(|r| r.round),
+            Some(2)
+        );
     }
 
     #[benchmark]
@@ -347,6 +406,10 @@ mod benches {
             .collect::<alloc::vec::Vec<_>>();
         WatchtowerActive::<T>::put(BoundedVec::truncate_from(active));
         let who = account::<T>(1);
+        T::BenchmarkHelper::prime_custody(
+            1,
+            futarchy_primitives::currency::USDC.saturating_mul(1_000_000),
+        );
 
         #[extrinsic_call]
         _(RawOrigin::Signed(who.clone()));
@@ -486,6 +549,10 @@ mod benches {
         let reporter = seed_reporter::<T>(1);
         fill_reporters::<T>(2, (MAX_REPORTERS_BOUND - 1) as u8);
         let challenger = account::<T>(2);
+        T::BenchmarkHelper::prime_custody(
+            2,
+            futarchy_primitives::currency::USDC.saturating_mul(1_000_000),
+        );
         seed_terminal::<T>(&reporter, &challenger);
         fill_hydration::<T>(2, 16, 16, 1, false);
         let origin = T::BenchmarkHelper::adjudication_origin();

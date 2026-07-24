@@ -130,6 +130,7 @@ impl pallet_oracle::Config for Test {
     type AdjudicationOrigin = NeverEnsureOrigin<()>;
     type Reporting = TestReporting;
     type Params = TestOracleParams;
+    type Custody = ();
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
     type ProbeDispatch = TestProbeDispatcher;
     type ProbeTimeoutSink = ();

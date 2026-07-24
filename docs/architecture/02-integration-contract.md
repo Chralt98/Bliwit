@@ -4,7 +4,7 @@
 
 **Boundary.** This document owns everything the chain and the canonical frontend must agree on byte-for-byte: shared SCALE types, the `FutarchyApi` runtime API and its view types, the frozen event schema, the storage items and names the frontend reads directly, chain identity constants, the constants-binding rules, the WSS bootnode chain-spec requirement, the backend-published test-artifact feed, and the `ReleaseChannel` raw storage key. It does **not** own the *semantics* behind these surfaces (ledger rules → [03](03-conditional-ledger.md), market mechanics → [04](04-markets-and-pricing.md), decision engine → [05](05-welfare-and-decision-engine.md), oracle game → [07](07-oracle-and-disputes.md), upgrade path → [09](09-execution-upgrades-and-rollout.md)) — but where a name or layout appears both here and there, **this document's spelling is canonical**. Normative language per RFC 2119.
 
-**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 10**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
+**Ownership and freeze (D-2, resolves F-4).** This contract is **jointly owned by the backend and frontend teams**. It is frozen at **contract version 11**. Any change — additive or otherwise — REQUIRES sign-off from both teams and a version bump (§13). The contingency for contract breach is the D-6 layer-1 fallback (chain-served ring + TWAP checkpoints), never a third-party service.
 
 ---
 
@@ -124,7 +124,7 @@ The `MetricId` assignment registry is owned by [05](05-welfare-and-decision-engi
 
 Proposal positions MUST project a settled proposal vault as `ScalarSettled { winner, s }`; Baseline positions MUST project a settled epoch vault as `BaselineSettled { s }` and MUST NOT fabricate a proposal branch. `RatificationStatus::NoPassedRecord` means only that the execution guard has no passing ratification record. It is deliberately agnostic between no referendum, an in-flight referendum and a failed referendum; the frontend MUST derive that lifecycle from `pallet-referenda` ([06](06-governance-and-guardians.md) §2.2). `Pending` and `Failed` are removed because the guard cannot truthfully produce them in the deployed design. This `RatificationStatus` restructure is a pre-genesis contract-v6 repair; no deployed SCALE value requires migration.
 
-The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 10`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
+The crate re-exports `INTEGRATION_CONTRACT_VERSION: u32 = 11`, exposed as a `pallet-constitution` runtime constant (metadata-readable, §9).
 
 ---
 
@@ -398,7 +398,7 @@ Storage:
 |---|---|---|
 | `Reporters` | `map AccountId → ReporterInfo { stake: Balance, registered_at: BlockNumber, offenses: u8 }` | counted; ≥ 3 required before attested components admit |
 | `Rounds` | `map (MetricId, EpochId, MetricSpecVersion) → RoundState { component: MetricId, epoch: EpochId, round: u8, spec_version: MetricSpecVersion, reporter: AccountId, value: FixedU64, evidence_hash: H256, bond: Balance, challenge_deadline: BlockNumber, extended: bool, challenger: Option<AccountId>, counter_value: Option<FixedU64>, acks: u8, report_hash: H256, stake_at_risk: Balance, cumulative_reporter_bond: Balance, cumulative_challenger_bond: Balance }` | ≤ **128** = 16 components × ≤ 4 settling epochs × ≤ 2 concurrent frozen versions — one live game per `(component, epoch, spec_version)`. The **triple key** (contract v3) is normative: 07 §2(4) runs an independent game per frozen version, so an activation boundary keeps two games live for one `(component, epoch)`; the pair key of contract v2 could not hold them (it maps one value per key). The value re-embeds `component`/`epoch`/`spec_version` for a `try_state` key-integrity check. `report_hash`/`stake_at_risk`/`cumulative_*_bond` back per-round ack keying, bond-schedule freezing and §5.5 slashing; the FE reads the `OracleRoundView` projection (§4), not this struct |
-| `ComponentValues` | `map (MetricId, EpochId, MetricSpecVersion) → SettledComponent { value: FixedU64, path: SettlePath, flagged: bool }` | reaped at cohort settlement; **triple key** (contract v3) — per-version games settle their own cohorts, so one `(component, epoch)` can carry a settled value per frozen version. `SettlePath ∈ { Unchallenged, Recomputed, Adjudicated, Neutral }` |
+| `ComponentValues` | `map (MetricId, EpochId, MetricSpecVersion) → SettledComponent { value: FixedU64, path: SettlePath, flagged: bool }` | reaped at cohort settlement; **triple key** (contract v3) — per-version games settle their own cohorts, so one `(component, epoch)` can carry a settled value per frozen version. `SettlePath ∈ { Unchallenged, Recomputed, Adjudicated, ChallengerDefault, Neutral }`; `ChallengerDefault` is the §5.3 deadline path when the reporter does not post a signed `counter_report` |
 | `Watchtowers` | `map AccountId → WatchtowerInfo { stake: Balance, registered_at: BlockNumber, inactive_epochs: u8 }` | counted, ≤ `wt.max = 16` seats; bonded acknowledgment quorum (D-18; registry semantics in [07](07-oracle-and-disputes.md) §4) |
 | `ReserveHealth` | `{ consecutive_fails: u8, consecutive_passes: u8, unhealthy: bool, last_query_id: u64, last_probe_at: BlockNumber, pending_since: Option<BlockNumber> }` | single value; the deterministic reserve-probe state (`R`, [07](07-oracle-and-disputes.md) §8). `last_probe_at`/`pending_since` (contract v3) time the probe for the fail-static timeout |
 
@@ -473,7 +473,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |
 | Phase flag storage | `pallet-constitution::PhaseFlags` (§7.3) — the trading-enablement key |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 10` (runtime constant) |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 11` (runtime constant) |
 
 ---
 
@@ -517,7 +517,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 
 | Pallet | Constant name | Type | Value source |
 |---|---|---|---|
-| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 10) |
+| Constitution | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 11) |
 | Constitution | `MaxParams` | `u32` | `constitution_core::MAX_PARAMS` (= 128) |
 | Constitution | `MaxCapabilities` | `u32` | `constitution_core::MAX_CAPABILITIES` (= 64) |
 | Constitution | `MaxMeters` | `u32` | `constitution_core::MAX_METERS` (= 16) |
@@ -542,7 +542,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Registry (each instance) | `ArchiveDelay` | `BlockNumber` (`u32`) | live `Params[ledger.archive]` |
 | Registry (each instance) | `MaxFilingsPerEpoch` | `u32` | `kernel::REG_MAX_FILINGS_EPOCH` (= 64) |
 | Registry (each instance) | `MaxEvidenceLen` | `u32` | fixed `H256` evidence-hash width (= 32 bytes) |
-| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 10) |
+| ExecutionGuard | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 11) |
 | ExecutionGuard | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | ExecutionGuard | `MaxExecutionRecords` | `u32` | `bounds::MAX_EXECUTION_RECORDS` (= 256) |
 | ExecutionGuard | `MaxCalls` | `u32` | `kernel::MAX_CALLS` (= 16) |
@@ -551,7 +551,7 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | ExecutionGuard | `MaxRuntimeCodeBytes` | `u32` | runtime `Config::MaxRuntimeCodeBytes` (`pallet_preimage::MAX_SIZE`) |
 | ExecutionGuard | `ExecutionTimelockFloor` | `[u32; 4]` | [13 §1](13-parameters.md) `exec.lock.*` K hard minima, `[14,400; 4]` blocks |
 | ExecutionGuard | `ExecutionGraceFloor` | `u32` | [13 §1](13-parameters.md) `exec.grace` K hard minimum (= 100,800 blocks) |
-| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 10) |
+| Epoch | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 11) |
 | Epoch | `MaxLiveProposals` | `u32` | `bounds::MAX_LIVE_PROPOSALS` (= 32) |
 | Epoch | `MaxIntakeQueue` | `u32` | `bounds::INTAKE_QUEUE` (= 64) |
 | Epoch | `MaxNonTerminalCohorts` | `u32` | `bounds::MAX_NON_TERMINAL_COHORTS` (= 4) |
@@ -564,12 +564,12 @@ The tuple/array orders in this table are part of the freeze. Every per-class arr
 | Epoch | `DecisionExtension` | `u32` | `kernel::DEC_EXTENSION_BLOCKS` (= 43,200) |
 | Epoch | `DecisionDeltaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.delta.*` K hard minima (= `[5,000,000; 4]`) |
 | Epoch | `DecisionSigmaFloors` | `[FixedU64; 4]` | [13 §1](13-parameters.md) `dec.sigma.*` K hard minima (= `[0; 4]`) |
-| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 10) |
+| Welfare | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 11) |
 | Welfare | `MaxMetricSpecs` | `u32` | `welfare_core::MAX_METRIC_SPECS` (= 16) |
 | Welfare | `MaxSnapshots` | `u32` | `welfare_core::MAX_SNAPSHOTS` (= 20) |
 | Welfare | `MaxGateFlags` | `u32` | `welfare_core::MAX_GATE_FLAGS` (= 20) |
 | Welfare | `MaxDailyGateSamples` | `u8` | `welfare_core::MAX_DAILY_GATE_SAMPLES` (= 64) |
-| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 10) |
+| FutarchyTreasury | `INTEGRATION_CONTRACT_VERSION` | `u32` | `futarchy_primitives::INTEGRATION_CONTRACT_VERSION` (= 11) |
 | FutarchyTreasury | `MaxStreams` | `u32` | `futarchy_treasury_core::MAX_STREAMS` (= 128) |
 | FutarchyTreasury | `MaxBudgetLines` | `u32` | `futarchy_treasury_core::MAX_BUDGET_LINES` (= 32) |
 | FutarchyTreasury | `MaxPolCommitments` | `u32` | `futarchy_treasury_core::MAX_POL_COMMITMENTS` (= 196) |
@@ -652,6 +652,7 @@ No other origin can write the record. The layout MUST NEVER change except by app
 
 **Version history.**
 
+- **v11 (2026-07-23) — signed oracle escalation custody (A12).** Section 7.2 adds the explicit `ChallengerDefault` `SettlePath` variant for the §5.3 deadline outcome. The oracle's signed `counter_report` advances a challenged round only with reporter consent; challenger identity and cumulative bond liabilities persist across rounds, and d20 neutralization retains the bounded round record until bond/reputation resolution. This is a pre-genesis additive revision; no migration is required. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-23, through the standing autonomous-resolution delegation.**
 - **v10 (2026-07-23) — cause-aware attestor departure and durable revocation (B19).** Section 6 appends the two attestor lifecycle events; §7.5 adds bounded `Liabilities` and `Revocations` auxiliary values while retaining the original `Attestation` shape; §8 exposes `remove_for_cause` (ConstitutionalValues), permissionless `reap_attestation`, the new storage projections and custody events. Queue-time admission continues to require the live ≥3 roster; after a record is committed, execution uses record quorum and durable revocation state. `set_members` holds the live `att.bond` from every newly seated account and carries unsettled bases into `Liabilities`; challenge bonds are held and slash proceeds route to INSURANCE. This is a pre-genesis additive revision; no migration is required. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-23, through the standing autonomous-resolution delegation.**
 - **v9 (2026-07-23) — paired-recovery descriptor coverage (B16).** Section 11 extends the runtime-Wasm/metadata artifact row to the exact paired terminal-recovery runtime because that image becomes the live next `spec_version` after recovery. Backend release assembly MUST publish both metadata blobs and frontend descriptor generation/drift CI MUST cover both before the primary is eligible; recovery is no longer an operator-only metadata input. Recovery-only guard calls, internal storage and diagnostics remain outside the canonical frontend ingest set. No SCALE shape, runtime API, storage key, transaction validity or SDK transaction-version change is introduced. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-23, through the explicit B16 repair request and standing autonomous-resolution delegation.**
 - **v8 (2026-07-22) — active/retained market-capacity split and bounded reap isolation (SQ-483).** Section 7.4 separates the live/POL obligation envelope (`MaxLiveMarkets = 196`) from total readable book retention (`MaxStoredMarkets = 2,240`), and §9 adds the latter as an additive metadata constant. The retained bound is derived from the independent one-epoch creation maximum, the 14-day epoch floor, the one-year K ceiling on `ledger.archive`, and one boundary batch; terminal observation releases the live/POL slot and deletes auxiliary history while leaving the book readable until archive reap. Market reap is independent of the unbounded claimant-position backlog: at the delay boundary it atomically discards only its book/fee accounts across a fixed 28-cell proposal or four-cell Baseline universe before unregistering them, while ledger claimant cleanup may run before or after. To make that fixed inventory exhaustive, the existing `ledger.transfer` call now rejects every protocol-account recipient; only the `MarketAuthority` internal path may move inventory into protocol custody. Canonical book/fee addresses occupy a domain-separated `AccountId32` namespace classified as protocol custody before creation and after reap; `MarketProtocolAccounts` is ownership/refcount state only, and creation rejects a non-canonical pair before mutation. This is a pre-genesis validity correction: no deployed signed transaction was valid under the prior rule, so `transaction_version` remains at its initial value. The pallet error metadata gains only trailing `ProtocolDestination` / `UnreservedProtocolAccount` variants; no frozen event, API method, view type or storage-key shape changes. `ActiveMarketCount` is a new internal pre-genesis counter and no deployed state exists to migrate. Joint backend+frontend sign-off: **the user (owner for both sides under R-1), 2026-07-22, under the standing autonomous-resolution delegation.**

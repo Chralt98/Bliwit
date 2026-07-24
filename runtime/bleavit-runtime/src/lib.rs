@@ -140,7 +140,7 @@ pub const RUNTIME_SPEC_VERSION: u32 = 2;
 #[cfg(feature = "recovery")]
 pub const RUNTIME_SPEC_VERSION: u32 = 3;
 /// SDK dispatchable-compatibility counter, deliberately **independent** of
-/// `INTEGRATION_CONTRACT_VERSION` (02 §13; SQ-102, currently contract v10). It denotes
+/// `INTEGRATION_CONTRACT_VERSION` (02 §13; SQ-102, currently contract v11). It denotes
 /// compatibility of existing dispatchables as embedded in signed-transaction
 /// validity, so an additive contract bump MUST NOT move it. Re-baselined to 1
 /// pre-genesis; the SDK forbids this counter ever decreasing after genesis.

@@ -204,7 +204,7 @@ pub trait Attestations {
     fn present_unrevoked_unchallenged(attestation_id: u32) -> bool;
     fn has_quorum(pid: ProposalId, artifact_hash: H256) -> bool;
     /// Execute-time quorum over the committed record set. Implementations
-    /// that predate contract v10 may conservatively fall back to the live
+    /// that predate contract v11 may conservatively fall back to the live
     /// roster read.
     fn has_record_quorum(pid: ProposalId, artifact_hash: H256) -> bool {
         Self::has_quorum(pid, artifact_hash)

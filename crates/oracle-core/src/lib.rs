@@ -138,6 +138,9 @@ pub enum SettlePath {
     Unchallenged,
     Recomputed,
     Adjudicated,
+    /// The reporter did not consent to the next round before its deadline;
+    /// the current challenger value therefore wins by the §5.3 default path.
+    ChallengerDefault,
     Neutral,
 }
 
@@ -187,6 +190,18 @@ pub struct StoredRoundSchedule {
     pub round_one_bond: Balance,
     /// Terminal adjudication is gated by this frozen `orc.rounds` value.
     pub round_cap: u8,
+}
+
+/// Internal custody instruction emitted by a terminal transition. This is not
+/// persisted or exposed through the frozen `RoundState`; the FRAME shell uses it
+/// to move the already-escrowed round-bond stacks atomically with the state diff.
+#[derive(Clone, Copy, Debug, Decode, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
+pub struct BondSettlement {
+    pub reporter: AccountId,
+    pub challenger: Option<AccountId>,
+    pub reporter_bond: Balance,
+    pub challenger_bond: Balance,
+    pub reporter_wins: bool,
 }
 
 #[derive(Clone, Copy, Debug, Decode, Default, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo)]
@@ -375,6 +390,12 @@ pub struct Oracle {
     /// (07 §4). [`Oracle::sweep_watchtower_liveness`] consumes and clears it at
     /// the epoch boundary; the FRAME shell's epoch pallet drives that call (B1a).
     pub watchtower_active: Vec<AccountId>,
+    /// Ephemeral terminal custody instructions; the FRAME shell consumes these
+    /// before persisting and never writes them as storage.
+    pub bond_settlements: Vec<BondSettlement>,
+    /// Games whose money outcome was neutralized at the d20 deadline but whose
+    /// bond stack remains live until a later terminal verdict (07 §11/I-18).
+    pub money_settled: Vec<RoundKey>,
 }
 
 impl Oracle {
@@ -546,12 +567,25 @@ impl Oracle {
     ) -> Result<(), Error> {
         let (component, epoch) = (key.component, key.epoch);
         let idx = self.find_round(key).ok_or(Error::RoundNotFound)?;
+        // Challenges settle through the default path, so they must obey the
+        // same component-value grid as reports and adjudications (05 §4.4).
+        ensure!(
+            counter_value.0 <= COMPONENT_VALUE_MAX,
+            Error::ValueOutOfBounds
+        );
         let r = &mut self.rounds[idx];
         // Half-open window `[open, deadline)` — a challenge at the deadline block
         // must not race the close crank that treats that block as mature
         // (Codex F24).
         ensure!(now < r.challenge_deadline, Error::WindowClosed);
-        ensure!(r.challenger.is_none(), Error::AlreadyChallenged);
+        // `challenger` is durable for the whole game; only `counter_value`
+        // indicates that the current round has an active challenge. A later
+        // round must be challenged by the same party so the bonded owner cannot
+        // be replaced between rounds (07 §5.3; A12 kernel).
+        ensure!(r.counter_value.is_none(), Error::AlreadyChallenged);
+        if let Some(existing) = r.challenger {
+            ensure!(existing == who, Error::NotRegistered);
+        }
         let bond = r.bond;
         r.challenger = Some(who);
         r.counter_value = Some(counter_value);
@@ -567,6 +601,54 @@ impl Oracle {
             counter_value,
             evidence_hash,
             bond,
+        });
+        Ok(())
+    }
+
+    /// The reporter's consenting escalation call (07 §5.3). A keeper may not
+    /// manufacture the next reporter bond: the call itself advances the round,
+    /// freezes the challenger identity, and opens the next 72-hour window.
+    pub fn counter_report(
+        &mut self,
+        who: AccountId,
+        now: BlockNumber,
+        key: RoundKey,
+        value: FixedU64,
+        evidence_hash: H256,
+        params: &OracleParams,
+    ) -> Result<(), Error> {
+        let idx = self.find_round(key).ok_or(Error::RoundNotFound)?;
+        let schedule = self.round_schedule(key)?;
+        let r = &mut self.rounds[idx];
+        ensure!(r.reporter == who, Error::NotRegistered);
+        ensure!(r.counter_value.is_some(), Error::QuorumPending);
+        ensure!(now < r.challenge_deadline, Error::WindowClosed);
+        ensure!(r.round < schedule.round_cap, Error::WindowOpen);
+        ensure!(value.0 <= COMPONENT_VALUE_MAX, Error::ValueOutOfBounds);
+        let next_round = r.round.checked_add(1).ok_or(Error::Overflow)?;
+        let next_bond = stored_round_bond(schedule.round_one_bond, next_round, schedule.round_cap)?;
+        r.round = next_round;
+        r.value = value;
+        r.evidence_hash = evidence_hash;
+        r.bond = next_bond;
+        r.challenge_deadline = now.saturating_add(params.window);
+        r.counter_value = None;
+        r.acks = 0;
+        r.report_hash = hash_report(key.component, key.epoch, next_round, value, evidence_hash);
+        r.cumulative_reporter_bond = r
+            .cumulative_reporter_bond
+            .checked_add(next_bond)
+            .ok_or(Error::Overflow)?;
+        // `r.challenger` intentionally remains populated: the challenger owns
+        // the game across all consenting rounds and must post each next bond.
+        self.ack_records.retain(|(c, e, v, _, _, _)| {
+            !(*c == key.component && *e == key.epoch && *v == key.spec_version)
+        });
+        self.events.push(Event::RoundEscalated {
+            component: key.component,
+            epoch: key.epoch,
+            round: next_round,
+            new_bond: next_bond,
         });
         Ok(())
     }
@@ -656,10 +738,10 @@ impl Oracle {
             if info.inactive_epochs >= 2 {
                 // 07 §4: two consecutive inactive epochs ⇒ slash 10% of the
                 // watchtower stake and eject.
-                self.events.push(Event::WatchtowerSlashed {
-                    who: *who,
-                    amount: ceil_div(info.stake, 10),
-                });
+                let amount = ceil_div(info.stake, 10);
+                info.stake = info.stake.saturating_sub(amount);
+                self.events
+                    .push(Event::WatchtowerSlashed { who: *who, amount });
                 ejected.push(*who);
             }
         }
@@ -690,6 +772,39 @@ impl Oracle {
         let mut processed = 0usize;
         let mut i = 0usize;
         while i < self.rounds.len() && processed < batch {
+            let current_key = RoundKey {
+                component: self.rounds[i].component,
+                epoch: self.rounds[i].epoch,
+                spec_version: self.rounds[i].spec_version,
+            };
+            if self.money_settled.contains(&current_key) {
+                // The money leg is already neutral. Resolve only the retained
+                // bond ledger once a party's current-round obligation is known;
+                // never write a second ComponentValues entry.
+                if self.rounds[i].counter_value.is_some()
+                    && self.rounds[i].round < self.round_schedule(current_key)?.round_cap
+                {
+                    let value = self.rounds[i].counter_value.ok_or(Error::QuorumPending)?;
+                    self.settle_at(i, value, SettlePath::ChallengerDefault, true, false)?;
+                    processed += 1;
+                    continue;
+                }
+                if self.rounds[i].counter_value.is_none() {
+                    self.settle_at(
+                        i,
+                        self.rounds[i].value,
+                        SettlePath::Unchallenged,
+                        true,
+                        true,
+                    )?;
+                    processed += 1;
+                    continue;
+                }
+                // A retained round-3 challenge is waiting for the values track;
+                // the permissionless close crank must not consume it.
+                i += 1;
+                continue;
+            }
             if now < self.rounds[i].challenge_deadline {
                 i += 1;
                 continue;
@@ -704,10 +819,14 @@ impl Oracle {
                 epoch,
                 spec_version: self.rounds[i].spec_version,
             })?;
-            if self.rounds[i].challenger.is_none() {
+            // `challenger` is durable across the game; only `counter_value`
+            // says whether this *round* has an active challenge. After a
+            // consenting escalation, a round with no fresh challenge follows
+            // the ordinary quorum/extension path and closes to the reporter.
+            if self.rounds[i].counter_value.is_none() {
                 if self.rounds[i].acks >= params.watchtower_quorum {
                     let value = self.rounds[i].value;
-                    self.settle_at(i, value, SettlePath::Unchallenged, false)?;
+                    self.settle_at(i, value, SettlePath::Unchallenged, false, true)?;
                 } else if !self.rounds[i].extended {
                     self.rounds[i].extended = true;
                     self.rounds[i].challenge_deadline = now.saturating_add(ORC_EXT_WINDOW_BLOCKS);
@@ -728,43 +847,11 @@ impl Oracle {
                     self.neutral_at(i, carried, 1)?;
                 }
             } else if self.rounds[i].round < schedule.round_cap {
-                let next_round = self.rounds[i].round.checked_add(1).ok_or(Error::Overflow)?;
-                let next_bond =
-                    stored_round_bond(schedule.round_one_bond, next_round, schedule.round_cap)?;
-                self.rounds[i].round = next_round;
-                self.rounds[i].bond = next_bond;
-                self.rounds[i].challenge_deadline = now.saturating_add(params.window);
-                self.rounds[i].acks = 0;
-                // A fresh round has a new `report_hash`, so the prior round's
-                // acknowledgments can never match it again: drop them so
-                // `ack_records` stays bounded by the live-round acks only
-                // (G-6/I-20 — the FRAME shell's `AckRecords` bound relies on
-                // this pruning). Scoped to the game's own version so a sibling
-                // per-version game's acks survive (Codex F8).
-                let spec_version = self.rounds[i].spec_version;
-                self.ack_records.retain(|(c, e, v, _, _, _)| {
-                    !(*c == component && *e == epoch && *v == spec_version)
-                });
-                self.rounds[i].challenger = None;
-                self.rounds[i].counter_value = None;
-                self.rounds[i].report_hash = hash_report(
-                    component,
-                    epoch,
-                    self.rounds[i].round,
-                    self.rounds[i].value,
-                    self.rounds[i].evidence_hash,
-                );
-                self.rounds[i].cumulative_reporter_bond = self.rounds[i]
-                    .cumulative_reporter_bond
-                    .checked_add(self.rounds[i].bond)
-                    .ok_or(Error::Overflow)?;
-                self.events.push(Event::RoundEscalated {
-                    component,
-                    epoch,
-                    round: self.rounds[i].round,
-                    new_bond: self.rounds[i].bond,
-                });
-                i += 1;
+                // The reporter did not post a consenting `counter_report`.
+                // Resolve in the challenger's favour using the value already
+                // funded in this round; no keeper-created bond or round occurs.
+                let value = self.rounds[i].counter_value.ok_or(Error::QuorumPending)?;
+                self.settle_at(i, value, SettlePath::ChallengerDefault, false, false)?;
             } else {
                 i += 1;
             }
@@ -812,7 +899,8 @@ impl Oracle {
             value,
             prover,
         });
-        self.settle_at(idx, value, SettlePath::Recomputed, false)
+        let reporter_wins = value == self.rounds[idx].value;
+        self.settle_at(idx, value, SettlePath::Recomputed, false, reporter_wins)
     }
 
     pub fn request_adjudication(&mut self, key: RoundKey, referendum: u32) -> Result<(), Error> {
@@ -823,7 +911,10 @@ impl Oracle {
             self.rounds[idx].round >= schedule.round_cap,
             Error::WindowOpen
         );
-        ensure!(self.rounds[idx].challenger.is_some(), Error::QuorumPending);
+        ensure!(
+            self.rounds[idx].challenger.is_some() && self.rounds[idx].counter_value.is_some(),
+            Error::QuorumPending
+        );
         self.events.push(Event::AdjudicationRequested {
             component,
             epoch,
@@ -855,7 +946,10 @@ impl Oracle {
             self.rounds[idx].round >= schedule.round_cap,
             Error::WindowOpen
         );
-        ensure!(self.rounds[idx].challenger.is_some(), Error::QuorumPending);
+        ensure!(
+            self.rounds[idx].challenger.is_some() && self.rounds[idx].counter_value.is_some(),
+            Error::QuorumPending
+        );
         if reporter_wrong {
             self.record_reporter_offense(self.rounds[idx].reporter)?;
         }
@@ -864,7 +958,7 @@ impl Oracle {
             epoch,
             value,
         });
-        self.settle_at(idx, value, SettlePath::Adjudicated, false)
+        self.settle_at(idx, value, SettlePath::Adjudicated, false, !reporter_wrong)
     }
 
     /// Force-neutralize a measurement `epoch` at its `OracleSettleDeadline`
@@ -890,12 +984,23 @@ impl Oracle {
         epoch: EpochId,
         expected: &[(MetricId, MetricSpecVersion)],
     ) -> Result<(), Error> {
-        // (1) `neutral_at`/`settle_at` remove the settled round, so repeatedly
-        // take the first remaining round for this epoch; bounded by `MAX_ROUNDS`.
-        while let Some(idx) = self.rounds.iter().position(|r| r.epoch == epoch) {
-            let component = self.rounds[idx].component;
-            let carried = self.last_valid_value(component, epoch);
-            self.neutral_at(idx, carried, 1)?;
+        // (1) retain the live round and neutralize only its money leg. The
+        // retained stack is resolved by a later counter default/adjudication.
+        let keys = self
+            .rounds
+            .iter()
+            .filter(|r| r.epoch == epoch)
+            .map(|r| RoundKey {
+                component: r.component,
+                epoch: r.epoch,
+                spec_version: r.spec_version,
+            })
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(idx) = self.find_round(key) {
+                let carried = self.last_valid_value(key.component, epoch);
+                self.neutral_at(idx, carried, 1)?;
+            }
         }
         // (2) After (1) no round for `epoch` remains, so any expected key still
         // without a `ComponentValues` entry produced no report — neutralize it.
@@ -1035,6 +1140,7 @@ impl Oracle {
             Error::AlreadyFinal
         );
         ensure!(self.ack_records.len() <= MAX_ACK_RECORDS, Error::RoundLimit);
+        ensure!(self.money_settled.len() <= MAX_ROUNDS, Error::RoundLimit);
         ensure!(
             self.watchtower_active.len() <= MAX_WATCHTOWERS,
             Error::TooManyWatchtowers
@@ -1061,14 +1167,20 @@ impl Oracle {
                 r.bond == stored_round_bond(schedule.round_one_bond, r.round, schedule.round_cap,)?,
                 Error::BondBelowMinimum
             );
-            // A live round for an already settled key would let a second
-            // settlement shadow the final ComponentValues entry (I-18).
-            ensure!(
-                !self.component_values.iter().any(|((c, e, v), _)| {
-                    *c == r.component && *e == r.epoch && *v == r.spec_version
-                }),
-                Error::AlreadyFinal
-            );
+            // A retained round may have a neutral money entry, but no ordinary
+            // live round may shadow a settled value (I-18).
+            let key = RoundKey {
+                component: r.component,
+                epoch: r.epoch,
+                spec_version: r.spec_version,
+            };
+            if self
+                .component_values
+                .iter()
+                .any(|((c, e, v), _)| *c == r.component && *e == r.epoch && *v == r.spec_version)
+            {
+                ensure!(self.money_settled.contains(&key), Error::AlreadyFinal);
+            }
             let recorded_acks = self
                 .ack_records
                 .iter()
@@ -1085,6 +1197,15 @@ impl Oracle {
         for (key, _) in &self.round_schedules {
             ensure!(self.find_round(*key).is_some(), Error::RoundNotFound);
         }
+        for key in &self.money_settled {
+            ensure!(self.find_round(*key).is_some(), Error::RoundNotFound);
+            ensure!(
+                self.component_values.iter().any(|((c, e, v), _)| {
+                    *c == key.component && *e == key.epoch && *v == key.spec_version
+                }),
+                Error::RoundNotFound
+            );
+        }
         Ok(())
     }
 
@@ -1094,11 +1215,8 @@ impl Oracle {
         value: FixedU64,
         path: SettlePath,
         flagged: bool,
+        reporter_wins: bool,
     ) -> Result<(), Error> {
-        ensure!(
-            self.component_values.len() < MAX_COMPONENT_VALUES,
-            Error::AlreadyFinal
-        );
         let round = self.rounds.get(idx).ok_or(Error::RoundNotFound)?;
         let key = RoundKey {
             component: round.component,
@@ -1108,6 +1226,13 @@ impl Oracle {
         let schedule_idx = self.round_schedule_index(key).ok_or(Error::RoundNotFound)?;
         let r = self.rounds.remove(idx);
         self.round_schedules.remove(schedule_idx);
+        self.bond_settlements.push(BondSettlement {
+            reporter: r.reporter,
+            challenger: r.challenger,
+            reporter_bond: r.cumulative_reporter_bond,
+            challenger_bond: r.cumulative_challenger_bond,
+            reporter_wins,
+        });
         // The game for this `(component, epoch, version)` is terminal: its
         // acknowledgment records are dead weight, so reap them — scoped to this
         // version so a sibling per-version game's acks survive (G-6/I-20;
@@ -1115,20 +1240,31 @@ impl Oracle {
         self.ack_records.retain(|(c, e, v, _, _, _)| {
             !(*c == r.component && *e == r.epoch && *v == r.spec_version)
         });
-        self.component_values.push((
-            (r.component, r.epoch, r.spec_version),
-            SettledComponent {
+        let already_settled = self
+            .component_values
+            .iter()
+            .any(|((c, e, v), _)| *c == r.component && *e == r.epoch && *v == r.spec_version);
+        if !already_settled {
+            ensure!(
+                self.component_values.len() < MAX_COMPONENT_VALUES,
+                Error::AlreadyFinal
+            );
+            self.component_values.push((
+                (r.component, r.epoch, r.spec_version),
+                SettledComponent {
+                    value,
+                    path,
+                    flagged,
+                },
+            ));
+            self.events.push(Event::ComponentSettled {
+                component: r.component,
+                epoch: r.epoch,
                 value,
                 path,
-                flagged,
-            },
-        ));
-        self.events.push(Event::ComponentSettled {
-            component: r.component,
-            epoch: r.epoch,
-            value,
-            path,
-        });
+            });
+        }
+        self.money_settled.retain(|stored| *stored != key);
         Ok(())
     }
 
@@ -1160,13 +1296,40 @@ impl Oracle {
     ) -> Result<(), Error> {
         let component = self.rounds[idx].component;
         let epoch = self.rounds[idx].epoch;
+        let key = RoundKey {
+            component,
+            epoch,
+            spec_version: self.rounds[idx].spec_version,
+        };
+        if self.money_settled.contains(&key) {
+            return Ok(());
+        }
+        ensure!(
+            self.component_values.len() < MAX_COMPONENT_VALUES,
+            Error::AlreadyFinal
+        );
         self.events.push(Event::NeutralSettlement {
             component,
             epoch,
             carried_value,
             flagged_epochs,
         });
-        self.settle_at(idx, carried_value, SettlePath::Neutral, true)
+        self.component_values.push((
+            (component, epoch, key.spec_version),
+            SettledComponent {
+                value: carried_value,
+                path: SettlePath::Neutral,
+                flagged: true,
+            },
+        ));
+        self.events.push(Event::ComponentSettled {
+            component,
+            epoch,
+            value: carried_value,
+            path: SettlePath::Neutral,
+        });
+        self.money_settled.push(key);
+        Ok(())
     }
 
     /// Neutral-settle an admitted `(component, epoch, spec_version)` that received
@@ -1230,6 +1393,7 @@ impl Oracle {
         // further slash) — Codex F19. The §5.5 round-bond-stack forfeiture and
         // its 40/60 routing are economic custody, wired at B-track (decision #3).
         if offense == 2 {
+            info.stake = info.stake.saturating_sub(slash_amount);
             self.events.push(Event::ReporterSlashed {
                 who,
                 amount: slash_amount,
@@ -1582,13 +1746,22 @@ mod tests {
             k.spec_version,
         )
         .unwrap();
-        // Rounds 1..R_max: challenge (strictly inside the window) then crank at
-        // the deadline to escalate.
+        // Rounds 1..R_max: challenge, then the reporter explicitly consents to
+        // the next round before its deadline. The final round carries the live
+        // challenge for adjudication.
         for _ in 1..ORC_ROUNDS {
             let d = round_deadline(o, k);
             o.challenge(acct(challenger), d - 1, k, FixedU64(440_000_000), h(10))
                 .unwrap();
-            o.crank_round_close(d, 1).unwrap();
+            o.counter_report(
+                acct(reporter),
+                d - 1,
+                k,
+                FixedU64(440_000_000),
+                h(10),
+                &OracleParams::DEFAULT,
+            )
+            .unwrap();
         }
         // Round R_max carries the terminal challenge.
         let d = round_deadline(o, k);
@@ -1724,8 +1897,181 @@ mod tests {
         o.challenge(acct(4), 2, key(8, 42, 3), FixedU64(44), h(10))
             .unwrap();
         o.crank_round_close(ORC_WINDOW_BLOCKS + 2, 1).unwrap();
+        assert_eq!(o.component_values[0].1.path, SettlePath::ChallengerDefault);
+        assert!(o.rounds.is_empty());
+
+        // A consenting reporter opens the next round explicitly; the keeper
+        // never creates it or inflates the reporter stack.
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        report!(
+            o,
+            acct(1),
+            1,
+            9,
+            42,
+            3,
+            FixedU64(62),
+            h(9),
+            400_000_000_000,
+            10,
+            3,
+        )
+        .unwrap();
+        let k = key(9, 42, 3);
+        let d = round_deadline(&o, k);
+        o.challenge(acct(4), d - 1, k, FixedU64(44), h(10)).unwrap();
+        o.counter_report(
+            acct(1),
+            d - 1,
+            k,
+            FixedU64(44),
+            h(11),
+            &OracleParams::DEFAULT,
+        )
+        .unwrap();
         assert_eq!(o.rounds[0].round, 2);
         assert_eq!(o.rounds[0].bond, 20_000_000_000);
+        assert_eq!(o.rounds[0].challenger, Some(acct(4)));
+        assert!(o.rounds[0].counter_value.is_none());
+    }
+
+    #[test]
+    fn counter_report_is_signed_consent_and_challenger_identity_survives_rounds() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(12, 50, 3);
+        report!(
+            o,
+            acct(1),
+            1,
+            12,
+            50,
+            3,
+            FixedU64(620_000_000),
+            h(9),
+            400_000_000_000,
+            100,
+            3,
+        )
+        .unwrap();
+        let d = round_deadline(&o, k);
+        o.challenge(acct(4), d - 1, k, FixedU64(440_000_000), h(10))
+            .unwrap();
+        assert_eq!(
+            o.counter_report(
+                acct(5),
+                d - 1,
+                k,
+                FixedU64(500_000_000),
+                h(11),
+                &OracleParams::DEFAULT,
+            ),
+            Err(Error::NotRegistered)
+        );
+        o.counter_report(
+            acct(1),
+            d - 1,
+            k,
+            FixedU64(500_000_000),
+            h(11),
+            &OracleParams::DEFAULT,
+        )
+        .unwrap();
+        assert_eq!(o.rounds[0].challenger, Some(acct(4)));
+        let next = round_deadline(&o, k);
+        assert_eq!(
+            o.challenge(acct(5), next - 1, k, FixedU64(490_000_000), h(12)),
+            Err(Error::NotRegistered)
+        );
+        o.challenge(acct(4), next - 1, k, FixedU64(490_000_000), h(12))
+            .unwrap();
+        assert_eq!(o.rounds[0].counter_value, Some(FixedU64(490_000_000)));
+        o.try_state().unwrap();
+    }
+
+    #[test]
+    fn durable_challenger_does_not_turn_a_quorum_round_into_an_implicit_challenge() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        o.register_watchtower(acct(2), 0).unwrap();
+        o.register_watchtower(acct(3), 0).unwrap();
+        let k = key(13, 51, 3);
+        report!(
+            o,
+            acct(1),
+            1,
+            13,
+            51,
+            3,
+            FixedU64(620_000_000),
+            h(9),
+            400_000_000_000,
+            100,
+            3,
+        )
+        .unwrap();
+        let d = round_deadline(&o, k);
+        o.challenge(acct(4), d - 1, k, FixedU64(440_000_000), h(10))
+            .unwrap();
+        o.counter_report(
+            acct(1),
+            d - 1,
+            k,
+            FixedU64(500_000_000),
+            h(11),
+            &OracleParams::DEFAULT,
+        )
+        .unwrap();
+        let report_hash = o.rounds[0].report_hash;
+        o.ack_observed(acct(2), d + 1, k, 2, report_hash).unwrap();
+        o.ack_observed(acct(3), d + 2, k, 2, report_hash).unwrap();
+        o.crank_round_close(d + ORC_WINDOW_BLOCKS + 1, 1).unwrap();
+        assert_eq!(o.component_values[0].1.path, SettlePath::Unchallenged);
+        assert_eq!(o.component_values[0].1.value, FixedU64(500_000_000));
+    }
+
+    #[test]
+    fn terminal_round_requires_a_live_challenge_for_adjudication() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(14, 51, 3);
+        report!(
+            o,
+            acct(1),
+            1,
+            k.component,
+            k.epoch,
+            k.spec_version,
+            FixedU64(620_000_000),
+            h(9),
+            400_000_000_000,
+            100,
+            3,
+        )
+        .unwrap();
+        for _ in 1..ORC_ROUNDS {
+            let deadline = round_deadline(&o, k);
+            o.challenge(acct(4), deadline - 1, k, FixedU64(440_000_000), h(10))
+                .unwrap();
+            o.counter_report(
+                acct(1),
+                deadline - 1,
+                k,
+                FixedU64(440_000_000),
+                h(11),
+                &OracleParams::DEFAULT,
+            )
+            .unwrap();
+        }
+        assert_eq!(o.rounds[0].round, ORC_ROUNDS);
+        assert_eq!(o.rounds[0].challenger, Some(acct(4)));
+        assert!(o.rounds[0].counter_value.is_none());
+        assert_eq!(o.request_adjudication(k, 1), Err(Error::QuorumPending));
+        assert_eq!(
+            o.adjudicate(Origin::OracleResolution, k, FixedU64(440_000_000), false,),
+            Err(Error::QuorumPending)
+        );
     }
 
     #[test]
@@ -2082,14 +2428,22 @@ mod tests {
         // The settled version-3 value does not finalize version 4's game...
         assert_eq!(o.component_values.len(), 1);
         assert_eq!(o.rounds.len(), 1);
-        // ...which still settles on its own track — escalate v4 to terminal
-        // (07 §5.4 / Codex F10) then adjudicate it.
+        // ...which still settles on its own track — consent through the
+        // remaining rounds, then adjudicate it.
         let k4 = key(7, 41, 4);
         for _ in 1..ORC_ROUNDS {
             let d = round_deadline(&o, k4);
             o.challenge(acct(4), d - 1, k4, FixedU64(50), h(10))
                 .unwrap();
-            o.crank_round_close(d, 1).unwrap();
+            o.counter_report(
+                acct(1),
+                d - 1,
+                k4,
+                FixedU64(50),
+                h(10),
+                &OracleParams::DEFAULT,
+            )
+            .unwrap();
         }
         let d = round_deadline(&o, k4);
         o.challenge(acct(4), d - 1, k4, FixedU64(50), h(10))
@@ -2133,6 +2487,40 @@ mod tests {
             report!(o, acct(1), 1, 1, 1, 2, FixedU64(1), h(1), 0, 10, 1),
             Err(Error::SpecVersionMismatch)
         );
+    }
+
+    #[test]
+    fn challenge_rejects_values_outside_component_grid() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(7, 41, 3);
+        report!(
+            o,
+            acct(1),
+            1,
+            k.component,
+            k.epoch,
+            k.spec_version,
+            FixedU64(620_000_000),
+            h(9),
+            400_000_000_000,
+            100,
+            3,
+        )
+        .unwrap();
+        let deadline = round_deadline(&o, k);
+        assert_eq!(
+            o.challenge(
+                acct(4),
+                deadline - 1,
+                k,
+                FixedU64(COMPONENT_VALUE_MAX + 1),
+                h(10),
+            ),
+            Err(Error::ValueOutOfBounds)
+        );
+        assert!(o.rounds[0].challenger.is_none());
+        assert!(o.rounds[0].counter_value.is_none());
     }
 
     #[test]
@@ -2183,40 +2571,29 @@ mod tests {
     #[test]
     fn force_neutralize_expired_settles_stale_rounds_and_blocks_late_verdicts() {
         // 07 §11: a round not challenge-closed by its OracleSettleDeadline
-        // settles neutrally; a late terminal verdict then finds no round and
-        // cannot overwrite the money (I-18; Codex F11/F12).
+        // settles neutrally, but the round and its bond stack remain until a
+        // later terminal verdict (I-18; Codex F11/F12).
         let mut o = Oracle::default();
         o.register_reporter(acct(1), 0).unwrap();
-        report!(
-            o,
-            acct(1),
-            1,
-            7,
-            41,
-            3,
-            FixedU64(620_000_000),
-            h(9),
-            400_000_000_000,
-            100,
-            3,
-        )
-        .unwrap();
-        o.challenge(acct(4), 2, key(7, 41, 3), FixedU64(440_000_000), h(10))
-            .unwrap();
+        to_terminal(&mut o, 1, 4, key(7, 41, 3), FixedU64(620_000_000));
         o.force_neutralize_expired(41, &[]).unwrap();
         assert_eq!(o.component_values.len(), 1);
         assert_eq!(o.component_values[0].1.path, SettlePath::Neutral);
         assert!(o.component_values[0].1.flagged);
+        assert_eq!(o.rounds.len(), 1);
+        // A late verdict resolves the retained bond/reputation only and cannot
+        // overwrite the already-neutral money value.
+        o.adjudicate(
+            Origin::OracleResolution,
+            key(7, 41, 3),
+            FixedU64(440_000_000),
+            true,
+        )
+        .unwrap();
         assert!(o.rounds.is_empty());
-        // A late verdict can no longer touch the settled money.
         assert_eq!(
-            o.adjudicate(
-                Origin::OracleResolution,
-                key(7, 41, 3),
-                FixedU64(440_000_000),
-                true
-            ),
-            Err(Error::RoundNotFound)
+            o.component_values[0].1.value,
+            FixedU64(COMPONENT_VALUE_MAX / 2)
         );
         o.try_state().unwrap();
     }
@@ -2267,7 +2644,7 @@ mod tests {
             .find(|((c, _, _), _)| *c == 8)
             .unwrap();
         assert_eq!(no_report.1.value, FixedU64(COMPONENT_VALUE_MAX / 2));
-        assert!(o.rounds.is_empty());
+        assert_eq!(o.rounds.len(), 1);
         // Idempotent: a second crank finds both keys valued and adds nothing.
         o.force_neutralize_expired(41, &expected).unwrap();
         assert_eq!(o.component_values.len(), 2);

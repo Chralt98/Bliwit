@@ -231,7 +231,7 @@ inventory! {
     }
     "Oracle" {
         leaf oracle_resolution => ["adjudicate"];
-        leaf public => ["register_reporter", "deregister_reporter", "report", "challenge", "recompute_proof", "register_watchtower", "ack_observed", "crank_round_close", "crank_reserve_probe"];
+        leaf public => ["register_reporter", "deregister_reporter", "report", "challenge", "counter_report", "recompute_proof", "register_watchtower", "ack_observed", "crank_round_close", "crank_reserve_probe"];
     }
     "IncidentRegistry" {
         leaf oracle_resolution => ["resolve_challenge"];
