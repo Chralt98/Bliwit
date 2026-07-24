@@ -814,6 +814,30 @@
       }
     },
     {
+      "id": "constant.registry.archive_delay.incident",
+      "kind": "constant",
+      "pallet": "IncidentRegistry",
+      "constant": "ArchiveDelay",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x40335000"
+      }
+    },
+    {
+      "id": "constant.registry.archive_delay.milestone",
+      "kind": "constant",
+      "pallet": "MilestoneRegistry",
+      "constant": "ArchiveDelay",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x40335000"
+      }
+    },
+    {
       "id": "constant.market.min_trade",
       "kind": "constant",
       "pallet": "Market",
@@ -2444,7 +2468,7 @@
           },
           {
             "name": "path",
-            "type": "oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|Neutral=3]"
+            "type": "oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|ChallengerDefault=3|Neutral=4]"
           }
         ]
       }

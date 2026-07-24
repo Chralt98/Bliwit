@@ -360,11 +360,30 @@ class SurfaceManifestTests(unittest.TestCase):
                     registry_fields,
                 )
 
+        self.assertEqual(
+            by_event[("Oracle", "ComponentSettled")]["layout"]["fields"][-1],
+            {
+                "name": "path",
+                "type": (
+                    "oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|"
+                    "Adjudicated=2|ChallengerDefault=3|Neutral=4]"
+                ),
+            },
+        )
+
     def test_newly_wired_v4_constant_layouts_are_frozen(self) -> None:
         expected = {
             "constant.ledger.min_transfer": (
                 "MinTransfer",
                 {"type": "u128", "value": "0x10270000000000000000000000000000"},
+            ),
+            "constant.registry.archive_delay.incident": (
+                "ArchiveDelay",
+                {"type": "u32", "value": "0x40335000"},
+            ),
+            "constant.registry.archive_delay.milestone": (
+                "ArchiveDelay",
+                {"type": "u32", "value": "0x40335000"},
             ),
             "constant.market.min_trade": (
                 "MinTrade",
@@ -666,6 +685,8 @@ class SurfaceManifestTests(unittest.TestCase):
             "constant.market.gate_p_max_ceiling",
             "constant.market.gate_eps_floor",
             "constant.epoch.length_floor",
+            "constant.registry.archive_delay.incident",
+            "constant.registry.archive_delay.milestone",
             "storage.identity.usdc_asset",
             "storage.identity.usdc_metadata",
         }
