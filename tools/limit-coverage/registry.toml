@@ -1063,6 +1063,11 @@ error = "Treasury::TooManyCommunitySchedules"
 reason = "13 §4 / 08 §2.1: the bounded PARAM-origin community schedule path rejects the 4,097th lifetime schedule; completed schedules do not replenish the bound."
 
 [[entry]]
+key = "Pending collator authored-share entries"
+class = "value"
+reason = "13 §4 / 08 §2.4: the authored-share accumulators are bounded storage values (current epoch plus at most one pending completed epoch, 120 entries each, 240 worst case); a 121st distinct author is fail-closed and is not admitted into state, so there is no separate dispatch error surface."
+
+[[entry]]
 key = "Treasury Streams"
 class = "dispatch-limit"
 error = "Treasury::TooManyStreams"

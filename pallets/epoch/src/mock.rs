@@ -867,6 +867,7 @@ impl pallet_epoch::Config for Test {
     type Welfare = TestWelfare;
     type Ledger = TestLedger;
     type KeeperRebate = TestKeeperRebate;
+    type CollatorCompensation = ();
     type GuardianOrigin = TestGuardianOrigin;
     type ExecutionGuardOrigin = TestExecutionGuardOrigin;
     type VoidAuthority = TestVoidAuthority;

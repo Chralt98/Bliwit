@@ -622,6 +622,62 @@ impl Treasury {
         Ok(())
     }
 
+    /// Debit the dedicated collator-compensation line for one Housekeeping
+    /// distribution. Each authored-block share is rounded down against the
+    /// claimant, and the line is charged once for the exact sum of payouts.
+    /// This is an existing operational obligation, so it intentionally does
+    /// not pass through the discretionary outflow meters or reserve haircut.
+    pub fn collator_compensation(
+        &mut self,
+        shares: &[(AccountId, u32)],
+        amount_per_collator: Balance,
+        registered_collators: u32,
+    ) -> Result<Vec<(AccountId, Balance)>, Error> {
+        if amount_per_collator == 0 || registered_collators == 0 || shares.is_empty() {
+            return Ok(Vec::new());
+        }
+        let total_blocks = shares.iter().try_fold(0u128, |total, (_, blocks)| {
+            total
+                .checked_add(u128::from(*blocks))
+                .ok_or(Error::Overflow)
+        })?;
+        if total_blocks == 0 {
+            return Ok(Vec::new());
+        }
+        let total_pool = amount_per_collator
+            .checked_mul(Balance::from(registered_collators))
+            .ok_or(Error::Overflow)?;
+        let mut payouts = Vec::with_capacity(shares.len());
+        let mut total_payout = 0u128;
+        for (account, blocks) in shares {
+            if *blocks == 0 {
+                continue;
+            }
+            let payout = total_pool
+                .checked_mul(u128::from(*blocks))
+                .ok_or(Error::Overflow)?
+                / total_blocks;
+            if payout == 0 {
+                continue;
+            }
+            total_payout = total_payout.checked_add(payout).ok_or(Error::Overflow)?;
+            payouts.push((*account, payout));
+        }
+        if total_payout == 0 {
+            return Ok(Vec::new());
+        }
+        let idx = self.debitable_line(BudgetLine::OpsCollators, total_payout)?;
+        self.lines[idx].1 -= total_payout;
+        for (dest, amount) in &payouts {
+            self.events.push(Event::Spent {
+                line: BudgetLine::OpsCollators,
+                dest: *dest,
+                amount: *amount,
+            });
+        }
+        Ok(payouts)
+    }
+
     pub fn fund_budget_line(
         &mut self,
         origin: Origin,
@@ -1603,6 +1659,52 @@ mod tests {
         let before = t.clone();
         assert_eq!(t.proposer_reward(acct(9), 5), Err(Error::InsufficientFunds));
         assert_eq!(t, before);
+    }
+
+    #[test]
+    fn collator_compensation_rounds_each_share_down_and_debits_one_line() {
+        let mut t = Treasury::default();
+        t.lines.push((BudgetLine::OpsCollators, 4_000 * USDC));
+        let payouts = t
+            .collator_compensation(&[(acct(1), 2), (acct(2), 1), (acct(3), 0)], 2_000 * USDC, 2)
+            .unwrap();
+        assert_eq!(
+            payouts,
+            vec![(acct(1), 2_666_666_666), (acct(2), 1_333_333_333)]
+        );
+        assert_eq!(
+            t.line_balance(BudgetLine::OpsCollators),
+            4_000 * USDC - 3_999_999_999
+        );
+        assert!(t.events.iter().all(|event| matches!(
+            event,
+            Event::Spent {
+                line: BudgetLine::OpsCollators,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn collator_compensation_is_fail_static_when_the_line_is_unfunded() {
+        let mut t = Treasury::default();
+        let before = t.clone();
+        assert_eq!(
+            t.collator_compensation(&[(acct(1), 1)], COLLATOR_COMP_EPOCH, 1),
+            Err(Error::UnknownBudgetLine)
+        );
+        assert_eq!(t, before);
+    }
+
+    #[test]
+    fn collator_compensation_scales_by_registered_collators_including_zero_authors() {
+        let mut t = Treasury::default();
+        t.lines.push((BudgetLine::OpsCollators, 6_000 * USDC));
+        let payouts = t
+            .collator_compensation(&[(acct(1), 1), (acct(2), 0)], 2_000 * USDC, 3)
+            .unwrap();
+        assert_eq!(payouts, vec![(acct(1), 6_000 * USDC)]);
+        assert_eq!(t.line_balance(BudgetLine::OpsCollators), 0);
     }
 
     #[test]

@@ -4,10 +4,14 @@
 //! differential (Python M3 ≡ Rust core ≡ this pallet at default parameters).
 
 use crate::mock::*;
-use crate::{Error, Event, PayoutLine};
+use crate::{
+    CollatorAuthoredBlocks, CollatorAuthoredEpoch, CollatorAuthoredOverflowed,
+    CollatorAuthoredRegisteredCount, CollatorPendingEpoch, Error, Event, PayoutLine,
+    MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND,
+};
 use frame_support::{
     assert_err, assert_noop, assert_ok,
-    traits::{Hooks, StorageVersion},
+    traits::{ConstU32, Hooks, StorageVersion},
 };
 use futarchy_primitives::keeper::CrankClass;
 use futarchy_treasury_core::{
@@ -261,7 +265,7 @@ fn storage_v2_initializes_bootstrap_closure_and_community_allocation() {
 
             let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
 
-            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(2));
+            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(3));
             assert_eq!(
                 crate::BootstrapOpsFundingClosed::<Test>::get(),
                 treasury_armed,
@@ -308,7 +312,7 @@ fn storage_v2_try_runtime_current_version_is_an_idempotent_latch_noop() {
             let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
             let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
             <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
-            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(2));
+            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(3));
             assert!(crate::BootstrapOpsFundingClosed::<Test>::get());
         }
     });
@@ -316,7 +320,28 @@ fn storage_v2_try_runtime_current_version_is_an_idempotent_latch_noop() {
 
 #[cfg(feature = "try-runtime")]
 #[test]
-fn storage_v2_try_runtime_preserves_existing_v1_bootstrap_latch() {
+fn storage_v3_try_runtime_preserves_existing_v2_state() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(2).put::<Treasury>();
+        TreasuryArmedValue::set(false);
+        crate::BootstrapOpsFundingClosed::<Test>::put(true);
+        crate::CommunityDistributionRemaining::<Test>::put(123 * VIT);
+
+        let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
+        let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+        <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
+
+        assert_eq!(crate::BootstrapOpsFundingClosed::<Test>::get(), true);
+        assert_eq!(
+            crate::CommunityDistributionRemaining::<Test>::get(),
+            123 * VIT
+        );
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn storage_v3_try_runtime_preserves_existing_v1_bootstrap_latch() {
     new_test_ext().execute_with(|| {
         StorageVersion::new(1).put::<Treasury>();
         TreasuryArmedValue::set(true);
@@ -327,7 +352,11 @@ fn storage_v2_try_runtime_preserves_existing_v1_bootstrap_latch() {
         <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
 
         assert!(!crate::BootstrapOpsFundingClosed::<Test>::get());
-        assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(2));
+        assert_eq!(
+            crate::CommunityDistributionRemaining::<Test>::get(),
+            CommunityDistributionAmount::get()
+        );
+        assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(3));
     });
 }
 
@@ -577,9 +606,9 @@ fn pot_funding_failure_rolls_back_internal_credit_and_event() {
         set_pot_funding_failure(true);
         System::reset_events();
 
-        assert_noop!(
+        assert_eq!(
             Treasury::fund_budget_line(to(), BudgetLine::Keeper, 50 * USDC),
-            sp_runtime::DispatchError::Other("pot funding failed")
+            Err(sp_runtime::DispatchError::Other("pot funding failed"))
         );
 
         assert_eq!(crate::Pallet::<Test>::treasury().main_usdc, main_before);
@@ -896,6 +925,168 @@ fn proposer_reward_pays_from_the_rewards_line_and_is_fail_soft() {
 }
 
 #[test]
+fn note_collator_block_registers_mandatory_block_weight() {
+    funded_ext().execute_with(|| {
+        // `pallet_authorship` drives this callback from `on_initialize` with
+        // no reserved weight, so the callback must register its own
+        // benchmarked worst-case weight into the Mandatory class.
+        let before = frame_system::Pallet::<Test>::block_weight()
+            .get(frame_support::dispatch::DispatchClass::Mandatory)
+            .to_owned();
+        Treasury::note_collator_block(acc(7));
+        let after = frame_system::Pallet::<Test>::block_weight()
+            .get(frame_support::dispatch::DispatchClass::Mandatory)
+            .to_owned();
+        assert_eq!(
+            after,
+            before.saturating_add(
+                <<Test as crate::Config>::WeightInfo as crate::WeightInfo>::note_collator_block()
+            )
+        );
+    });
+}
+
+#[test]
+fn collator_compensation_pays_authored_shares_once_and_rounds_down() {
+    funded_ext().execute_with(|| {
+        reset_rebate_payout();
+        Treasury::note_collator_block(acc(7));
+        Treasury::note_collator_block(acc(7));
+        Treasury::note_collator_block(acc(8));
+        let before = Treasury::line_balance(BudgetLine::OpsCollators);
+
+        // Housekeeping pays the completed epoch; keep the current epoch open
+        // so authorship after the boundary is not discarded.
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+
+        assert_eq!(
+            rebate_payouts(),
+            vec![
+                (acc(7), 2_666_666_666, PayoutLine::OpsCollators),
+                (acc(8), 1_333_333_333, PayoutLine::OpsCollators),
+            ]
+        );
+        assert_eq!(
+            Treasury::line_balance(BudgetLine::OpsCollators),
+            before - 3_999_999_999
+        );
+        assert!(CollatorAuthoredBlocks::<Test>::get().is_empty());
+        assert!(CollatorAuthoredEpoch::<Test>::get().is_none());
+
+        // A block after the payout boundary belongs to the next pending
+        // accumulator and must not be dropped just because the prior epoch
+        // was already paid.
+        Treasury::note_collator_block(acc(9));
+        Treasury::pay_collator_compensation();
+        assert_eq!(rebate_payouts().len(), 2);
+        assert_eq!(CollatorAuthoredBlocks::<Test>::get().len(), 1);
+
+        set_epoch(2);
+        Treasury::pay_collator_compensation();
+        assert_eq!(rebate_payouts().len(), 3);
+        assert!(CollatorAuthoredBlocks::<Test>::get().is_empty());
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn collator_compensation_defers_when_custody_is_underfunded() {
+    funded_ext().execute_with(|| {
+        reset_rebate_payout();
+        set_rebate_pot_balance(PayoutLine::OpsCollators, 0);
+        Treasury::note_collator_block(acc(7));
+        let before = Treasury::treasury();
+
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+
+        assert_eq!(Treasury::treasury(), before);
+        assert_eq!(CollatorAuthoredBlocks::<Test>::get().len(), 1);
+        assert_eq!(CollatorAuthoredEpoch::<Test>::get(), Some(0));
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 4_000_000_000, PayoutLine::OpsCollators)]
+        );
+    });
+}
+
+#[test]
+fn collator_boundary_block_starts_a_separate_epoch_accumulator() {
+    funded_ext().execute_with(|| {
+        reset_rebate_payout();
+        set_epoch(0);
+        System::set_block_number(1);
+        CollatorBoundaryBlockValue::set(10);
+        Treasury::note_collator_block(acc(7));
+
+        // The authorship callback observes the boundary before the clock
+        // crank. The completed epoch is moved aside instead of being mixed
+        // with the first block of the new epoch.
+        System::set_block_number(10);
+        Treasury::note_collator_block(acc(8));
+        assert_eq!(CollatorPendingEpoch::<Test>::get(), Some(0));
+        assert_eq!(CollatorAuthoredEpoch::<Test>::get(), Some(1));
+        assert_eq!(
+            CollatorAuthoredBlocks::<Test>::get().as_slice(),
+            &[(acc(8), 1)]
+        );
+
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+        assert_eq!(rebate_payouts().len(), 1);
+        assert_eq!(CollatorAuthoredEpoch::<Test>::get(), Some(1));
+
+        CollatorBoundaryBlockValue::set(u32::MAX);
+        set_epoch(2);
+        Treasury::pay_collator_compensation();
+        assert_eq!(rebate_payouts().len(), 2);
+        assert!(CollatorPendingEpoch::<Test>::get().is_none());
+        assert!(CollatorAuthoredEpoch::<Test>::get().is_none());
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
+fn collator_compensation_uses_the_earning_epoch_registered_count_on_retry() {
+    funded_ext().execute_with(|| {
+        reset_rebate_payout();
+        set_registered_collator_count(5);
+        Treasury::note_collator_block(acc(7));
+        set_registered_collator_count(12);
+
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+
+        assert_eq!(
+            rebate_payouts(),
+            vec![(acc(7), 10_000 * USDC, PayoutLine::OpsCollators)]
+        );
+        assert!(CollatorAuthoredRegisteredCount::<Test>::get().is_none());
+    });
+}
+
+#[test]
+fn collator_compensation_fails_closed_on_accumulator_overflow() {
+    funded_ext().execute_with(|| {
+        for seed in 0..=MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND {
+            Treasury::note_collator_block(acc(seed as u8));
+        }
+        assert_eq!(
+            CollatorAuthoredBlocks::<Test>::get().len(),
+            MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND as usize
+        );
+        assert!(CollatorAuthoredOverflowed::<Test>::get());
+
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+        assert!(rebate_payouts().is_empty());
+        assert!(CollatorAuthoredOverflowed::<Test>::get());
+        assert!(Treasury::do_try_state().is_err());
+    });
+}
+
+#[test]
 fn payout_failure_drops_line_meter_and_events() {
     funded_ext().execute_with(|| {
         assert_ok!(Treasury::fund_budget_line(
@@ -1083,6 +1274,10 @@ mod renewal_dispatch_seam {
             0
         }
 
+        fn collator_comp_epoch() -> u128 {
+            2_000 * USDC
+        }
+
         fn coretime_dot_rate() -> u128 {
             10_000_000_000
         }
@@ -1128,6 +1323,7 @@ mod renewal_dispatch_seam {
         pub const DispatchCommunityDuration: u64 = 100;
         pub const DispatchCommunityMin: u128 = VIT;
         pub const DispatchMaxCommunitySchedules: u32 = 4_096;
+        pub const DispatchMaxCollatorCompensationEntries: u32 = 120;
     }
 
     impl pallet_futarchy_treasury::Config for DispatchTest {
@@ -1139,6 +1335,9 @@ mod renewal_dispatch_seam {
         type CommunityVestingDuration = DispatchCommunityDuration;
         type CommunityMinVestedTransfer = DispatchCommunityMin;
         type MaxCommunitySchedules = DispatchMaxCommunitySchedules;
+        type MaxCollatorCompensationEntries = DispatchMaxCollatorCompensationEntries;
+        type RegisteredCollatorCount = ConstU32<1>;
+        type CollatorEpoch = TestCollatorEpoch;
         type Params = DispatchParams;
         type CurrentEpoch = CurrentEpoch;
         type TreasuryPhase = ();
@@ -1974,7 +2173,7 @@ fn try_state_requires_v2_and_allows_armed_open_handover() {
 
         StorageVersion::new(0).put::<Treasury>();
         assert!(Treasury::do_try_state().is_err());
-        StorageVersion::new(2).put::<Treasury>();
+        StorageVersion::new(3).put::<Treasury>();
         assert_ok!(Treasury::do_try_state());
     });
 }

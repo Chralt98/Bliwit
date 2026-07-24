@@ -279,6 +279,13 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 			.saturating_add(T::DbWeight::get().writes(630))
 			.saturating_add(T::DbWeight::get().writes((1_u64).saturating_mul(n.into())))
 			.saturating_add(Weight::from_parts(0, 2753).saturating_mul(n.into()))
+			.saturating_add(Self::collator_compensation())
+	}
+	fn collator_compensation() -> Weight {
+		Weight::from_parts(1_800_000_000, 0)
+			.saturating_add(Weight::from_parts(0, 48000))
+			.saturating_add(T::DbWeight::get().reads(245))
+			.saturating_add(T::DbWeight::get().writes(245))
 	}
 	/// Storage: `Constitution::Params` (r:41 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
@@ -403,6 +410,7 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 			.saturating_add(Weight::from_parts(0, 183055))
 			.saturating_add(T::DbWeight::get().reads(234))
 			.saturating_add(T::DbWeight::get().writes(135))
+			.saturating_add(Self::collator_compensation())
 	}
 	/// Storage: `Constitution::Params` (r:41 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
@@ -521,6 +529,7 @@ impl<T: frame_system::Config> pallet_epoch::WeightInfo for WeightInfo<T> {
 			.saturating_add(T::DbWeight::get().writes(687))
 			.saturating_add(T::DbWeight::get().writes((52_u64).saturating_mul(n.into())))
 			.saturating_add(Weight::from_parts(0, 30754).saturating_mul(n.into()))
+			.saturating_add(Self::collator_compensation())
 	}
 	/// Storage: `Constitution::Params` (r:34 w:0)
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)

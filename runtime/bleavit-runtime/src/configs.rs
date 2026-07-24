@@ -1274,9 +1274,17 @@ impl cumulus_pallet_xcm::Config for Runtime {
 }
 
 impl cumulus_pallet_aura_ext::Config for Runtime {}
+
+pub struct RuntimeCollatorAuthorship;
+impl pallet_authorship::EventHandler<AccountId, BlockNumber> for RuntimeCollatorAuthorship {
+    fn note_author(author: AccountId) {
+        FutarchyTreasury::note_collator_block(author);
+    }
+}
+
 impl pallet_authorship::Config for Runtime {
     type FindAuthor = pallet_session::FindAccountFromAuthorIndex<Self, Aura>;
-    type EventHandler = (CollatorSelection,);
+    type EventHandler = (CollatorSelection, RuntimeCollatorAuthorship);
 }
 parameter_types! {
     pub const Period: u32 = 6 * (60 * 60 * 1_000 / kernel::MILLISECS_PER_BLOCK as u32);
@@ -2162,6 +2170,10 @@ pub fn treasury_oracle_account() -> AccountId {
 /// rebate pots so a crank budget cannot consume proposer rewards.
 pub fn treasury_rewards_account() -> AccountId {
     TreasuryPalletId::get().into_sub_account_truncating(*b"REWARDS_")
+}
+/// 08 §1.1 OPS_COLLATOR USDC custody pot, isolated from discretionary ops.
+pub fn treasury_collators_account() -> AccountId {
+    TreasuryPalletId::get().into_sub_account_truncating(*b"COLLATOR")
 }
 
 pub struct EnsureMarketAccount;
@@ -4410,6 +4422,13 @@ impl pallet_epoch::ProposalBondCurrency<AccountId> for RuntimeProposalBond {
     }
 }
 
+pub struct RuntimeCollatorCompensation;
+impl pallet_epoch::CollatorCompensation for RuntimeCollatorCompensation {
+    fn pay() {
+        FutarchyTreasury::pay_collator_compensation();
+    }
+}
+
 impl pallet_epoch::Config for Runtime {
     type Params = RuntimeEpochParams;
     type Market = RuntimeMarketAccess;
@@ -4424,6 +4443,7 @@ impl pallet_epoch::Config for Runtime {
     type Welfare = RuntimeEpochWelfare;
     type Ledger = RuntimeEpochLedger;
     type KeeperRebate = FutarchyTreasury;
+    type CollatorCompensation = RuntimeCollatorCompensation;
     type GuardianOrigin = pallet_origins::EnsureGuardianHold;
     type ExecutionGuardOrigin = EnsureExecutionGuardAccount;
     type VoidAuthority = pallet_origins::EnsureEmergencyPlaybook;
@@ -5098,6 +5118,10 @@ impl pallet_futarchy_treasury::TreasuryParams for TreasuryParams {
         }
     }
 
+    fn collator_comp_epoch() -> Balance {
+        balance_param(b"collator.comp")
+    }
+
     fn coretime_dot_rate() -> Balance {
         balance_param(b"ops.ct_dot_rate")
     }
@@ -5126,6 +5150,7 @@ impl pallet_futarchy_treasury::RebatePayout<AccountId> for TreasuryRebatePayout 
             pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
             pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
             pallet_futarchy_treasury::PayoutLine::Rewards => treasury_rewards_account(),
+            pallet_futarchy_treasury::PayoutLine::OpsCollators => treasury_collators_account(),
         };
         <ForeignAssets as Mutate<AccountId>>::transfer(
             usdc_location(),
@@ -5142,6 +5167,7 @@ impl pallet_futarchy_treasury::RebatePayout<AccountId> for TreasuryRebatePayout 
             pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
             pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
             pallet_futarchy_treasury::PayoutLine::Rewards => treasury_rewards_account(),
+            pallet_futarchy_treasury::PayoutLine::OpsCollators => treasury_collators_account(),
         };
         <ForeignAssets as Inspect<AccountId>>::balance(usdc_location(), &source)
     }
@@ -5159,6 +5185,7 @@ impl pallet_futarchy_treasury::PotFunding<AccountId> for TreasuryPotFunding {
             pallet_futarchy_treasury::PayoutLine::Keeper => treasury_keeper_account(),
             pallet_futarchy_treasury::PayoutLine::Oracle => treasury_oracle_account(),
             pallet_futarchy_treasury::PayoutLine::Rewards => treasury_rewards_account(),
+            pallet_futarchy_treasury::PayoutLine::OpsCollators => treasury_collators_account(),
         };
         <ForeignAssets as Mutate<AccountId>>::transfer(
             usdc_location(),
@@ -5303,6 +5330,28 @@ impl pallet_futarchy_treasury::TreasuryPhase for RuntimeTreasuryPhase {
     }
 }
 
+/// Live session size used to scale the per-registered-collator stipend. The
+/// active session includes registered collators that authored zero blocks.
+pub struct RuntimeRegisteredCollatorCount;
+impl Get<u32> for RuntimeRegisteredCollatorCount {
+    fn get() -> u32 {
+        match u32::try_from(Session::validators().len()) {
+            Ok(count) => count,
+            Err(_) => u32::MAX,
+        }
+    }
+}
+
+/// Boundary-aware epoch projection for the authorship callback. The
+/// persisted `EpochOf` can still name the completed epoch when the callback
+/// runs before the first clock-cranking extrinsic in a boundary block.
+pub struct RuntimeCollatorEpoch;
+impl pallet_futarchy_treasury::CollatorEpochProvider for RuntimeCollatorEpoch {
+    fn epoch_at(block: futarchy_primitives::BlockNumber) -> futarchy_primitives::EpochId {
+        pallet_epoch::Pallet::<Runtime>::epoch_for_block(block)
+    }
+}
+
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
     type CommunityDistributionOrigin = pallet_origins::EnsureFutarchyParam;
@@ -5312,6 +5361,10 @@ impl pallet_futarchy_treasury::Config for Runtime {
     type CommunityVestingDuration = CommunityVestingDuration;
     type CommunityMinVestedTransfer = CommunityMinVestedTransfer;
     type MaxCommunitySchedules = MaxCommunitySchedules;
+    type MaxCollatorCompensationEntries =
+        ConstU32<{ pallet_futarchy_treasury::MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND }>;
+    type RegisteredCollatorCount = RuntimeRegisteredCollatorCount;
+    type CollatorEpoch = RuntimeCollatorEpoch;
     type Params = TreasuryParams;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type TreasuryPhase = RuntimeTreasuryPhase;
@@ -7205,6 +7258,7 @@ pub(crate) fn prime_keeper_rebate_worst_case() {
             pallet_futarchy_treasury::BudgetLine::Keeper,
             pallet_futarchy_treasury::BudgetLine::Oracle,
             pallet_futarchy_treasury::BudgetLine::Rewards,
+            pallet_futarchy_treasury::BudgetLine::OpsCollators,
         ] {
             if let Some((_, balance)) = state.lines.iter_mut().find(|(stored, _)| *stored == line) {
                 *balance = BENCHMARK_REBATE_LINE_BALANCE;
@@ -7223,6 +7277,7 @@ pub(crate) fn prime_keeper_rebate_worst_case() {
         treasury_keeper_account(),
         treasury_oracle_account(),
         treasury_rewards_account(),
+        treasury_collators_account(),
     ] {
         let balance = <ForeignAssets as Inspect<AccountId>>::balance(usdc_location(), &pot);
         if balance < BENCHMARK_REBATE_LINE_BALANCE {

@@ -1857,7 +1857,7 @@ fn composed_runtime_upgrade_migrates_all_reserve_probe_v0_state_and_passes_try_s
         assert!(pallet_futarchy_treasury::State::<Runtime>::get().reserve_impaired);
         assert_eq!(
             StorageVersion::get::<crate::FutarchyTreasury>(),
-            StorageVersion::new(2),
+            StorageVersion::new(3),
         );
         assert!(!pallet_futarchy_treasury::BootstrapOpsFundingClosed::<
             Runtime,

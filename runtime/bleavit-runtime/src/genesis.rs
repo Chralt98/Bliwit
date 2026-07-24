@@ -106,6 +106,11 @@ pub fn usdc_genesis_endowments() -> Vec<(Location, AccountId, Balance)> {
             amount,
         ),
         (asset, crate::configs::treasury_rewards_account(), amount),
+        (
+            usdc_location(),
+            crate::configs::treasury_collators_account(),
+            amount,
+        ),
     ]
 }
 
