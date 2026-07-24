@@ -5611,11 +5611,17 @@ fn metadata_exposes_only_allowed_attestor_and_guardian_constants() {
                         .iter()
                         .find(|pallet| pallet.name == pallet_name)
                         .expect("registry pallet is present");
-                    let delay = registry
+                    let archive_delays = registry
                         .constants
                         .iter()
-                        .find(|constant| constant.name == "ArchiveDelay")
-                        .expect("registry ArchiveDelay is metadata-readable");
+                        .filter(|constant| constant.name == "ArchiveDelay")
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        archive_delays.len(),
+                        1,
+                        "registry exposes exactly one ArchiveDelay metadata constant"
+                    );
+                    let delay = archive_delays[0];
                     assert_eq!(
                         u32::decode(&mut &delay.value[..]).expect("registry archive delay is u32"),
                         crate::configs::RegistryArchiveDelay::get()
