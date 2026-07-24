@@ -16343,6 +16343,38 @@ fn baseline_carry_reads_the_sealed_market_snapshot_before_late_summary() {
 }
 
 #[test]
+fn baseline_carry_rejects_a_voided_previous_cohort() {
+    use futarchy_primitives::{BoundedVec, CohortSummary, FixedU64};
+    use pallet_epoch::MarketAccess;
+
+    development_ext().execute_with(|| {
+        let previous = 1;
+        let sealed = FixedU64(610_000_000);
+        pallet_market::SealedBaselineTwap::<Runtime>::insert(previous, sealed);
+        pallet_epoch::RecentCohortSummaries::<Runtime>::mutate(|recent| {
+            assert!(recent
+                .try_push(CohortSummary {
+                    epoch: previous,
+                    s_1e9: FixedU64(500_000_000),
+                    baseline_twap_1e9: sealed,
+                    proposals: BoundedVec::new(),
+                    voided: true,
+                    settled_at: 1,
+                })
+                .is_ok());
+        });
+
+        assert_eq!(
+            <crate::configs::RuntimeMarketAccess as MarketAccess<AccountId>>::previous_settled_baseline_twap(
+                previous.saturating_add(1),
+            ),
+            None,
+            "a voided cohort must not provide a Baseline carry value"
+        );
+    });
+}
+
+#[test]
 fn view_decision_stats_returns_none_for_unknown_or_incomplete_backing() {
     development_ext().execute_with(|| {
         assert_eq!(crate::views::decision_stats(999_999), None);

@@ -3453,6 +3453,16 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
         // is too late for an earlier decision in the next epoch; the market
         // snapshot is captured at the immutable seal boundary and retained
         // with BaselineMarketOf until reap.
+        // A cohort VOID is not a settled measurement (05 §5.3, §7(5)); its
+        // archived summary therefore invalidates the sealed snapshot as a
+        // carry source. Keep the absent-summary path for the pre-finalization
+        // next-epoch decision that SQ-88 explicitly supports.
+        if pallet_epoch::RecentCohortSummaries::<Runtime>::get()
+            .into_iter()
+            .any(|summary| summary.epoch == previous && summary.voided)
+        {
+            return None;
+        }
         pallet_market::Pallet::<Runtime>::sealed_baseline_twap(previous)
     }
 }
