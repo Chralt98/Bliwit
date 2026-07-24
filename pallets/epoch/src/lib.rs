@@ -1007,7 +1007,7 @@ pub mod pallet {
             let params = Self::live_params()?;
             let now = Self::now();
             let mut advanced = false;
-            let mut entered_housekeeping = false;
+            let mut crossed_epoch = false;
             let result = frame_support::storage::with_storage_layer(|| {
                 Self::mutate(|state, ledger| {
                     state.horizon_k = params.horizon_k;
@@ -1020,8 +1020,7 @@ pub mod pallet {
                         state.epoch.length,
                     );
                     Self::sync_clock(state, now)?;
-                    entered_housekeeping = clock_before.1 != EpochPhase::Housekeeping
-                        && state.epoch.phase == EpochPhase::Housekeeping;
+                    crossed_epoch = clock_before.0 != state.epoch.index;
                     let entered_seed =
                         clock_before.1 != EpochPhase::Seed && state.epoch.phase == EpochPhase::Seed;
                     if entered_seed {
@@ -1277,10 +1276,11 @@ pub mod pallet {
                     .map_err(|_| Error::<T>::Welfare)?;
                 Ok(())
             });
-            // EpochOf is persisted by the completed state mutation before the
-            // compensation sink reads CurrentEpoch. This closes the Housekeeping
-            // boundary over the completed epoch rather than the one just entered.
-            if result.is_ok() && entered_housekeeping {
+            // The Housekeeping phase belongs to the epoch that just ended. Pay
+            // only after the clock crossing has persisted `EpochOf`, so the
+            // compensation sink observes `CurrentEpoch = completed + 1` and
+            // its completed-epoch guard cannot suppress the payout.
+            if result.is_ok() && crossed_epoch {
                 T::CollatorCompensation::pay();
             }
             if result.is_ok() && advanced {

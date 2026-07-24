@@ -1282,12 +1282,12 @@ pub mod pallet {
             });
         }
 
-        /// Pay the bounded authored-share accumulator during Housekeeping.
-        /// The epoch pallet invokes this exactly on a phase entry; if a prior
-        /// payout is still pending, this method pays that older accumulator
-        /// first. Every custody transfer and the accounting/map cleanup share
-        /// one storage transaction, so a partial payout cannot create an
-        /// unbacked claimant.
+        /// Pay the bounded authored-share accumulator at the completed-epoch
+        /// Housekeeping boundary. The epoch pallet invokes this after the
+        /// clock crosses into the next epoch, so the completed-epoch guard is
+        /// meaningful and a failed custody transfer leaves the accumulator for
+        /// retry. Every transfer and accounting/map cleanup share one storage
+        /// transaction, so a partial payout cannot create an unbacked claimant.
         pub fn pay_collator_compensation() {
             let Some(tracked_epoch) = CollatorAuthoredEpoch::<T>::get() else {
                 return;
