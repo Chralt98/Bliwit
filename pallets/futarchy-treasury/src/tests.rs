@@ -6,7 +6,7 @@
 use crate::mock::*;
 use crate::{
     CollatorAuthoredBlocks, CollatorAuthoredEpoch, CollatorAuthoredOverflowed,
-    CollatorAuthoredRegisteredCount, Error, Event, PayoutLine,
+    CollatorAuthoredRegisteredCount, CollatorPendingEpoch, Error, Event, PayoutLine,
     MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND,
 };
 use frame_support::{
@@ -990,6 +990,42 @@ fn collator_compensation_defers_when_custody_is_underfunded() {
 }
 
 #[test]
+fn collator_boundary_block_starts_a_separate_epoch_accumulator() {
+    funded_ext().execute_with(|| {
+        reset_rebate_payout();
+        set_epoch(0);
+        System::set_block_number(1);
+        CollatorBoundaryBlockValue::set(10);
+        Treasury::note_collator_block(acc(7));
+
+        // The authorship callback observes the boundary before the clock
+        // crank. The completed epoch is moved aside instead of being mixed
+        // with the first block of the new epoch.
+        System::set_block_number(10);
+        Treasury::note_collator_block(acc(8));
+        assert_eq!(CollatorPendingEpoch::<Test>::get(), Some(0));
+        assert_eq!(CollatorAuthoredEpoch::<Test>::get(), Some(1));
+        assert_eq!(
+            CollatorAuthoredBlocks::<Test>::get().as_slice(),
+            &[(acc(8), 1)]
+        );
+
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+        assert_eq!(rebate_payouts().len(), 1);
+        assert_eq!(CollatorAuthoredEpoch::<Test>::get(), Some(1));
+
+        CollatorBoundaryBlockValue::set(u32::MAX);
+        set_epoch(2);
+        Treasury::pay_collator_compensation();
+        assert_eq!(rebate_payouts().len(), 2);
+        assert!(CollatorPendingEpoch::<Test>::get().is_none());
+        assert!(CollatorAuthoredEpoch::<Test>::get().is_none());
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+#[test]
 fn collator_compensation_uses_the_earning_epoch_registered_count_on_retry() {
     funded_ext().execute_with(|| {
         reset_rebate_payout();
@@ -1279,6 +1315,7 @@ mod renewal_dispatch_seam {
         type MaxCommunitySchedules = DispatchMaxCommunitySchedules;
         type MaxCollatorCompensationEntries = DispatchMaxCollatorCompensationEntries;
         type RegisteredCollatorCount = ConstU32<1>;
+        type CollatorEpoch = TestCollatorEpoch;
         type Params = DispatchParams;
         type CurrentEpoch = CurrentEpoch;
         type TreasuryPhase = ();

@@ -229,6 +229,7 @@ impl pallet_futarchy_treasury::Config for Test {
     type MaxCommunitySchedules = TestMaxCommunitySchedules;
     type MaxCollatorCompensationEntries = TestMaxCollatorCompensationEntries;
     type RegisteredCollatorCount = TestRegisteredCollatorCount;
+    type CollatorEpoch = ();
     type Params = TestTreasuryParams;
     type CurrentEpoch = CurrentEpoch;
     type TreasuryPhase = ();
