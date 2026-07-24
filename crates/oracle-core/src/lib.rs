@@ -567,6 +567,12 @@ impl Oracle {
     ) -> Result<(), Error> {
         let (component, epoch) = (key.component, key.epoch);
         let idx = self.find_round(key).ok_or(Error::RoundNotFound)?;
+        // Challenges settle through the default path, so they must obey the
+        // same component-value grid as reports and adjudications (05 §4.4).
+        ensure!(
+            counter_value.0 <= COMPONENT_VALUE_MAX,
+            Error::ValueOutOfBounds
+        );
         let r = &mut self.rounds[idx];
         // Half-open window `[open, deadline)` — a challenge at the deadline block
         // must not race the close crank that treats that block as mature
@@ -905,7 +911,10 @@ impl Oracle {
             self.rounds[idx].round >= schedule.round_cap,
             Error::WindowOpen
         );
-        ensure!(self.rounds[idx].challenger.is_some(), Error::QuorumPending);
+        ensure!(
+            self.rounds[idx].challenger.is_some() && self.rounds[idx].counter_value.is_some(),
+            Error::QuorumPending
+        );
         self.events.push(Event::AdjudicationRequested {
             component,
             epoch,
@@ -937,7 +946,10 @@ impl Oracle {
             self.rounds[idx].round >= schedule.round_cap,
             Error::WindowOpen
         );
-        ensure!(self.rounds[idx].challenger.is_some(), Error::QuorumPending);
+        ensure!(
+            self.rounds[idx].challenger.is_some() && self.rounds[idx].counter_value.is_some(),
+            Error::QuorumPending
+        );
         if reporter_wrong {
             self.record_reporter_offense(self.rounds[idx].reporter)?;
         }
@@ -2020,6 +2032,49 @@ mod tests {
     }
 
     #[test]
+    fn terminal_round_requires_a_live_challenge_for_adjudication() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(14, 51, 3);
+        report!(
+            o,
+            acct(1),
+            1,
+            k.component,
+            k.epoch,
+            k.spec_version,
+            FixedU64(620_000_000),
+            h(9),
+            400_000_000_000,
+            100,
+            3,
+        )
+        .unwrap();
+        for _ in 1..ORC_ROUNDS {
+            let deadline = round_deadline(&o, k);
+            o.challenge(acct(4), deadline - 1, k, FixedU64(440_000_000), h(10))
+                .unwrap();
+            o.counter_report(
+                acct(1),
+                deadline - 1,
+                k,
+                FixedU64(440_000_000),
+                h(11),
+                &OracleParams::DEFAULT,
+            )
+            .unwrap();
+        }
+        assert_eq!(o.rounds[0].round, ORC_ROUNDS);
+        assert_eq!(o.rounds[0].challenger, Some(acct(4)));
+        assert!(o.rounds[0].counter_value.is_none());
+        assert_eq!(o.request_adjudication(k, 1), Err(Error::QuorumPending));
+        assert_eq!(
+            o.adjudicate(Origin::OracleResolution, k, FixedU64(440_000_000), false,),
+            Err(Error::QuorumPending)
+        );
+    }
+
+    #[test]
     fn recompute_and_adjudication_close_rounds_with_origin_check_and_offense_discipline() {
         let mut o = Oracle::default();
         o.recomputable_components.push((7, 3));
@@ -2432,6 +2487,40 @@ mod tests {
             report!(o, acct(1), 1, 1, 1, 2, FixedU64(1), h(1), 0, 10, 1),
             Err(Error::SpecVersionMismatch)
         );
+    }
+
+    #[test]
+    fn challenge_rejects_values_outside_component_grid() {
+        let mut o = Oracle::default();
+        o.register_reporter(acct(1), 0).unwrap();
+        let k = key(7, 41, 3);
+        report!(
+            o,
+            acct(1),
+            1,
+            k.component,
+            k.epoch,
+            k.spec_version,
+            FixedU64(620_000_000),
+            h(9),
+            400_000_000_000,
+            100,
+            3,
+        )
+        .unwrap();
+        let deadline = round_deadline(&o, k);
+        assert_eq!(
+            o.challenge(
+                acct(4),
+                deadline - 1,
+                k,
+                FixedU64(COMPONENT_VALUE_MAX + 1),
+                h(10),
+            ),
+            Err(Error::ValueOutOfBounds)
+        );
+        assert!(o.rounds[0].challenger.is_none());
+        assert!(o.rounds[0].counter_value.is_none());
     }
 
     #[test]

@@ -8,13 +8,3 @@
 # runtime/bleavit-runtime/src/weights/pallet_constitution.rs set_param: storage proof grew after adding validation
 # runtime/bleavit-runtime/src/weights/pallet_retired.rs *: pallet retired by approved migration
 #
-runtime/bleavit-runtime/src/weights/pallet_guardian.rs on_initialize: B18's failed DelayOnce retention checks add a bounded veto-review join to the per-block maintenance sweep; the conservative saturated envelope remains until the next full guardian benchmark refresh.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs adjudicate: A12 settlement now persists bounded round-bond custody instructions and the money-settled retention marker; the conservative smoke-generated envelope is acknowledged pending a full benchmark refresh.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs challenge: A12 challenge now persists durable challenger/cumulative bond state and the bounded custody delta; the conservative smoke-generated envelope is acknowledged pending a full benchmark refresh.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs crank_round_close: A12 close now scans and persists bounded money-settled/custody state; the conservative smoke-generated envelope is acknowledged pending a full benchmark refresh.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs deregister_reporter: A12 try-state and custody cleanup account for the bounded round-bond liability surface; the conservative smoke-generated envelope is acknowledged pending a full benchmark refresh.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs recompute_proof: A12 settlement now persists bounded round-bond custody instructions and the money-settled retention marker; the conservative smoke-generated envelope is acknowledged pending a full benchmark refresh.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs register_reporter: A12 registration/try-state now includes bounded round-bond custody liability accounting; the conservative smoke-generated envelope is acknowledged pending a full benchmark refresh.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs register_watchtower: A12 try-state now includes bounded round-bond custody liability accounting; the conservative smoke-generated envelope is acknowledged pending a full benchmark refresh.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs report: A12 report now persists the bounded cumulative reporter-bond liability; the conservative smoke-generated envelope is acknowledged pending a full benchmark refresh.
-runtime/bleavit-runtime/src/weights/pallet_oracle.rs reserve_probe_result: A12 oracle aggregate persistence includes the bounded money-settled/custody state; the conservative smoke-generated envelope is acknowledged pending a full benchmark refresh.

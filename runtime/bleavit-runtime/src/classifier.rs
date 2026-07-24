@@ -139,8 +139,14 @@ fn derive_resource_inner(
             ..
         }) => keyed_resource(0x07, &recipient.encode()),
         RuntimeCall::FutarchyTreasury(
-            pallet_futarchy_treasury::Call::create_community_schedule { beneficiary, .. },
-        ) => keyed_resource(0x07, &beneficiary.encode()),
+            pallet_futarchy_treasury::Call::create_community_schedule { beneficiary: _, .. },
+        ) => {
+            // 05 §1.4: every community schedule mutates the singleton
+            // allocation/count pool, regardless of beneficiary.  A keyed
+            // beneficiary lock would let two proposals pass T5 concurrently
+            // and make the second one fail after adoption.
+            singleton_resource(0x0C)
+        }
         RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::cancel_stream { id }) => {
             keyed_resource(0x08, &id.encode())
         }

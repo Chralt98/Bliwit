@@ -4502,7 +4502,7 @@ fn treasury_collator_compensation_uses_authored_share_and_dedicated_custody() {
         assert!(<ForeignAssets as FungiblesMutate<AccountId>>::mint_into(
             usdc_location(),
             &pot,
-            allocation + retained,
+            2 * allocation + retained,
         )
         .is_ok());
         pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
@@ -4511,24 +4511,33 @@ fn treasury_collator_compensation_uses_authored_share_and_dedicated_custody() {
                 .iter_mut()
                 .find(|(line, _)| *line == BudgetLine::OpsCollators)
             {
-                *balance = allocation;
+                *balance = 2 * allocation;
             } else {
-                let _ = state.lines.try_push((BudgetLine::OpsCollators, allocation));
+                let _ = state
+                    .lines
+                    .try_push((BudgetLine::OpsCollators, 2 * allocation));
             }
         });
 
         FutarchyTreasury::note_collator_block(first.clone());
         FutarchyTreasury::note_collator_block(first.clone());
         FutarchyTreasury::note_collator_block(second.clone());
-        FutarchyTreasury::pay_collator_compensation();
+        // The Housekeeping boundary crosses the epoch clock first; the
+        // persisted callback then settles the completed epoch.
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        System::set_block_number(schedule.epoch_start_block.saturating_add(schedule.length));
+        assert_ok!(Epoch::tick(
+            RuntimeOrigin::signed(account(79)),
+            Default::default()
+        ));
 
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &first),
-            allocation.saturating_mul(2) / 3
+            allocation.saturating_mul(4) / 3
         );
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &second),
-            allocation / 3
+            allocation.saturating_mul(2) / 3
         );
         assert_eq!(
             ForeignAssets::balance(usdc_location(), &pot),
@@ -4547,6 +4556,30 @@ fn treasury_collator_compensation_uses_authored_share_and_dedicated_custody() {
             ),
             2 * retained + 1
         );
+    });
+}
+
+#[test]
+fn treasury_collator_boundary_authorship_uses_the_next_epoch_accumulator() {
+    use pallet_futarchy_treasury::{
+        CollatorAuthoredBlocks, CollatorAuthoredEpoch, CollatorPendingEpoch,
+    };
+
+    development_ext().execute_with(|| {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        let boundary = schedule.epoch_start_block.saturating_add(schedule.length);
+        let first = account(77);
+        let second = account(78);
+
+        System::set_block_number(boundary.saturating_sub(1));
+        FutarchyTreasury::note_collator_block(first);
+        System::set_block_number(boundary);
+        FutarchyTreasury::note_collator_block(second);
+
+        assert_eq!(CollatorPendingEpoch::<Runtime>::get(), Some(epoch));
+        assert_eq!(CollatorAuthoredEpoch::<Runtime>::get(), Some(epoch + 1));
+        assert_eq!(CollatorAuthoredBlocks::<Runtime>::get().len(), 1);
     });
 }
 
@@ -5602,11 +5635,17 @@ fn metadata_exposes_only_allowed_attestor_and_guardian_constants() {
                         .iter()
                         .find(|pallet| pallet.name == pallet_name)
                         .expect("registry pallet is present");
-                    let delay = registry
+                    let archive_delays = registry
                         .constants
                         .iter()
-                        .find(|constant| constant.name == "ArchiveDelay")
-                        .expect("registry ArchiveDelay is metadata-readable");
+                        .filter(|constant| constant.name == "ArchiveDelay")
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        archive_delays.len(),
+                        1,
+                        "registry exposes exactly one ArchiveDelay metadata constant"
+                    );
+                    let delay = archive_delays[0];
                     assert_eq!(
                         u32::decode(&mut &delay.value[..]).expect("registry archive delay is u32"),
                         crate::configs::RegistryArchiveDelay::get()
@@ -13753,9 +13792,9 @@ fn canonical_resource_key_universe_has_no_semantic_collisions() {
             pallet_constitution::Capability::SetReleaseChannel,
             pallet_constitution::Capability::AuthorizeUpgrade,
             pallet_constitution::Capability::TreasurySpend,
-            pallet_constitution::Capability::InsuranceSweep,
             pallet_constitution::Capability::OracleConfig,
             pallet_constitution::Capability::MarketTemplate,
+            pallet_constitution::Capability::InsuranceSweep,
         ];
         for class in classes {
             for capability in fixed_capabilities {
@@ -16348,6 +16387,38 @@ fn baseline_carry_reads_the_sealed_market_snapshot_before_late_summary() {
             ),
             None,
             "a late cohort summary must not substitute for a missing sealed window"
+        );
+    });
+}
+
+#[test]
+fn baseline_carry_rejects_a_voided_previous_cohort() {
+    use futarchy_primitives::{BoundedVec, CohortSummary, FixedU64};
+    use pallet_epoch::MarketAccess;
+
+    development_ext().execute_with(|| {
+        let previous = 1;
+        let sealed = FixedU64(610_000_000);
+        pallet_market::SealedBaselineTwap::<Runtime>::insert(previous, sealed);
+        pallet_epoch::RecentCohortSummaries::<Runtime>::mutate(|recent| {
+            assert!(recent
+                .try_push(CohortSummary {
+                    epoch: previous,
+                    s_1e9: FixedU64(500_000_000),
+                    baseline_twap_1e9: sealed,
+                    proposals: BoundedVec::new(),
+                    voided: true,
+                    settled_at: 1,
+                })
+                .is_ok());
+        });
+
+        assert_eq!(
+            <crate::configs::RuntimeMarketAccess as MarketAccess<AccountId>>::previous_settled_baseline_twap(
+                previous.saturating_add(1),
+            ),
+            None,
+            "a voided cohort must not provide a Baseline carry value"
         );
     });
 }

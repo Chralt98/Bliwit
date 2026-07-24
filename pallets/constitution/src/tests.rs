@@ -12,6 +12,7 @@ use crate::{
 };
 use frame_support::dispatch::DispatchResult;
 use frame_support::{assert_noop, assert_ok, traits::StorageVersion};
+use parity_scale_codec::Encode;
 use sp_runtime::DispatchError;
 
 use futarchy_primitives::{ParamKey, ProposalClass};
@@ -21,6 +22,16 @@ const SLOTS_KEY: &[u8] = b"epoch.slots"; // META class, Δ=2 abs, cooldown 1
 const LENGTH_KEY: &[u8] = b"epoch.length"; // META class, Δ=10 %, cooldown 2
 const KEEPER_KEY: &[u8] = b"keeper.budget"; // PARAM class, Δ=×2, cooldown 1 (13 rule 6 key)
 const HORIZON_KEY: &[u8] = b"epoch.horizon_k"; // META+values class, Δ=1 abs, cooldown 4
+
+#[test]
+fn error_scale_discriminants_are_append_only() {
+    // Existing DispatchError bytes must remain decodable after SQ-303 adds
+    // its temporary admission error.
+    assert_eq!(Error::<Test>::MetaBoundViolation.encode(), vec![16]);
+    assert_eq!(Error::<Test>::TryStateViolation.encode(), vec![17]);
+    assert_eq!(Error::<Test>::NavFloorUnmet.encode(), vec![18]);
+    assert_eq!(Error::<Test>::BudgetDerivationRequired.encode(), vec![19]);
+}
 
 /// A valid 168-byte D-14 layout with recognizable field values.
 fn channel_bytes() -> [u8; RELEASE_CHANNEL_LEN] {
@@ -1115,13 +1126,13 @@ fn shell_and_core_agree_on_the_same_operation_sequence() {
         // set_param
         assert_ok!(Constitution::set_param(
             RuntimeOrigin::signed(PARAM_ACC),
-            key16(OBS_KEY),
-            ParamValue::U32(12)
+            key16(b"mkt.fee"),
+            ParamValue::Perbill(4_000_000)
         ));
         core.dispatch_set_param(
             ConstitutionOrigin::FutarchyParam,
-            key16(OBS_KEY),
-            ParamValue::U32(12),
+            key16(b"mkt.fee"),
+            ParamValue::Perbill(4_000_000),
             1,
             1,
         )
