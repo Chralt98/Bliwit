@@ -1126,13 +1126,13 @@ fn shell_and_core_agree_on_the_same_operation_sequence() {
         // set_param
         assert_ok!(Constitution::set_param(
             RuntimeOrigin::signed(PARAM_ACC),
-            key16(OBS_KEY),
-            ParamValue::U32(12)
+            key16(b"mkt.fee"),
+            ParamValue::Perbill(4_000_000)
         ));
         core.dispatch_set_param(
             ConstitutionOrigin::FutarchyParam,
-            key16(OBS_KEY),
-            ParamValue::U32(12),
+            key16(b"mkt.fee"),
+            ParamValue::Perbill(4_000_000),
             1,
             1,
         )

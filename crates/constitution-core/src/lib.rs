@@ -717,13 +717,13 @@ impl ConstitutionState {
         }
     }
 
-    pub fn set_param(
-        &mut self,
+    fn checked_set_param(
+        &self,
         key: ParamKey,
         next: ParamValue,
         epoch: u32,
         block: BlockNumber,
-    ) -> Result<(), Error> {
+    ) -> Result<(usize, ParamRecord), Error> {
         let index = self
             .params
             .iter()
@@ -751,6 +751,17 @@ impl ConstitutionState {
                 _ => return Err(Error::WrongType),
             }
         }
+        Ok((index, updated))
+    }
+
+    pub fn set_param(
+        &mut self,
+        key: ParamKey,
+        next: ParamValue,
+        epoch: u32,
+        block: BlockNumber,
+    ) -> Result<(), Error> {
+        let (index, updated) = self.checked_set_param(key, next, epoch, block)?;
         self.params[index] = updated;
         Ok(())
     }
@@ -769,7 +780,13 @@ impl ConstitutionState {
             .find(|r| r.key == key)
             .ok_or(Error::UnknownParam)?;
         authorize_param_update(origin, record, next)?;
-        self.set_param(key, next, epoch, block)
+        let (index, updated) = self.checked_set_param(key, next, epoch, block)?;
+        ensure!(
+            !rederive_budgets_required(key, record.value, next),
+            Error::BudgetDerivationRequired
+        );
+        self.params[index] = updated;
+        Ok(())
     }
 
     pub fn set_capability(&mut self, capability: CapabilityRecord) -> Result<(), Error> {
@@ -2673,15 +2690,18 @@ mod tests {
             ),
             Err(Error::UnknownParam)
         );
-        state
-            .dispatch_set_param(
+        let before = state.clone();
+        assert_eq!(
+            state.dispatch_set_param(
                 ConstitutionOrigin::FutarchyParam,
                 key16(b"mkt.obs_interval"),
                 ParamValue::U32(12),
                 1,
                 10,
-            )
-            .unwrap();
+            ),
+            Err(Error::BudgetDerivationRequired)
+        );
+        assert_eq!(state, before);
         state
             .dispatch_set_param(
                 ConstitutionOrigin::FutarchyParam,
