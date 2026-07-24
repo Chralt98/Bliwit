@@ -12,6 +12,7 @@ pub trait WeightInfo {
     fn submit() -> Weight;
     fn withdraw() -> Weight;
     fn tick(items: u32) -> Weight;
+    fn collator_compensation() -> Weight;
     fn decide() -> Weight;
     fn settle_cohort(items: u32) -> Weight;
     fn set_next_epoch_length() -> Weight;
@@ -41,6 +42,13 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn tick(items: u32) -> Weight {
         base::<T>(55_000_000, 12, 10)
             .saturating_add(Weight::from_parts(30_000_000, 4_000).saturating_mul(items.into()))
+            .saturating_add(Self::collator_compensation())
+    }
+    fn collator_compensation() -> Weight {
+        // Maximum 100-author payout: one bounded treasury state update plus
+        // two ForeignAssets account accesses per recipient. This is charged
+        // on every tick because phase entry is only known after dispatch.
+        base::<T>(1_500_000_000, 205, 205)
     }
     fn decide() -> Weight {
         base::<T>(140_000_000, 24, 14)
@@ -106,6 +114,10 @@ impl WeightInfo for () {
     fn tick(items: u32) -> Weight {
         rocks(55_000_000, 12, 10)
             .saturating_add(Weight::from_parts(30_000_000, 4_000).saturating_mul(items.into()))
+            .saturating_add(Self::collator_compensation())
+    }
+    fn collator_compensation() -> Weight {
+        rocks(1_500_000_000, 205, 205)
     }
     fn decide() -> Weight {
         rocks(140_000_000, 24, 14)

@@ -643,13 +643,23 @@ impl Treasury {
         if total_blocks == 0 {
             return Ok(Vec::new());
         }
+        // `amount_per_collator` is the normative stipend for each authoring
+        // collator, not the whole epoch pool.  The accumulator contains the
+        // authoring set for this epoch, so multiply the stipend by the number
+        // of collators before splitting by authored blocks.  Zero-block
+        // fixture entries are not authoring collators and do not consume a
+        // stipend.
+        let collator_count = shares.iter().filter(|(_, blocks)| *blocks > 0).count();
+        let total_pool = amount_per_collator
+            .checked_mul(collator_count as Balance)
+            .ok_or(Error::Overflow)?;
         let mut payouts = Vec::with_capacity(shares.len());
         let mut total_payout = 0u128;
         for (account, blocks) in shares {
             if *blocks == 0 {
                 continue;
             }
-            let payout = amount_per_collator
+            let payout = total_pool
                 .checked_mul(u128::from(*blocks))
                 .ok_or(Error::Overflow)?
                 / total_blocks;
@@ -1660,17 +1670,17 @@ mod tests {
     #[test]
     fn collator_compensation_rounds_each_share_down_and_debits_one_line() {
         let mut t = Treasury::default();
-        t.lines.push((BudgetLine::OpsCollators, 2_000 * USDC));
+        t.lines.push((BudgetLine::OpsCollators, 4_000 * USDC));
         let payouts = t
             .collator_compensation(&[(acct(1), 2), (acct(2), 1), (acct(3), 0)], 2_000 * USDC)
             .unwrap();
         assert_eq!(
             payouts,
-            vec![(acct(1), 1_333_333_333), (acct(2), 666_666_666)]
+            vec![(acct(1), 2_666_666_666), (acct(2), 1_333_333_333)]
         );
         assert_eq!(
             t.line_balance(BudgetLine::OpsCollators),
-            2_000 * USDC - 1_999_999_999
+            4_000 * USDC - 3_999_999_999
         );
         assert!(t.events.iter().all(|event| matches!(
             event,

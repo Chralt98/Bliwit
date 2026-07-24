@@ -285,10 +285,6 @@ pub mod pallet {
         /// `amend_registry` tried to move a kernel-bounded row's bounds
         /// (13 rule 7 — genesis-fixed).
         KernelBoundImmutable,
-        /// 13 §5's re-derivation artifact/verifier is not live yet; this
-        /// unsafe-direction timing/capacity/POL change is refused fail-closed
-        /// (SQ-303).
-        BudgetDerivationRequired,
         /// `amend_registry` violates the compile-time meta-bounds
         /// (13 rule 2/7: `min ≤ value ≤ max`, kind-consistent, cooldown ≤ 8).
         MetaBoundViolation,
@@ -299,6 +295,10 @@ pub mod pallet {
         /// includes the fail-static case where the 08 §1.2 reserve-health flag
         /// has zeroed spendable NAV outright. `PhaseFlags` is left unchanged.
         NavFloorUnmet,
+        /// 13 §5's re-derivation artifact/verifier is not live yet; this
+        /// unsafe-direction timing/capacity/POL change is refused fail-closed
+        /// (SQ-303).
+        BudgetDerivationRequired,
     }
 
     #[pallet::hooks]

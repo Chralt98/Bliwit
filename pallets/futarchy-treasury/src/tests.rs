@@ -314,6 +314,48 @@ fn storage_v2_try_runtime_current_version_is_an_idempotent_latch_noop() {
     });
 }
 
+#[cfg(feature = "try-runtime")]
+#[test]
+fn storage_v3_try_runtime_preserves_existing_v2_state() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(2).put::<Treasury>();
+        TreasuryArmedValue::set(false);
+        crate::BootstrapOpsFundingClosed::<Test>::put(true);
+        crate::CommunityDistributionRemaining::<Test>::put(123 * VIT);
+
+        let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
+        let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+        <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
+
+        assert_eq!(crate::BootstrapOpsFundingClosed::<Test>::get(), true);
+        assert_eq!(
+            crate::CommunityDistributionRemaining::<Test>::get(),
+            123 * VIT
+        );
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn storage_v3_try_runtime_preserves_existing_v1_bootstrap_latch() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(1).put::<Treasury>();
+        TreasuryArmedValue::set(true);
+        crate::BootstrapOpsFundingClosed::<Test>::put(false);
+
+        let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
+        let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+        <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
+
+        assert!(!crate::BootstrapOpsFundingClosed::<Test>::get());
+        assert_eq!(
+            crate::CommunityDistributionRemaining::<Test>::get(),
+            CommunityDistributionAmount::get()
+        );
+        assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(3));
+    });
+}
+
 #[test]
 fn default_genesis_is_empty_and_solvent() {
     new_test_ext().execute_with(|| {
@@ -892,13 +934,13 @@ fn collator_compensation_pays_authored_shares_once_and_rounds_down() {
         assert_eq!(
             rebate_payouts(),
             vec![
-                (acc(7), 1_333_333_333, PayoutLine::OpsCollators),
-                (acc(8), 666_666_666, PayoutLine::OpsCollators),
+                (acc(7), 2_666_666_666, PayoutLine::OpsCollators),
+                (acc(8), 1_333_333_333, PayoutLine::OpsCollators),
             ]
         );
         assert_eq!(
             Treasury::line_balance(BudgetLine::OpsCollators),
-            before - 1_999_999_999
+            before - 3_999_999_999
         );
         assert!(CollatorAuthoredBlocks::<Test>::get().is_empty());
         assert!(CollatorAuthoredEpoch::<Test>::get().is_none());
