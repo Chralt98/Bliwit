@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 9,
+  "integration_contract_version": 10,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "release_blockers": [
     {
@@ -604,6 +604,34 @@
       }
     },
     {
+      "id": "storage.attestor.liabilities",
+      "kind": "storage",
+      "pallet": "Attestor",
+      "item": "Liabilities",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.5",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "bounded_collections::bounded_vec::BoundedVec(Vec<attestor_core::AttestorLiability{account:[u8;32],bond:u128,false_count:u8,ejected:bool}>)"
+      }
+    },
+    {
+      "id": "storage.attestor.revocations",
+      "kind": "storage",
+      "pallet": "Attestor",
+      "item": "Revocations",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.5",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "bounded_collections::bounded_vec::BoundedVec(Vec<attestor_core::AttestationRevocation{attestation_id:u32,pid:u64,attestor:[u8;32],cause_hash:[u8;32]}>)"
+      }
+    },
+    {
       "id": "storage.system.account",
       "kind": "storage",
       "pallet": "System",
@@ -734,7 +762,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x09000000"
+        "value": "0x0a000000"
       }
     },
     {
@@ -3515,6 +3543,54 @@
           {
             "name": "who",
             "type": "sp_core::crypto::AccountId32([u8;32])"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.attestor.attestor_removed_for_cause",
+      "kind": "event",
+      "pallet": "Attestor",
+      "event": "AttestorRemovedForCause",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "who",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "cause_hash",
+            "type": "primitive_types::H256([u8;32])"
+          }
+        ]
+      }
+    },
+    {
+      "id": "event.attestor.attestation_revoked",
+      "kind": "event",
+      "pallet": "Attestor",
+      "event": "AttestationRevoked",
+      "required": true,
+      "citation": "02 §6",
+      "layout": {
+        "fields": [
+          {
+            "name": "attestation_id",
+            "type": "u32"
+          },
+          {
+            "name": "pid",
+            "type": "u64"
+          },
+          {
+            "name": "attestor",
+            "type": "sp_core::crypto::AccountId32([u8;32])"
+          },
+          {
+            "name": "cause_hash",
+            "type": "primitive_types::H256([u8;32])"
           }
         ]
       }

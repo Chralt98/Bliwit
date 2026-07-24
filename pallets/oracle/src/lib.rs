@@ -1230,14 +1230,10 @@ pub mod pallet {
             for (who, info) in &before.reporters {
                 if !after.reporters.iter().any(|(a, _)| a == who) {
                     let account = T::AccountId::from(*who);
-                    let ejected = after.events.iter().any(|event| {
-                        matches!(event, CoreEvent::ReporterEjected { who: ev } if ev == who)
-                    });
-                    if ejected {
-                        T::Custody::slash_insurance(info.stake)?;
-                    } else {
-                        T::Custody::release(&account, info.stake)?;
-                    }
+                    // Third-offense ejection removes the seat but does not
+                    // slash the remaining registration stake (07 §3). The
+                    // second-offense slash is already reflected in `info`.
+                    T::Custody::release(&account, info.stake)?;
                 }
             }
 
@@ -1252,9 +1248,24 @@ pub mod pallet {
             }
             for (who, info) in &before.watchtowers {
                 if !after.watchtowers.iter().any(|(a, _)| a == who) {
-                    // A watchtower is removed only by the two-epoch liveness
-                    // slash, so its remaining stake is forfeited as well.
-                    T::Custody::slash_insurance(info.stake)?;
+                    // The liveness sweep emits the exact 10% slash before
+                    // ejecting the seat. Slash only that amount and release
+                    // the remaining registration stake (07 §4).
+                    let slashed = after.events.iter().find_map(|event| match event {
+                        CoreEvent::WatchtowerSlashed { who: ev, amount } if ev == who => {
+                            Some(*amount)
+                        }
+                        _ => None,
+                    });
+                    if let Some(amount) = slashed {
+                        T::Custody::slash_insurance(amount)?;
+                        T::Custody::release(
+                            &T::AccountId::from(*who),
+                            info.stake.saturating_sub(amount),
+                        )?;
+                    } else {
+                        T::Custody::release(&T::AccountId::from(*who), info.stake)?;
+                    }
                 }
             }
 
