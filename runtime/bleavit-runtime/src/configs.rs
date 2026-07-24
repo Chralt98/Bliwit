@@ -2604,9 +2604,9 @@ pub(crate) fn decision_market_stats_for_view(
 
 pub struct RuntimeMarketAccess;
 
-/// Runtime-owned Baseline carry predicate. A shared Baseline can serve
-/// multiple classes, so its sealed carry is admitted only when the strictest
-/// class-specific contest floor at this boundary grades the same window.
+/// Runtime-owned Baseline carry predicate. A shared Baseline has no proposal
+/// class, so its sealed carry is graded at the fixed TREASURY-tier floor from
+/// 05 §5.2 rather than at any consumer proposal's effective floor.
 pub struct RuntimeBaselineGrade;
 
 #[cfg_attr(feature = "runtime-benchmarks", allow(unreachable_code))]
@@ -2631,27 +2631,8 @@ impl pallet_market::BaselineGrade for RuntimeBaselineGrade {
             return false;
         }
         let params = <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
-        let contest_floor = [
-            futarchy_primitives::ProposalClass::Param,
-            futarchy_primitives::ProposalClass::Treasury,
-            futarchy_primitives::ProposalClass::Code,
-            futarchy_primitives::ProposalClass::Meta,
-            futarchy_primitives::ProposalClass::Constitutional,
-        ]
-        .into_iter()
-        .filter_map(|class| {
-            contest_floor_for_grade(
-                market,
-                end,
-                pallet_epoch::BookRole::Baseline,
-                class,
-                &params,
-            )
-        })
-        .max();
-        let Some(contest_floor) = contest_floor else {
-            return false;
-        };
+        let contest_floor =
+            params.v_min[proposal_class_index(futarchy_primitives::ProposalClass::Treasury)];
         pallet_market::Pallet::<Runtime>::decision_grade_at(
             market,
             end,

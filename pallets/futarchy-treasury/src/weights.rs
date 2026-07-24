@@ -41,11 +41,22 @@ pub trait WeightInfo {
     /// Weight of `create_community_schedule` (bounded allocation state plus
     /// the SDK vesting/currency adapter).
     fn create_community_schedule() -> Weight;
+    /// Weight of the per-authored-block `note_collator_block` authorship
+    /// callback (worst case: full bounded accumulator moved aside at an epoch
+    /// boundary, then a fresh accumulator started). Registered as Mandatory
+    /// extra weight because `pallet_authorship` reserves nothing for its
+    /// `EventHandler`.
+    fn note_collator_block() -> Weight;
 }
 
 /// Placeholder proof size covering the worst-case bounded `State` encoding
 /// (streams 128 + POL 196 + …); B5 replaces it with the benchmarked value.
 const STATE_POV: u64 = 24_000;
+
+/// Placeholder proof size for the authorship callback: both bounded
+/// 120-entry authored/pending accumulators plus the small epoch/count
+/// values; B5 replaces it with the benchmarked value.
+const COLLATOR_ACCUMULATOR_POV: u64 = 12_000;
 
 /// Weights expressed through the runtime's configured `DbWeight`.
 pub struct SubstrateWeight<T>(PhantomData<T>);
@@ -114,6 +125,11 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(4))
             .saturating_add(T::DbWeight::get().writes(3))
     }
+    fn note_collator_block() -> Weight {
+        Weight::from_parts(30_000_000, COLLATOR_ACCUMULATOR_POV)
+            .saturating_add(T::DbWeight::get().reads(7))
+            .saturating_add(T::DbWeight::get().writes(9))
+    }
 }
 
 // For tests and backwards compatibility.
@@ -180,5 +196,10 @@ impl WeightInfo for () {
         Weight::from_parts(45_000_000, STATE_POV)
             .saturating_add(RocksDbWeight::get().reads(4))
             .saturating_add(RocksDbWeight::get().writes(3))
+    }
+    fn note_collator_block() -> Weight {
+        Weight::from_parts(30_000_000, COLLATOR_ACCUMULATOR_POV)
+            .saturating_add(RocksDbWeight::get().reads(7))
+            .saturating_add(RocksDbWeight::get().writes(9))
     }
 }

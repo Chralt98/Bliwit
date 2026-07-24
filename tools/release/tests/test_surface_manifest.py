@@ -85,7 +85,7 @@ class SurfaceManifestTests(unittest.TestCase):
 
     def test_schema_and_entry_shapes(self) -> None:
         self.assertEqual(self.manifest["schema"], "bleavit.critical-surface.v1")
-        self.assertEqual(self.manifest["integration_contract_version"], 10)
+        self.assertEqual(self.manifest["integration_contract_version"], 12)
         identifiers = [entry["id"] for entry in self.entries]
         self.assertEqual(len(identifiers), len(set(identifiers)))
         for entry in self.entries:
@@ -115,7 +115,7 @@ class SurfaceManifestTests(unittest.TestCase):
             for entry in self.entries
             if entry["id"] == "constant.identity.contract_version"
         )
-        self.assertEqual(version["layout"], {"type": "u32", "value": "0x0a000000"})
+        self.assertEqual(version["layout"], {"type": "u32", "value": "0x0c000000"})
 
     def test_section_six_events_and_section_seven_attestor_storage_are_exact(self) -> None:
         expected_events = {
@@ -360,11 +360,30 @@ class SurfaceManifestTests(unittest.TestCase):
                     registry_fields,
                 )
 
+        self.assertEqual(
+            by_event[("Oracle", "ComponentSettled")]["layout"]["fields"][-1],
+            {
+                "name": "path",
+                "type": (
+                    "oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|"
+                    "Adjudicated=2|ChallengerDefault=3|Neutral=4]"
+                ),
+            },
+        )
+
     def test_newly_wired_v4_constant_layouts_are_frozen(self) -> None:
         expected = {
             "constant.ledger.min_transfer": (
                 "MinTransfer",
                 {"type": "u128", "value": "0x10270000000000000000000000000000"},
+            ),
+            "constant.registry.archive_delay.incident": (
+                "ArchiveDelay",
+                {"type": "u32", "value": "0x40335000"},
+            ),
+            "constant.registry.archive_delay.milestone": (
+                "ArchiveDelay",
+                {"type": "u32", "value": "0x40335000"},
             ),
             "constant.market.min_trade": (
                 "MinTrade",
@@ -666,6 +685,8 @@ class SurfaceManifestTests(unittest.TestCase):
             "constant.market.gate_p_max_ceiling",
             "constant.market.gate_eps_floor",
             "constant.epoch.length_floor",
+            "constant.registry.archive_delay.incident",
+            "constant.registry.archive_delay.milestone",
             "storage.identity.usdc_asset",
             "storage.identity.usdc_metadata",
         }
