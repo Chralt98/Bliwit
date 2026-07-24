@@ -6,6 +6,8 @@
 
 Normative language: RFC 2119. USDC amounts in whole units (6 decimals); `ln 2 = 0.693147…`; all worked arithmetic is shown and MUST be reproduced by the Phase-0 reference model.
 
+**A13 REWARDS extension (2026-07-24):** `REWARDS` is also backed by its dedicated `REWARDS_` real-USDC pot. `fund_budget_line(REWARDS, amount)` therefore performs the same atomic `MAIN`→pot custody sync and the same line≤pot try-state check; unlike the keeper/oracle rebate pots, this pot is consumed by fail-soft execution-time proposer rewards.
+
 ---
 
 ## 1. `pallet-futarchy-treasury` (carried forward, amended)
@@ -110,7 +112,7 @@ Vesting is enforced on-chain from genesis via SDK **`pallet-vesting`** (stable26
 
 **Genesis protocol-account derivations (normative; mirrored in [13 §3.5](13-parameters.md)).** Account identity is derived with Substrate's `PalletId` conversion exactly as follows; a seed is the exact byte string shown, with no padding, normalization or replacement. The VIT allocation pots use `TreasuryPalletId = PalletId(*b"bl/trsry")`: `MAIN` is `TreasuryPalletId::get().into_account_truncating()`, the community pot is `TreasuryPalletId::get().into_sub_account_truncating(b"communty")`, and the Phase-3–4 incentive pot is `TreasuryPalletId::get().into_sub_account_truncating(b"incentiv")`.
 
-Under [03 §7](03-conditional-ledger.md) R-4, `usdc_genesis_endowments()` endows exactly the following ten statically derived protocol accounts with exactly the live USDC `min_balance`; the endowment rule is owned there, while this section freezes the account derivations consumed by genesis and deployment tooling:
+Under [03 §7](03-conditional-ledger.md) R-4, `usdc_genesis_endowments()` endows exactly the following twelve statically derived protocol accounts with exactly the live USDC `min_balance`; the endowment rule is owned there, while this section freezes the account derivations consumed by genesis and deployment tooling:
 
 | Account | Frozen derivation |
 |---|---|
@@ -124,6 +126,8 @@ Under [03 §7](03-conditional-ledger.md) R-4, `usdc_genesis_endowments()` endows
 | `treasury_account()` (`MAIN`) | `PalletId(*b"bl/trsry").into_account_truncating()` |
 | `treasury_keeper_account()` (`KEEPER`) | `PalletId(*b"bl/trsry").into_sub_account_truncating(*b"KEEPER__")` |
 | `treasury_oracle_account()` (`ORACLE`) | `PalletId(*b"bl/trsry").into_sub_account_truncating(*b"ORACLE__")` |
+| `treasury_rewards_account()` (`REWARDS`) | `PalletId(*b"bl/trsry").into_sub_account_truncating(*b"REWARDS_")` |
+| `treasury_collators_account()` (`COLLATOR`) | `PalletId(*b"bl/trsry").into_sub_account_truncating(*b"COLLATOR")` |
 
 The set is deliberately exact. Per-market book/fee accounts do not exist until `create_market` and are reaped at close, so they cannot be genesis-endowed. The market, epoch, execution-guard, welfare-settlement, guardian and both registry sovereign accounts are excluded because [03 §7](03-conditional-ledger.md) R-4 does not name them; registry payouts deliberately use `Expendable`. A derivation or membership change is therefore a genesis/deployment identity change and MUST update this section and [13 §3.5](13-parameters.md) together.
 
@@ -141,7 +145,7 @@ The reserve exists for values-layer continuity (guardian bonds, conviction depth
 
 ### 2.4 Collator compensation
 
-`collator.comp_epoch` = **2,000 USDC per collator per epoch** (PARAM-adjustable, *normative value: [13](13-parameters.md)*), paid from `ops.collators` at epoch Housekeeping to the session's registered collators pro-rata to authored-block share. The runtime records one bounded `(collator, authored_blocks)` accumulator for the pending epoch (at most the 100-candidate session bound), then computes each share with claimant-adverse floor rounding and debits the line once. A missing/underfunded line or custody pot is fail-soft: the accumulator remains pending for a later Housekeeping retry, and a successful payout clears it atomically with the custody transfers; there is no second payout for the same epoch. Launch load: 5 invulnerables ⇒ 10,000 USDC/epoch ≈ 174,000 USDC/yr — 0.7% of the 25M initial treasury per year; sustainable without issuance.
+`collator.comp_epoch` = **2,000 USDC per collator per epoch** (PARAM-adjustable, *normative value: [13](13-parameters.md)*), paid from `ops.collators` at epoch Housekeeping to the session's registered collators pro-rata to authored-block share. The runtime records one bounded `(collator, authored_blocks)` accumulator for the pending epoch (at most the full 120-entry session bound: 100 candidates plus 20 invulnerables), then computes each share with claimant-adverse floor rounding and debits the line once. A missing/underfunded line or custody pot is fail-soft: the accumulator remains pending for a later Housekeeping retry, and a successful payout clears it atomically with the custody transfers; there is no second payout for the same epoch. Launch load: 5 invulnerables ⇒ 10,000 USDC/epoch ≈ 174,000 USDC/yr — 0.7% of the 25M initial treasury per year; sustainable without issuance.
 
 ### 2.5 Initial USDC treasury and funding sequence
 

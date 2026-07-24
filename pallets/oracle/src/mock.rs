@@ -59,6 +59,10 @@ parameter_types! {
     /// Makes the mock sink fail, standing in for a treasury/constitution write
     /// that cannot commit.
     pub static ReserveHealthSinkFails: bool = false;
+    /// Custody movements observed by integration tests. The mock retains the
+    /// real adapter's accounting calls while keeping balances unbounded.
+    pub static CustodyReleased: Balance = 0;
+    pub static CustodySlashed: Balance = 0;
     /// Keeper-batch cap for `crank_round_close`.
     pub const MaxRoundCloseBatch: u32 = 20;
 }
@@ -110,6 +114,32 @@ impl pallet_oracle::ReserveHealthSink for TestReserveHealthSink {
             ));
         }
         Ok(())
+    }
+}
+
+pub struct TestCustody;
+
+impl pallet_oracle::OracleCustody<AccountId32> for TestCustody {
+    fn hold(_: &AccountId32, _: Balance) -> frame_support::pallet_prelude::DispatchResult {
+        Ok(())
+    }
+
+    fn release(_: &AccountId32, amount: Balance) -> frame_support::pallet_prelude::DispatchResult {
+        CustodyReleased::mutate(|total| *total = total.saturating_add(amount));
+        Ok(())
+    }
+
+    fn pay(_: &AccountId32, _: Balance) -> frame_support::pallet_prelude::DispatchResult {
+        Ok(())
+    }
+
+    fn slash_insurance(amount: Balance) -> frame_support::pallet_prelude::DispatchResult {
+        CustodySlashed::mutate(|total| *total = total.saturating_add(amount));
+        Ok(())
+    }
+
+    fn balance() -> Balance {
+        Balance::MAX
     }
 }
 
@@ -172,7 +202,7 @@ impl pallet_oracle::Config for Test {
     type AdjudicationOrigin = TestAdjudicationOrigin;
     type Reporting = TestReporting;
     type Params = TestParams;
-    type Custody = ();
+    type Custody = TestCustody;
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
     type ProbeDispatch = TestProbeDispatch;
     type ProbeTimeoutSink = TestProbeTimeoutSink;
@@ -207,6 +237,8 @@ pub fn new_test_ext_with(oracle: pallet_oracle::GenesisConfig<Test>) -> sp_io::T
     ProbeDispatchLive::set(true);
     ReserveHealthSinkCalls::set(Vec::new());
     ReserveHealthSinkFails::set(false);
+    CustodyReleased::set(0);
+    CustodySlashed::set(0);
     let storage = RuntimeGenesisConfig {
         system: Default::default(),
         oracle,

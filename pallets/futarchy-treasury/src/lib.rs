@@ -89,12 +89,26 @@ pub const MAX_POL_COMMITMENTS_BOUND: u32 = MAX_POL_COMMITMENTS as u32;
 /// See [`MAX_BUDGET_LINES_BOUND`].
 pub const MAX_FUNDED_CORETIME_BOUND: u32 = MAX_FUNDED_CORETIME_PERIODS as u32;
 /// 13 §4 bound on the bounded authored-share accumulator. The assembled
-/// runtime keeps this equal to CollatorSelection's 100-candidate ceiling.
-pub const MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND: u32 = 100;
+/// runtime admits up to 100 candidates plus 20 invulnerables in one session.
+pub const MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND: u32 = 120;
 
 /// Rollout-phase seam for the Phase≤4 ops-multisig funding path (08 §2.1).
 pub trait TreasuryPhase {
     fn treasury_armed() -> bool;
+}
+
+/// Runtime-owned projection of the logical epoch for an authored block.
+/// Authorship is observed before permissionless epoch cranks can persist their
+/// clock update, so this seam must derive the boundary from the block number
+/// rather than blindly reading the last persisted `CurrentEpoch` value.
+pub trait CollatorEpochProvider {
+    fn epoch_at(block: futarchy_primitives::BlockNumber) -> futarchy_primitives::EpochId;
+}
+
+impl CollatorEpochProvider for () {
+    fn epoch_at(_: futarchy_primitives::BlockNumber) -> futarchy_primitives::EpochId {
+        0
+    }
 }
 
 /// Runtime custody adapter for the Phase-4 community-distribution path.
@@ -384,6 +398,16 @@ pub mod pallet {
         /// share accumulator.
         type MaxCollatorCompensationEntries: Get<u32>;
 
+        /// Number of collators registered in the active session. The stipend
+        /// is per registered collator, including collators with zero authored
+        /// blocks, rather than per author present in the accumulator.
+        type RegisteredCollatorCount: Get<u32>;
+
+        /// Logical epoch projection used by the authorship callback. This is
+        /// separate from `CurrentEpoch`, whose persisted value may still point
+        /// at the completed epoch when the boundary block is being authored.
+        type CollatorEpoch: CollatorEpochProvider;
+
         /// Live 13 §1 treasury tunables, read from `pallet-constitution::Params`
         /// (rule 4). See [`TreasuryParams`].
         type Params: TreasuryParams;
@@ -411,7 +435,7 @@ pub mod pallet {
         type RebatePayout: RebatePayout<Self::AccountId>;
 
         /// Runtime custody adapter which atomically moves real USDC from MAIN
-        /// into the KEEPER/ORACLE payout pot when its budget line is funded.
+        /// into the KEEPER/ORACLE/REWARDS payout pot when its budget line is funded.
         type PotFunding: PotFunding<Self::AccountId>;
 
         /// Custody seam for the 08 §1.2/§1.4 INSURANCE → `MAIN` sweep (SQ-207).
@@ -539,6 +563,35 @@ pub mod pallet {
     /// Epoch whose authored shares are currently held in the accumulator.
     #[pallet::storage]
     pub type CollatorAuthoredEpoch<T: Config> = StorageValue<_, EpochId, OptionQuery>;
+
+    /// Registered collator count snapshotted when the pending epoch's first
+    /// authored block is observed. Retries must use the earning epoch's set,
+    /// not a later live session size.
+    #[pallet::storage]
+    pub type CollatorAuthoredRegisteredCount<T: Config> = StorageValue<_, u32, OptionQuery>;
+
+    /// One completed accumulator may remain pending while custody is
+    /// underfunded. Keeping it separate lets boundary-block authors start the
+    /// next epoch without mixing their shares into the old payout.
+    #[pallet::storage]
+    pub type CollatorPendingBlocks<T: Config> = StorageValue<
+        _,
+        BoundedVec<(T::AccountId, u32), T::MaxCollatorCompensationEntries>,
+        ValueQuery,
+    >;
+
+    /// Epoch and registered-count snapshot paired with `CollatorPendingBlocks`.
+    #[pallet::storage]
+    pub type CollatorPendingEpoch<T: Config> = StorageValue<_, EpochId, OptionQuery>;
+
+    #[pallet::storage]
+    pub type CollatorPendingRegisteredCount<T: Config> = StorageValue<_, u32, OptionQuery>;
+
+    /// Sticky fail-closed marker for an authored-share accumulator overflow.
+    /// A payout is never attempted while this is set, so omitted authors can
+    /// never be silently underpaid.
+    #[pallet::storage]
+    pub type CollatorAuthoredOverflowed<T: Config> = StorageValue<_, bool, ValueQuery>;
 
     /// Last epoch whose compensation was committed. This prevents authorship
     /// arriving after the Housekeeping payout from creating a second claim.
@@ -737,17 +790,28 @@ pub mod pallet {
 
         #[cfg(feature = "try-runtime")]
         fn pre_upgrade() -> Result<Vec<u8>, TryRuntimeError> {
+            let on_chain = StorageVersion::get::<Pallet<T>>();
             Ok((
-                StorageVersion::get::<Pallet<T>>() < STORAGE_VERSION,
+                on_chain < STORAGE_VERSION,
+                on_chain < StorageVersion::new(1),
                 T::TreasuryPhase::treasury_armed(),
                 BootstrapOpsFundingClosed::<T>::get(),
+                on_chain < StorageVersion::new(2) && !CommunityDistributionRemaining::<T>::exists(),
+                CommunityDistributionRemaining::<T>::get(),
             )
                 .encode())
         }
 
         #[cfg(feature = "try-runtime")]
         fn post_upgrade(state: Vec<u8>) -> Result<(), TryRuntimeError> {
-            let (migrated, treasury_was_armed, closed_before): (bool, bool, bool) =
+            let (
+                migrated,
+                initialize_bootstrap,
+                treasury_was_armed,
+                bootstrap_before,
+                initialize_community,
+                community_before,
+            ): (bool, bool, bool, bool, bool, Balance) =
                 Decode::decode(&mut &state[..]).map_err(|_| {
                     TryRuntimeError::Other("treasury v3 migration: invalid pre-upgrade state")
                 })?;
@@ -756,19 +820,37 @@ pub mod pallet {
                     StorageVersion::get::<Pallet<T>>() == STORAGE_VERSION,
                     "treasury v3 migration: storage version was not advanced"
                 );
-                frame_support::ensure!(
-                    BootstrapOpsFundingClosed::<T>::get() == treasury_was_armed,
-                    "treasury v3 migration: closure does not match existing phase"
-                );
-                frame_support::ensure!(
-                    CommunityDistributionRemaining::<T>::get()
-                        == T::CommunityDistributionAmount::get(),
-                    "treasury v3 migration: community allocation was not initialized"
-                );
+                if initialize_bootstrap {
+                    frame_support::ensure!(
+                        BootstrapOpsFundingClosed::<T>::get() == treasury_was_armed,
+                        "treasury v3 migration: bootstrap closure was not initialized"
+                    );
+                } else {
+                    frame_support::ensure!(
+                        BootstrapOpsFundingClosed::<T>::get() == bootstrap_before,
+                        "treasury v3 migration: existing bootstrap closure changed"
+                    );
+                }
+                if initialize_community {
+                    frame_support::ensure!(
+                        CommunityDistributionRemaining::<T>::get()
+                            == T::CommunityDistributionAmount::get(),
+                        "treasury v3 migration: community allocation was not initialized"
+                    );
+                } else {
+                    frame_support::ensure!(
+                        CommunityDistributionRemaining::<T>::get() == community_before,
+                        "treasury v3 migration: existing community allocation changed"
+                    );
+                }
             } else {
                 frame_support::ensure!(
-                    BootstrapOpsFundingClosed::<T>::get() == closed_before,
+                    BootstrapOpsFundingClosed::<T>::get() == bootstrap_before,
                     "treasury v3 migration: current-version latch changed"
+                );
+                frame_support::ensure!(
+                    CommunityDistributionRemaining::<T>::get() == community_before,
+                    "treasury v3 migration: current-version allocation changed"
                 );
             }
             Ok(())
@@ -815,29 +897,31 @@ pub mod pallet {
                     Error::<T>::BootstrapOpsFundingLimit
                 );
             }
-            Self::mutate(|t| t.fund_budget_line(Origin::FutarchyTreasury, line, amount))?;
-            // Zero retains the core's established bookkeeping/event semantics,
-            // but has no custody movement to perform. Skipping the seam cannot
-            // strand or double-move value and avoids making a zero funding call
-            // depend on an external custody adapter.
-            if amount != 0 {
-                let payout_line = match line {
-                    BudgetLine::Keeper => Some(PayoutLine::Keeper),
-                    BudgetLine::Oracle => Some(PayoutLine::Oracle),
-                    BudgetLine::Rewards => Some(PayoutLine::Rewards),
-                    BudgetLine::OpsCollators => Some(PayoutLine::OpsCollators),
-                    _ => None,
-                };
-                if let Some(payout_line) = payout_line {
-                    T::PotFunding::fund(payout_line, amount)?;
+            frame_support::storage::with_storage_layer(|| {
+                Self::mutate(|t| t.fund_budget_line(Origin::FutarchyTreasury, line, amount))?;
+                // Zero retains the core's established bookkeeping/event semantics,
+                // but has no custody movement to perform. Skipping the seam cannot
+                // strand or double-move value and avoids making a zero funding call
+                // depend on an external custody adapter.
+                if amount != 0 {
+                    let payout_line = match line {
+                        BudgetLine::Keeper => Some(PayoutLine::Keeper),
+                        BudgetLine::Oracle => Some(PayoutLine::Oracle),
+                        BudgetLine::Rewards => Some(PayoutLine::Rewards),
+                        BudgetLine::OpsCollators => Some(PayoutLine::OpsCollators),
+                        _ => None,
+                    };
+                    if let Some(payout_line) = payout_line {
+                        T::PotFunding::fund(payout_line, amount)?;
+                    }
                 }
-            }
-            if treasury_origin && line == BudgetLine::OpsReserveProbe && amount > 0 {
-                // The successful binding-governance refill is the irreversible
-                // handover point. Any later disarm cannot recreate authority.
-                BootstrapOpsFundingClosed::<T>::put(true);
-            }
-            Ok(())
+                if treasury_origin && line == BudgetLine::OpsReserveProbe && amount > 0 {
+                    // The successful binding-governance refill is the irreversible
+                    // handover point. Any later disarm cannot recreate authority.
+                    BootstrapOpsFundingClosed::<T>::put(true);
+                }
+                Ok(())
+            })
         }
 
         /// `treasury.spend(line, dest, amount)` — a direct in-cap grant
@@ -1225,40 +1309,78 @@ pub mod pallet {
         /// or an uncranked prior epoch leaves the bounded accumulator intact
         /// and defers the reward rather than growing state or panicking.
         pub fn note_collator_block(author: T::AccountId) {
-            let epoch = T::CurrentEpoch::get();
-            if CollatorCompensationPaidEpoch::<T>::get() == Some(epoch) {
-                return;
-            }
+            let epoch = T::CollatorEpoch::epoch_at(Self::now());
             if let Some(tracked) = CollatorAuthoredEpoch::<T>::get() {
                 if tracked != epoch {
-                    return;
+                    // The authorship callback can see the boundary before
+                    // EpochOf is advanced by the first crank. Move the old
+                    // accumulator aside, then start a fresh one for the
+                    // boundary-owned block. A second unpayoutable completed
+                    // accumulator is a bounded fail-closed condition.
+                    if CollatorPendingEpoch::<T>::get().is_some() {
+                        CollatorAuthoredOverflowed::<T>::put(true);
+                        return;
+                    }
+                    let blocks = CollatorAuthoredBlocks::<T>::take();
+                    let registered = CollatorAuthoredRegisteredCount::<T>::take();
+                    CollatorPendingBlocks::<T>::put(blocks);
+                    CollatorPendingEpoch::<T>::put(tracked);
+                    if let Some(registered) = registered {
+                        CollatorPendingRegisteredCount::<T>::put(registered);
+                    }
+                    CollatorAuthoredEpoch::<T>::kill();
                 }
-            } else {
+            }
+            if CollatorAuthoredEpoch::<T>::get().is_none() {
                 CollatorAuthoredEpoch::<T>::put(epoch);
+                CollatorAuthoredRegisteredCount::<T>::put(T::RegisteredCollatorCount::get());
             }
             CollatorAuthoredBlocks::<T>::mutate(|shares| {
                 if let Some((_, blocks)) = shares.iter_mut().find(|(who, _)| *who == author) {
                     *blocks = blocks.saturating_add(1);
-                } else {
-                    let _ = shares.try_push((author, 1));
+                } else if shares.try_push((author, 1)).is_err() {
+                    CollatorAuthoredOverflowed::<T>::put(true);
                 }
             });
         }
 
-        /// Pay the bounded authored-share accumulator during Housekeeping.
-        /// The epoch pallet invokes this exactly on a phase entry; if a prior
-        /// payout is still pending, this method pays that older accumulator
-        /// first. Every custody transfer and the accounting/map cleanup share
-        /// one storage transaction, so a partial payout cannot create an
-        /// unbacked claimant.
+        /// Pay the bounded authored-share accumulator at the completed-epoch
+        /// Housekeeping boundary. The epoch pallet invokes this after the
+        /// clock crosses into the next epoch, so the completed-epoch guard is
+        /// meaningful and a failed custody transfer leaves the accumulator for
+        /// retry. Every transfer and accounting/map cleanup share one storage
+        /// transaction, so a partial payout cannot create an unbacked claimant.
         pub fn pay_collator_compensation() {
-            let Some(tracked_epoch) = CollatorAuthoredEpoch::<T>::get() else {
+            let pending = CollatorPendingEpoch::<T>::get().is_some();
+            let Some(tracked_epoch) = (if pending {
+                CollatorPendingEpoch::<T>::get()
+            } else {
+                CollatorAuthoredEpoch::<T>::get()
+            }) else {
                 return;
             };
-            if tracked_epoch > T::CurrentEpoch::get() {
+            // Housekeeping is the payout boundary for the epoch that just
+            // completed. Keep the current epoch's accumulator open so blocks
+            // authored after the boundary are not silently discarded and are
+            // paid at the following Housekeeping boundary.
+            if tracked_epoch >= T::CollatorEpoch::epoch_at(Self::now()) {
                 return;
             }
-            let shares = CollatorAuthoredBlocks::<T>::get();
+            if CollatorAuthoredOverflowed::<T>::get() {
+                return;
+            }
+            let Some(registered_collators) = (if pending {
+                CollatorPendingRegisteredCount::<T>::get()
+            } else {
+                CollatorAuthoredRegisteredCount::<T>::get()
+            }) else {
+                return;
+            };
+            let shares = if pending {
+                CollatorPendingBlocks::<T>::get()
+            } else {
+                CollatorAuthoredBlocks::<T>::get()
+            };
             let mut treasury = Self::load();
             let Ok(payouts) = treasury.collator_compensation(
                 &shares
@@ -1266,6 +1388,7 @@ pub mod pallet {
                     .map(|(who, blocks)| (Self::to_core_account(who.clone()), *blocks))
                     .collect::<Vec<_>>(),
                 T::Params::collator_comp_epoch(),
+                registered_collators,
             ) else {
                 return;
             };
@@ -1285,8 +1408,16 @@ pub mod pallet {
                 for event in events {
                     Self::deposit_core_event(event);
                 }
-                CollatorAuthoredBlocks::<T>::kill();
-                CollatorAuthoredEpoch::<T>::kill();
+                if pending {
+                    CollatorPendingBlocks::<T>::kill();
+                    CollatorPendingEpoch::<T>::kill();
+                    CollatorPendingRegisteredCount::<T>::kill();
+                } else {
+                    CollatorAuthoredBlocks::<T>::kill();
+                    CollatorAuthoredEpoch::<T>::kill();
+                    CollatorAuthoredRegisteredCount::<T>::kill();
+                }
+                CollatorAuthoredOverflowed::<T>::kill();
                 CollatorCompensationPaidEpoch::<T>::put(tracked_epoch);
                 Ok::<(), DispatchError>(())
             });
@@ -1744,11 +1875,39 @@ pub mod pallet {
                     "treasury: collator authored-share epoch is not joined to its accumulator",
                 ));
             }
-            if CollatorCompensationPaidEpoch::<T>::get() == CollatorAuthoredEpoch::<T>::get()
-                && CollatorAuthoredEpoch::<T>::get().is_some()
+            if CollatorAuthoredEpoch::<T>::get().is_none()
+                != CollatorAuthoredRegisteredCount::<T>::get().is_none()
             {
                 return Err(TryRuntimeError::Other(
-                    "treasury: collator compensation is both paid and pending",
+                    "treasury: collator registered-count snapshot is not joined to its accumulator",
+                ));
+            }
+            let pending = CollatorPendingBlocks::<T>::get();
+            if pending.len() > T::MaxCollatorCompensationEntries::get() as usize {
+                return Err(TryRuntimeError::Other(
+                    "treasury: pending collator authored-share accumulator exceeds its bound",
+                ));
+            }
+            if pending.is_empty() != CollatorPendingEpoch::<T>::get().is_none()
+                || pending.is_empty() != CollatorPendingRegisteredCount::<T>::get().is_none()
+            {
+                return Err(TryRuntimeError::Other(
+                    "treasury: pending collator snapshot is not joined to its accumulator",
+                ));
+            }
+            if let (Some(active), Some(pending)) = (
+                CollatorAuthoredEpoch::<T>::get(),
+                CollatorPendingEpoch::<T>::get(),
+            ) {
+                if pending >= active {
+                    return Err(TryRuntimeError::Other(
+                        "treasury: pending collator epoch is not older than active epoch",
+                    ));
+                }
+            }
+            if CollatorAuthoredOverflowed::<T>::get() {
+                return Err(TryRuntimeError::Other(
+                    "treasury: collator authored-share accumulator overflowed",
                 ));
             }
             let community_remaining = CommunityDistributionRemaining::<T>::get();

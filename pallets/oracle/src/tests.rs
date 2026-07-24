@@ -1362,6 +1362,57 @@ fn adjudicate_third_offense_slashes_and_ejects_reporter() {
     });
 }
 
+#[test]
+fn third_offense_releases_remaining_reporter_stake() {
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        assert_ok!(Oracle::note_recomputable(C, V));
+        let disproof = proof_for(counter_value());
+        for epoch in E..=E + 1 {
+            assert_ok!(Oracle::report(
+                RuntimeOrigin::signed(acc(1)),
+                C,
+                epoch,
+                V,
+                reported_value(),
+                hash_evidence(&disproof)
+            ));
+            assert_ok!(Oracle::recompute_proof(
+                RuntimeOrigin::signed(acc(5)),
+                C,
+                epoch,
+                V,
+                proof_arg(disproof.clone())
+            ));
+        }
+        let released_before = CustodyReleased::get();
+        let slashed_before = CustodySlashed::get();
+        assert_ok!(Oracle::report(
+            RuntimeOrigin::signed(acc(1)),
+            C,
+            E + 2,
+            V,
+            reported_value(),
+            hash_evidence(&disproof)
+        ));
+        assert_ok!(Oracle::recompute_proof(
+            RuntimeOrigin::signed(acc(5)),
+            C,
+            E + 2,
+            V,
+            proof_arg(disproof)
+        ));
+        // The third losing recompute still forfeits its round bond; it must
+        // not add another registration-stake slash.
+        assert_eq!(CustodySlashed::get() - slashed_before, bond(1));
+        assert_eq!(
+            CustodyReleased::get() - released_before,
+            ORC_REPORTER_STAKE - ORC_REPORTER_STAKE / 2
+        );
+        assert!(Reporters::<Test>::get(acc(1)).is_none());
+    });
+}
+
 // =========================================================================
 // 8. request_adjudication (07 §5.4 — runtime-internal escalation to the track)
 // =========================================================================
@@ -3017,6 +3068,8 @@ fn watchtower_liveness_second_consecutive_miss_slashes_and_ejects() {
         ParamsValue::set(amended);
         register_watchtower(3);
         System::reset_events();
+        let released_before = CustodyReleased::get();
+        let slashed_before = CustodySlashed::get();
         assert_ok!(Oracle::note_epoch_boundary(3, true)); // inactive #2 ⇒ slash + eject
         assert!(oracle_events().iter().any(|e| matches!(
             e,
@@ -3025,6 +3078,11 @@ fn watchtower_liveness_second_consecutive_miss_slashes_and_ejects() {
         )));
         assert_eq!(Watchtowers::<Test>::count(), 1);
         assert!(Watchtowers::<Test>::get(acc(2)).is_none());
+        assert_eq!(CustodySlashed::get() - slashed_before, WT_STAKE / 10);
+        assert_eq!(
+            CustodyReleased::get() - released_before,
+            WT_STAKE - WT_STAKE / 10
+        );
 
         System::reset_events();
         assert_ok!(Oracle::note_epoch_boundary(4, true)); // amended seat inactive #1
