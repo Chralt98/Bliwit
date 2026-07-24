@@ -1007,6 +1007,7 @@ pub mod pallet {
             let params = Self::live_params()?;
             let now = Self::now();
             let mut advanced = false;
+            let mut entered_housekeeping = false;
             let result = frame_support::storage::with_storage_layer(|| {
                 Self::mutate(|state, ledger| {
                     state.horizon_k = params.horizon_k;
@@ -1019,11 +1020,8 @@ pub mod pallet {
                         state.epoch.length,
                     );
                     Self::sync_clock(state, now)?;
-                    let entered_housekeeping = clock_before.1 != EpochPhase::Housekeeping
+                    entered_housekeeping = clock_before.1 != EpochPhase::Housekeeping
                         && state.epoch.phase == EpochPhase::Housekeeping;
-                    if entered_housekeeping {
-                        T::CollatorCompensation::pay();
-                    }
                     let entered_seed =
                         clock_before.1 != EpochPhase::Seed && state.epoch.phase == EpochPhase::Seed;
                     if entered_seed {
@@ -1279,6 +1277,12 @@ pub mod pallet {
                     .map_err(|_| Error::<T>::Welfare)?;
                 Ok(())
             });
+            // EpochOf is persisted by the completed state mutation before the
+            // compensation sink reads CurrentEpoch. This closes the Housekeeping
+            // boundary over the completed epoch rather than the one just entered.
+            if result.is_ok() && entered_housekeeping {
+                T::CollatorCompensation::pay();
+            }
             if result.is_ok() && advanced {
                 // B5 recalibrates this weight for the rebate sink's treasury writes.
                 T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);

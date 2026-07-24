@@ -4,7 +4,10 @@
 //! differential (Python M3 ≡ Rust core ≡ this pallet at default parameters).
 
 use crate::mock::*;
-use crate::{CollatorAuthoredBlocks, CollatorAuthoredEpoch, Error, Event, PayoutLine};
+use crate::{
+    CollatorAuthoredBlocks, CollatorAuthoredEpoch, CollatorAuthoredOverflowed, Error, Event,
+    PayoutLine,
+};
 use frame_support::{
     assert_err, assert_noop, assert_ok,
     traits::{ConstU32, Hooks, StorageVersion},
@@ -982,6 +985,23 @@ fn collator_compensation_defers_when_custody_is_underfunded() {
             rebate_payouts(),
             vec![(acc(7), 4_000_000_000, PayoutLine::OpsCollators)]
         );
+    });
+}
+
+#[test]
+fn collator_compensation_fails_closed_on_accumulator_overflow() {
+    funded_ext().execute_with(|| {
+        for seed in 0..=100 {
+            Treasury::note_collator_block(acc(seed));
+        }
+        assert_eq!(CollatorAuthoredBlocks::<Test>::get().len(), 100);
+        assert!(CollatorAuthoredOverflowed::<Test>::get());
+
+        set_epoch(1);
+        Treasury::pay_collator_compensation();
+        assert!(rebate_payouts().is_empty());
+        assert!(CollatorAuthoredOverflowed::<Test>::get());
+        assert!(Treasury::do_try_state().is_err());
     });
 }
 

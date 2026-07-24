@@ -545,6 +545,12 @@ pub mod pallet {
     #[pallet::storage]
     pub type CollatorAuthoredEpoch<T: Config> = StorageValue<_, EpochId, OptionQuery>;
 
+    /// Sticky fail-closed marker for an authored-share accumulator overflow.
+    /// A payout is never attempted while this is set, so omitted authors can
+    /// never be silently underpaid.
+    #[pallet::storage]
+    pub type CollatorAuthoredOverflowed<T: Config> = StorageValue<_, bool, ValueQuery>;
+
     /// Last epoch whose compensation was committed. This prevents authorship
     /// arriving after the Housekeeping payout from creating a second claim.
     #[pallet::storage]
@@ -1270,8 +1276,8 @@ pub mod pallet {
             CollatorAuthoredBlocks::<T>::mutate(|shares| {
                 if let Some((_, blocks)) = shares.iter_mut().find(|(who, _)| *who == author) {
                     *blocks = blocks.saturating_add(1);
-                } else {
-                    let _ = shares.try_push((author, 1));
+                } else if shares.try_push((author, 1)).is_err() {
+                    CollatorAuthoredOverflowed::<T>::put(true);
                 }
             });
         }
@@ -1291,6 +1297,9 @@ pub mod pallet {
             // authored after the boundary are not silently discarded and are
             // paid at the following Housekeeping boundary.
             if tracked_epoch >= T::CurrentEpoch::get() {
+                return;
+            }
+            if CollatorAuthoredOverflowed::<T>::get() {
                 return;
             }
             let shares = CollatorAuthoredBlocks::<T>::get();
@@ -1323,6 +1332,7 @@ pub mod pallet {
                 }
                 CollatorAuthoredBlocks::<T>::kill();
                 CollatorAuthoredEpoch::<T>::kill();
+                CollatorAuthoredOverflowed::<T>::kill();
                 CollatorCompensationPaidEpoch::<T>::put(tracked_epoch);
                 Ok::<(), DispatchError>(())
             });
@@ -1778,6 +1788,11 @@ pub mod pallet {
             if authored.is_empty() != CollatorAuthoredEpoch::<T>::get().is_none() {
                 return Err(TryRuntimeError::Other(
                     "treasury: collator authored-share epoch is not joined to its accumulator",
+                ));
+            }
+            if CollatorAuthoredOverflowed::<T>::get() {
+                return Err(TryRuntimeError::Other(
+                    "treasury: collator authored-share accumulator overflowed",
                 ));
             }
             let community_remaining = CommunityDistributionRemaining::<T>::get();
