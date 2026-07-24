@@ -357,7 +357,7 @@ right). **C** is the single integration-contract bump. **X** is real code.
 
 Priority inside **X**: the release-manifest `release_blockers` rows (SQ-205, SQ-263,
 SQ-261, and the SQ-173/174/175/177/180/181/182 adoption-input family) and the
-self-locking liveness traps (SQ-215, SQ-235, joined by SQ-251) lead; SQ-233 gained
+self-locking liveness traps (SQ-215, SQ-235) lead; SQ-233 gained
 urgency at G1 as the named blocker for drill 08. **B4 added eight rows and two of
 them outrank most of that list:** SQ-40 (every non-TREASURY proposal fails the
 `decide` *dispatch* instead of returning `Reject(SecuritySizing)`, so it can never
@@ -1320,3 +1320,4 @@ Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
 | 2026-07-24 | SQ-251 protocol-account recovery exemption status correction | Re-audited merged B15 (`ba27dfa`) against 09 §5.2 and 08 §8. The canonical protocol-account predicate bypasses only the per-account deposit meter; global TVL, accounting and try-state remain enforced. `pallet-inflow-caps` **14/14** and the production Treasury protocol-keyed trap-recovery regression are green. No Rust change, exhaustive rerun, network drill or CI poll applies to this PLAN-only correction. | Committed `6074d73`, pushed `feat/sq251-plan-close`, and opened draft [PR #157](https://github.com/bleavit/bleavit/pull/157) stacked on #156. The required thread-aware connector scan returned no conversation comments, reviews or review threads, so there was nothing valid to fix, answer or resolve. This final PLAN-only update is under R-12; no redundant Cargo rerun or CI wait applies. |
 | 2026-07-24 | PR #157 train refresh | Merged the refreshed PR #156 head (`c3e9e87`) into the SQ-251 branch, composing append-only PLAN histories. | Push, then mark ready with `@codex review` once the upstream train settles. |
 | 2026-07-24 | PR #157 wave: main rebase + taint propagation | Merged the PR #156 head (`2d7d87a`). Docs-centric branch; PLAN tables and diff checks green; ready-marking follows once the wave completes. | Continue the wave into PR #158. |
+| 2026-07-24 | PR #157 Codex P3 remediation | Dropped the now-closed SQ-251 from the X-batch priority guidance paragraph so PLAN's next-work pointer no longer routes follow-up sessions to resolved work. | Merge the repaired upstream head when the wave arrives, push, and resolve the thread. |
