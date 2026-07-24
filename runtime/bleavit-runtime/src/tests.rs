@@ -4584,6 +4584,23 @@ fn treasury_collator_boundary_authorship_uses_the_next_epoch_accumulator() {
 }
 
 #[test]
+fn runtime_collator_authorship_charges_mandatory_accounting_weight() {
+    development_ext().execute_with(|| {
+        let before = *System::block_weight().get(DispatchClass::Mandatory);
+        let expected = <<Runtime as pallet_futarchy_treasury::Config>::WeightInfo as
+            pallet_futarchy_treasury::WeightInfo>::note_collator_block();
+
+        <crate::configs::RuntimeCollatorAuthorship as pallet_authorship::EventHandler<
+            AccountId,
+            BlockNumber,
+        >>::note_author(account(77));
+
+        let after = *System::block_weight().get(DispatchClass::Mandatory);
+        assert_eq!(after, before.saturating_add(expected));
+    });
+}
+
+#[test]
 fn treasury_keeper_line_funding_moves_matching_real_usdc_into_the_pot() {
     use crate::{configs::treasury_keeper_account, genesis::treasury_account};
     use pallet_futarchy_treasury::BudgetLine;
