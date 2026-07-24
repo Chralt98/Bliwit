@@ -587,9 +587,9 @@ pub mod pallet {
     #[pallet::storage]
     pub type CollatorPendingRegisteredCount<T: Config> = StorageValue<_, u32, OptionQuery>;
 
-    /// Sticky fail-closed marker for an authored-share accumulator overflow.
-    /// A payout is never attempted while this is set, so omitted authors can
-    /// never be silently underpaid.
+    /// Fail-closed marker for an authored-share accumulator overflow. It blocks
+    /// payout of the affected current accumulator, while a separately retained
+    /// pending accumulator remains eligible for retry.
     #[pallet::storage]
     pub type CollatorAuthoredOverflowed<T: Config> = StorageValue<_, bool, ValueQuery>;
 
@@ -1375,7 +1375,13 @@ pub mod pallet {
             if tracked_epoch >= T::CollatorEpoch::epoch_at(Self::now()) {
                 return;
             }
-            if CollatorAuthoredOverflowed::<T>::get() {
+            // An overflow means the current accumulator cannot be trusted: an
+            // author or a whole boundary-owned accumulator may have been
+            // omitted, so that accumulator must not pay. A retained pending
+            // accumulator is complete and bounded, however, and must remain
+            // retryable after custody is restored (08 §2.4). Once it settles,
+            // the storage transaction below clears the overflow marker too.
+            if CollatorAuthoredOverflowed::<T>::get() && !pending {
                 return;
             }
             let Some(registered_collators) = (if pending {
