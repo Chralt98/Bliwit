@@ -41,6 +41,10 @@ pub struct ChainSnapshot {
     pub available_calls: BTreeSet<String>,
     pub live_params: LivePlannerParams,
     pub tick_batch: Option<usize>,
+    /// The ordered epoch phase fractions read from `Epoch::PhaseOffsets`.
+    /// Missing or malformed metadata is represented as `None`; phase-sensitive
+    /// keeper work must then remain disabled rather than mirror stale values.
+    pub phase_offsets: Option<PhaseOffsets>,
     pub epoch: Option<EpochSnapshot>,
     pub books: Vec<BookSnapshot>,
     pub proposals: Vec<ProposalSnapshot>,
@@ -62,6 +66,11 @@ pub struct ChainSnapshot {
     pub baseline_dust: Vec<ReapSnapshot>,
     pub baseline_vaults: Vec<BaselineVaultSnapshot>,
     pub welfare: Option<WelfareSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PhaseOffsets {
+    pub ordered: [(u64, u64); 7],
 }
 
 impl ChainSnapshot {
@@ -380,7 +389,8 @@ impl SnapshotExtractor {
             }
         };
         let live_params = self.extract_live_planner_params(&at_block).await;
-        let epoch = self.extract_epoch(&at_block).await;
+        let phase_offsets = self.constant_phase_offsets(&at_block);
+        let epoch = self.extract_epoch(&at_block, phase_offsets.as_ref()).await;
         let (proposals, proposal_snapshot_incomplete) = self.extract_proposals(&at_block).await;
         let (cohorts, cohort_snapshot_incomplete) = self.extract_cohorts(&at_block).await;
         let mut books = self.extract_books(&at_block).await;
@@ -407,6 +417,7 @@ impl SnapshotExtractor {
             available_calls: self.calls.clone(),
             live_params,
             tick_batch: Some(tick_batch),
+            phase_offsets,
             epoch,
             books,
             proposals,
@@ -482,6 +493,7 @@ impl SnapshotExtractor {
     async fn extract_epoch(
         &self,
         at_block: &OnlineClientAtBlock<PolkadotConfig>,
+        phase_offsets: Option<&PhaseOffsets>,
     ) -> Option<EpochSnapshot> {
         let value = self.fetch_value(at_block, "Epoch", "EpochOf").await?;
         let schedule = self.fetch_value(at_block, "Epoch", "Schedule").await;
@@ -496,9 +508,9 @@ impl SnapshotExtractor {
             .as_ref()
             .and_then(|item| item.at("length"))
             .and_then(as_u64);
-        let next_boundary = epoch_start_block
-            .zip(length)
-            .and_then(|(start, length)| phase_boundary(start, length, &phase));
+        let next_boundary = epoch_start_block.zip(length).and_then(|(start, length)| {
+            phase_offsets.and_then(|offsets| phase_boundary(start, length, &phase, offsets))
+        });
         Some(EpochSnapshot {
             index,
             phase,
@@ -1059,6 +1071,23 @@ impl SnapshotExtractor {
             }
         }
     }
+
+    fn constant_phase_offsets(
+        &self,
+        at_block: &OnlineClientAtBlock<PolkadotConfig>,
+    ) -> Option<PhaseOffsets> {
+        if !self.pallets.contains("Epoch") {
+            return None;
+        }
+        let address = dynamic::constant::<Value<()>>("Epoch", "PhaseOffsets");
+        match at_block.constants().entry(address) {
+            Ok(value) => decode_phase_offsets(&value),
+            Err(error) => {
+                debug!(pallet = "Epoch", constant = "PhaseOffsets", %error, "dynamic constant unavailable");
+                None
+            }
+        }
+    }
 }
 
 fn call_key(pallet: &str, call: &str) -> String {
@@ -1167,24 +1196,28 @@ fn resolve_daily_gate_samples(value: Option<u64>) -> u8 {
         .unwrap_or(DEFAULT_DAILY_GATE_SAMPLES)
 }
 
-fn phase_boundary(epoch_start: u64, length: u64, phase: &str) -> Option<u64> {
-    let numerator = match phase {
-        "Intake" => 3,
-        "Qualify" => 4,
-        "Seed" => 5,
-        "Trade" => 18,
-        "Decide" => 20,
-        "Housekeeping" => 21,
-        "Review" | "Execute" => {
-            return Some(
-                epoch_start
-                    .saturating_add(length.saturating_mul(18) / 21)
-                    .saturating_add(1),
-            );
-        }
+fn phase_boundary(
+    epoch_start: u64,
+    length: u64,
+    phase: &str,
+    offsets: &PhaseOffsets,
+) -> Option<u64> {
+    let (numerator, denominator, next_epoch) = match phase {
+        "Intake" => (offsets.ordered[1].0, offsets.ordered[1].1, false),
+        "Qualify" => (offsets.ordered[2].0, offsets.ordered[2].1, false),
+        "Seed" => (offsets.ordered[3].0, offsets.ordered[3].1, false),
+        "Trade" => (offsets.ordered[5].0, offsets.ordered[5].1, false),
+        "Decide" => (offsets.ordered[6].0, offsets.ordered[6].1, false),
+        "Housekeeping" => (offsets.ordered[0].0, offsets.ordered[0].1, true),
+        "Review" | "Execute" => (offsets.ordered[5].0, offsets.ordered[5].1, false),
         _ => return None,
     };
-    Some(epoch_start.saturating_add(length.saturating_mul(numerator) / 21))
+    let boundary = if next_epoch {
+        epoch_start.saturating_add(length)
+    } else {
+        epoch_start.saturating_add(length.saturating_mul(numerator) / denominator)
+    };
+    Some(boundary.saturating_add(matches!(phase, "Review" | "Execute") as u64))
 }
 
 fn mark_decision_window(
@@ -1459,6 +1492,35 @@ fn composite_values<C>(value: &Value<C>) -> impl Iterator<Item = &Value<C>> {
     }
     .into_iter()
     .flatten()
+}
+
+fn decode_phase_offsets<C>(value: &Value<C>) -> Option<PhaseOffsets> {
+    let entries = composite_values(value).collect::<Vec<_>>();
+    if entries.len() != 7 {
+        return None;
+    }
+    let mut ordered = [(0_u64, 0_u64); 7];
+    let mut denominator = None;
+    let mut previous_numerator = None;
+    for (index, entry) in entries.into_iter().enumerate() {
+        let pair = composite_values(entry).collect::<Vec<_>>();
+        if pair.len() != 2 {
+            return None;
+        }
+        let numerator = as_u64(pair[0])?;
+        let entry_denominator = as_u64(pair[1])?;
+        if entry_denominator == 0
+            || numerator >= entry_denominator
+            || denominator.is_some_and(|value| value != entry_denominator)
+            || previous_numerator.is_some_and(|value| numerator <= value)
+        {
+            return None;
+        }
+        ordered[index] = (numerator, entry_denominator);
+        denominator = Some(entry_denominator);
+        previous_numerator = Some(numerator);
+    }
+    (ordered[0].0 == 0).then_some(PhaseOffsets { ordered })
 }
 
 fn fixed_32_from_value<C>(value: &Value<C>) -> Option<[u8; 32]> {
@@ -2021,9 +2083,95 @@ mod tests {
 
     #[test]
     fn phase_boundaries_follow_the_frozen_fraction_grid() {
-        assert_eq!(phase_boundary(100, 302_400, "Intake"), Some(43_300));
-        assert_eq!(phase_boundary(100, 302_400, "Trade"), Some(259_300));
-        assert_eq!(phase_boundary(100, 302_400, "Housekeeping"), Some(302_500));
+        let offsets = PhaseOffsets {
+            ordered: [
+                (0, 21),
+                (3, 21),
+                (4, 21),
+                (5, 21),
+                (15, 21),
+                (18, 21),
+                (20, 21),
+            ],
+        };
+        assert_eq!(
+            phase_boundary(100, 302_400, "Intake", &offsets),
+            Some(43_300)
+        );
+        assert_eq!(
+            phase_boundary(100, 302_400, "Trade", &offsets),
+            Some(259_300)
+        );
+        assert_eq!(
+            phase_boundary(100, 302_400, "Housekeeping", &offsets),
+            Some(302_500)
+        );
+        let amended = PhaseOffsets {
+            ordered: [
+                (0, 10),
+                (2, 10),
+                (3, 10),
+                (4, 10),
+                (6, 10),
+                (8, 10),
+                (9, 10),
+            ],
+        };
+        assert_eq!(phase_boundary(100, 100, "Intake", &amended), Some(120));
+        assert_eq!(phase_boundary(100, 100, "Trade", &amended), Some(180));
+    }
+
+    #[test]
+    fn phase_offsets_decode_only_well_formed_ordered_fractions() {
+        let value = Value::unnamed_composite([
+            Value::unnamed_composite([Value::u128(0), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(3), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(4), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(5), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(15), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(18), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(20), Value::u128(21)]),
+        ]);
+        assert_eq!(
+            decode_phase_offsets(&value),
+            Some(PhaseOffsets {
+                ordered: [
+                    (0, 21),
+                    (3, 21),
+                    (4, 21),
+                    (5, 21),
+                    (15, 21),
+                    (18, 21),
+                    (20, 21),
+                ],
+            })
+        );
+
+        let malformed = Value::unnamed_composite([
+            Value::unnamed_composite([Value::u128(0), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(3), Value::u128(20)]),
+            Value::unnamed_composite([Value::u128(4), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(5), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(15), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(18), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(20), Value::u128(21)]),
+        ]);
+        assert_eq!(decode_phase_offsets(&malformed), None);
+
+        // 02 §9 / 13 §3.1: every phase start lives in [0, 1) — a numerator
+        // equal to its denominator (e.g. a (21, 21) Housekeeping entry) is
+        // malformed and must disable phase-sensitive work, not round-trip
+        // into a derived schedule.
+        let end_of_epoch = Value::unnamed_composite([
+            Value::unnamed_composite([Value::u128(0), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(3), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(4), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(5), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(15), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(18), Value::u128(21)]),
+            Value::unnamed_composite([Value::u128(21), Value::u128(21)]),
+        ]);
+        assert_eq!(decode_phase_offsets(&end_of_epoch), None);
     }
 
     #[test]

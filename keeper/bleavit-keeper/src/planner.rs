@@ -108,6 +108,9 @@ fn plan_tick(snapshot: &ChainSnapshot, config: &PlannerConfig, cranks: &mut Vec<
     if !enabled(config, Role::Tick) || !snapshot.has_call("Epoch", "tick") {
         return;
     }
+    if snapshot.phase_offsets.is_none() {
+        return;
+    }
     let Some(epoch) = &snapshot.epoch else {
         return;
     };
@@ -266,6 +269,9 @@ fn plan_settlement(
     cranks: &mut Vec<PlannedCrank>,
 ) {
     if !enabled(config, Role::Settle) || !snapshot.has_call("Epoch", "settle_cohort") {
+        return;
+    }
+    if snapshot.phase_offsets.is_none() {
         return;
     }
     let Some(epoch) = &snapshot.epoch else {
@@ -786,6 +792,17 @@ mod tests {
                 ..crate::snapshot::LivePlannerParams::default()
             },
             tick_batch: Some(DEFAULT_TICK_BATCH),
+            phase_offsets: Some(crate::snapshot::PhaseOffsets {
+                ordered: [
+                    (0, 21),
+                    (3, 21),
+                    (4, 21),
+                    (5, 21),
+                    (15, 21),
+                    (18, 21),
+                    (20, 21),
+                ],
+            }),
             epoch: Some(EpochSnapshot {
                 index: 5,
                 phase: "Housekeeping".to_owned(),
@@ -946,6 +963,17 @@ mod tests {
             );
             assert!(planned.iter().all(|crank| crank.role == role));
         }
+    }
+
+    #[test]
+    fn missing_phase_offsets_suppress_tick_work() {
+        let mut snapshot = snapshot();
+        snapshot.phase_offsets = None;
+        let planned = plan(&snapshot, &config_for(Role::Tick));
+        assert!(
+            planned.is_empty(),
+            "phase metadata must fail closed: {planned:?}"
+        );
     }
 
     #[test]
