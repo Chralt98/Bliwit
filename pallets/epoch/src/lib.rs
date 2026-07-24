@@ -1007,6 +1007,7 @@ pub mod pallet {
             let params = Self::live_params()?;
             let now = Self::now();
             let mut advanced = false;
+            let mut crossed_epoch = false;
             let result = frame_support::storage::with_storage_layer(|| {
                 Self::mutate(|state, ledger| {
                     state.horizon_k = params.horizon_k;
@@ -1019,11 +1020,7 @@ pub mod pallet {
                         state.epoch.length,
                     );
                     Self::sync_clock(state, now)?;
-                    let entered_housekeeping = clock_before.1 != EpochPhase::Housekeeping
-                        && state.epoch.phase == EpochPhase::Housekeeping;
-                    if entered_housekeeping {
-                        T::CollatorCompensation::pay();
-                    }
+                    crossed_epoch = clock_before.0 != state.epoch.index;
                     let entered_seed =
                         clock_before.1 != EpochPhase::Seed && state.epoch.phase == EpochPhase::Seed;
                     if entered_seed {
@@ -1279,6 +1276,13 @@ pub mod pallet {
                     .map_err(|_| Error::<T>::Welfare)?;
                 Ok(())
             });
+            // The Housekeeping phase belongs to the epoch that just ended. Pay
+            // only after the clock crossing has persisted `EpochOf`, so the
+            // compensation sink observes `CurrentEpoch = completed + 1` and
+            // its completed-epoch guard cannot suppress the payout.
+            if result.is_ok() && crossed_epoch {
+                T::CollatorCompensation::pay();
+            }
             if result.is_ok() && advanced {
                 // B5 recalibrates this weight for the rebate sink's treasury writes.
                 T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
@@ -1292,6 +1296,7 @@ pub mod pallet {
             let who = ensure_signed(origin)?;
             let params = Self::live_params()?;
             let now = Self::now();
+            let epoch_before = EpochOf::<T>::get().index;
             let mut decision_advanced = false;
             let result = frame_support::storage::with_storage_layer(|| {
                 let mut state = Self::load();
@@ -1371,6 +1376,11 @@ pub mod pallet {
                 // B5 recalibrates this weight for the rebate sink's treasury writes.
                 T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
             }
+            if result.is_ok() && EpochOf::<T>::get().index != epoch_before {
+                // Any successful clock-sync entry point can be the first
+                // caller after Housekeeping; do not wait for a later tick.
+                T::CollatorCompensation::pay();
+            }
             result
         }
 
@@ -1384,6 +1394,7 @@ pub mod pallet {
             );
             let params = Self::live_params()?;
             let now = Self::now();
+            let epoch_before = EpochOf::<T>::get().index;
 
             // Detect the exact 05 §4.7 / 07 §10 fail-static condition before
             // entering the settlement rollback layer. A write made by the
@@ -1487,6 +1498,11 @@ pub mod pallet {
             if result.is_ok() {
                 // B5 recalibrates this weight for the rebate sink's treasury writes.
                 T::KeeperRebate::rebate(&who, CrankClass::DecisionCritical);
+            }
+            if result.is_ok() && EpochOf::<T>::get().index != epoch_before {
+                // `settle_cohort` also synchronizes the phase clock and may
+                // cross Housekeeping before `tick` gets a chance to run.
+                T::CollatorCompensation::pay();
             }
             result
         }
@@ -1908,6 +1924,30 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         pub fn current_epoch() -> EpochId {
             EpochOf::<T>::get().index
+        }
+
+        /// Return the logical epoch owning authorship observed at `block`.
+        /// Authorship can run before a permissionless clock crank persists a
+        /// boundary transition, so derive the owner from the schedule rather
+        /// than blindly reading the last persisted `EpochOf` value.
+        pub fn epoch_for_block(block: BlockNumber) -> EpochId {
+            let current = EpochOf::<T>::get();
+            if DeadMan::<T>::get().paused_at.is_some() {
+                return current.index;
+            }
+            let schedule = Schedule::<T>::get();
+            let Some(first_boundary) = schedule.epoch_start_block.checked_add(schedule.length)
+            else {
+                return current.index;
+            };
+            if block < first_boundary {
+                return current.index;
+            }
+            let length = schedule.next_length.max(1);
+            current
+                .index
+                .saturating_add(1)
+                .saturating_add(block.saturating_sub(first_boundary) / length)
         }
 
         /// Observe the two 05 §4.8 detector inputs once per parachain block.

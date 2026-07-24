@@ -20,9 +20,24 @@ use futarchy_primitives::{
 };
 use market_core::{BookKind, MarketBook, MarketPhase, MarketState, TwapCumulative, MIN_TRADE};
 use pallet_conditional_ledger::core_ledger::{baseline, position, LedgerState};
+use parity_scale_codec::Encode;
 use sp_runtime::traits::Dispatchable;
 
 type E = Error<Test>;
+
+#[test]
+fn error_scale_discriminants_are_append_only() {
+    // Existing market errors are retained in execution metadata across
+    // upgrades. The epoch-mismatch error must trail them rather than shift
+    // the established discriminants.
+    assert_eq!(E::AlreadySeeded.encode(), vec![15]);
+    assert_eq!(E::CreationFrozen.encode(), vec![16]);
+    assert_eq!(E::Frozen.encode(), vec![17]);
+    assert_eq!(E::FreezeOutOfBounds.encode(), vec![18]);
+    assert_eq!(E::FreezeRenewalExhausted.encode(), vec![19]);
+    assert_eq!(E::UnreservedProtocolAccount.encode(), vec![20]);
+    assert_eq!(E::EpochMismatch.encode(), vec![21]);
+}
 
 const MARKET_ID: MarketId = 7;
 const BASELINE_ID: MarketId = 11;
@@ -2865,6 +2880,35 @@ fn baseline_carry_snapshot_ignores_a_later_in_flight_window() {
             second_end,
         ));
         assert_eq!(Market::sealed_baseline_twap(EPOCH), Some(first));
+        assert_try_state();
+    });
+}
+
+#[test]
+fn non_gradeable_baseline_window_does_not_capture_carry() {
+    new_test_ext().execute_with(|| {
+        create_baseline();
+        seed(BASELINE_ID);
+        let interval = u32::try_from(ObsInterval::get()).unwrap_or_default();
+        let end = interval.saturating_mul(2);
+        assert_ok!(Market::register_decision_window(
+            signed(MARKET_ADMIN),
+            BASELINE_ID,
+            PROPOSAL,
+            0,
+            interval,
+            end,
+        ));
+        System::set_block_number(u64::from(interval));
+        assert_ok!(Market::crank_observe(signed(BOB), BASELINE_ID));
+        System::set_block_number(u64::from(end));
+        BASELINE_GRADE_ALLOWED.with(|allowed| allowed.set(false));
+        assert_ok!(Market::seal_decision_window(
+            signed(MARKET_ADMIN),
+            BASELINE_ID,
+            end,
+        ));
+        assert_eq!(Market::sealed_baseline_twap(EPOCH), None);
         assert_try_state();
     });
 }

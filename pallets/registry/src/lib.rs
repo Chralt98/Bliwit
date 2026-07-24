@@ -694,16 +694,6 @@ pub mod pallet {
         }
     }
 
-    #[pallet::extra_constants]
-    impl<T: Config<I>, I: 'static> Pallet<T, I> {
-        /// 02 §9: registry records remain readable through the independent
-        /// archive-delay floor selected by the runtime configuration (07 §7).
-        #[pallet::constant_name(ArchiveDelay)]
-        fn archive_delay() -> BlockNumberFor<T> {
-            T::ArchiveDelay::get()
-        }
-    }
-
     // ---------------------------------------------------------- scoped adapter
 
     impl<T: Config<I>, I: 'static> Pallet<T, I> {

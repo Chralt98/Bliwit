@@ -1065,7 +1065,7 @@ reason = "13 §4 / 08 §2.1: the bounded PARAM-origin community schedule path re
 [[entry]]
 key = "Pending collator authored-share entries"
 class = "value"
-reason = "13 §4 / 08 §2.4: the authored-share accumulator is a bounded storage value; a 101st distinct author is fail-closed and is not admitted into state, so there is no separate dispatch error surface."
+reason = "13 §4 / 08 §2.4: the authored-share accumulator is a bounded storage value; a 121st distinct author is fail-closed and is not admitted into state, so there is no separate dispatch error surface."
 
 [[entry]]
 key = "Treasury Streams"
