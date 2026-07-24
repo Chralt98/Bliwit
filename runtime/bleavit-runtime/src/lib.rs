@@ -11,9 +11,9 @@ extern crate alloc;
 
 /// B5 (15 §4.5): the runtime-level benchmark registry — every runtime pallet
 /// with a `frame-benchmarking` harness, iterated by `list_benchmarks!` /
-/// `add_benchmarks!` in `apis.rs`. Deliberately absent: `pallet_xcm`,
-/// `cumulus_pallet_xcm` and the XCM executor legs (production XCM config and
-/// its weights are B4 — the surface is fail-closed today), `pallet_aura` /
+/// `add_benchmarks!` in `apis.rs`. Deliberately absent: `cumulus_pallet_xcm`
+/// and the XCM executor legs (they expose no pallet benchmark harness),
+/// `pallet_aura` /
 /// `pallet_authorship` / `cumulus_pallet_aura_ext` / `staging_parachain_info`
 /// (no dispatchables and no benchmark harness upstream), and
 /// `pallet_transaction_payment` / `pallet_asset_tx_payment` (no benchmarkable
@@ -43,6 +43,7 @@ mod benches {
                 [pallet_message_queue, MessageQueue]
                 [cumulus_pallet_parachain_system, ParachainSystem]
                 [cumulus_pallet_xcmp_queue, XcmpQueue]
+                [pallet_xcm, pallet_xcm::benchmarking::Pallet::<Runtime>]
                 // Futarchy pallets (Track A).
                 [pallet_origins, Origins]
                 [pallet_constitution, Constitution]

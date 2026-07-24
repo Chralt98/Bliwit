@@ -13,14 +13,14 @@
 | Class | Markets | Books |
 | --- | --- | --- |
 | PARAM, TREASURY, CODE, META | decision pair + 4 gate books (S,C)×(adopt,reject) | 6 |
-| Per epoch (unconditional) | Baseline welfare market on `s_e` (§8) | 1 |
+| Per epoch (standing obligation) | Baseline welfare market on `s_e` (§8), instantiated when the first qualified proposal opens markets | 1 when instantiated |
 | CONSTITUTIONAL | none (referendum path) | 0 |
 
 There is no `Emergency` class (deleted per D-7). Decision and Baseline books are scalar LONG/SHORT on the settlement score `s ∈ [0,1]`; gate books are binary YES/NO on the deterministic breach fact (§9).
 
 ### 1.2 Bounds (normative; single derivation)
 
-Books per proposal ≤ **6** (2 decision + 4 gate). Proposal and Baseline books share the same capacities; there is no separately enforced Baseline-book count. The bounds distinguish two lifetimes (SQ-483, contract v8):
+Books per proposal ≤ **6** (2 decision + 4 gate). Proposal and Baseline books share the same capacities; there is no separately enforced Baseline-book count. A zero-qualified epoch creates no physical Baseline row; the capacity derivation below remains the conservative one-book-per-epoch envelope for epochs that open markets. The bounds distinguish two lifetimes (SQ-483, contract v8):
 
 ```
 unsettled / POL-live capacity = MaxLiveMarkets = 32·6 + 4 = 196
@@ -38,7 +38,7 @@ retained-book capacity = MaxStoredMarkets
 
 | Stage | When (epoch offsets; *normative values: §13*) | Actor | Semantics |
 | --- | --- | --- | --- |
-| **Create** | Seed, d4–d5 (57,600–72,000) | `pallet-epoch` tick work list | Vaults, decision pair, gate books for slotted proposals; Baseline(e) book; `BaselineMarketOf[e]` written (§8.3) |
+| **Create** | Seed, d4–d5 (57,600–72,000) | `pallet-epoch` tick work list | Vaults, decision pair and gate books for slotted proposals; when the first qualified proposal opens markets, the epoch's Baseline(e) book is created and `BaselineMarketOf[e]` is written (§8.3) |
 | **Seed** | same window, atomic with create | treasury POL flow | Per-book headroom `b·ln 2` minted as complete sets via the ledger (§6.3, §10) |
 | **Trade** | Trading, **d5–d18** (72,000–259,200; 13 days); per-pair `Extended` adds 3 days once | Signed users via `buy`/`sell` (§6) | Observations every `mkt.obs_interval = 10` blocks (§7). Trading is permitted **only** while the owning proposal is `Trading`/`Extended` (Baseline: §8.4) — this matches the frontend's pre-sign precondition rows exactly (X-5 closure) |
 | **Close** | decision close (d18, or extended close) | internal (`pallet-epoch` → `close(market)`) | Book freezes: `q` immutable, TWAP accumulator sealed at the window boundary. **Books MUST NOT reopen after branch resolution — there is no post-resolution forecast trading in v1 (D-8; §13)** |
@@ -190,7 +190,7 @@ When step 9 needs one scalar for a decision pair, the normative reduction is **`
 
 ### 8.1 Definition
 
-One **unconditional** scalar book per epoch `e` on the epoch's realized welfare score `s_e = GeoMean(W_{e+1}, W_{e+2})` — the same statistic that settles epoch-e cohorts. LONG pays `s_e`, SHORT pays `1 − s_e` per unit; complete set = 1 USDC at any `s_e`.
+One **logical** scalar instrument per epoch `e` on the epoch's realized welfare score `s_e = GeoMean(W_{e+1}, W_{e+2})` — the same statistic that settles epoch-e cohorts. Its physical book is instantiated lazily during Seed when the first qualified proposal opens markets; an epoch with zero qualified proposals has no Baseline book or vault. LONG pays `s_e`, SHORT pays `1 − s_e` per unit; complete set = 1 USDC at any `s_e`.
 
 ### 8.2 Ledger home and collateral
 
@@ -199,12 +199,12 @@ Collateral is plain USDC (no branch, no mirror). The ledger home is normative in
 ### 8.3 Subsidy and discoverability
 
 - Subsidy parameter: **`pol.b_baseline`** constitution key (*value: [13-parameters.md](./13-parameters.md)*), funded from the dedicated **`POL_BASELINE`** treasury line, **outside `pol.budget_epoch`** ([08 §4.3](./08-treasury-and-economics.md)) — the Baseline book never competes with proposal subsidies under shrink-to-fit; seeding mechanics are otherwise those of every book (§10).
-- **`BaselineMarketOf: map EpochIndex → MarketId`** — declared in `pallet-market` storage and written at Baseline book creation. Contract v8 retains the market-lifetime rule: the mapping MUST remain present for exactly as long as its referenced Baseline book exists, including a strictly-past orphan epoch whose vault is still `Open`, and MUST be removed atomically only when that book is successfully reaped. Its structural bound is therefore `MaxStoredMarkets = 2,240`, while an unsettled Baseline consumes the shared `MaxLiveMarkets = 196` active/POL envelope; neither is the cohort-history ring. Shape, name and retention rule are **frozen in [02-integration-contract.md](./02-integration-contract.md) §7.4**; the decision engine's `baseline_market(epoch)` accessor and the frontend's Baseline reads both resolve through it (X-10 closure). The frontend precondition row for Baseline trading exists in doc 11.
+- **`BaselineMarketOf: map EpochIndex → MarketId`** — declared in `pallet-market` storage and written at Baseline book creation. Contract v8 retains the market-lifetime rule: the mapping MUST remain present for exactly as long as its referenced Baseline book exists, including a strictly-past orphan epoch whose vault is still `Open`, and MUST be removed atomically only when that book is successfully reaped. In a zero-qualified epoch the mapping is intentionally absent because no physical Baseline book or vault was opened; the decision engine's carry/no-op rules in [05](./05-welfare-and-decision-engine.md) §5.3 and §7(6) cover that case. Its structural bound is therefore `MaxStoredMarkets = 2,240`, while an unsettled Baseline consumes the shared `MaxLiveMarkets = 196` active/POL envelope; neither is the cohort-history ring. Shape, name and retention rule are **frozen in [02-integration-contract.md](./02-integration-contract.md) §7.4**; the decision engine's `baseline_market(epoch)` accessor and the frontend's Baseline reads both resolve through it (X-10 closure). The frontend precondition row for Baseline trading exists in doc 11.
 - **Discovery after reap (normative; SQ-304; contract v8).** A present `BaselineMarketOf[e]` and its referenced `BookKind::Baseline { epoch: e }` MUST co-exist; market `try-state` enforces both directions. Successful market reap removes them atomically, so `baseline_market(e)` returns absent thereafter. Consumers MUST treat absence as absence rather than as a book quoting zero: when cohort history still identifies the epoch, the frontend labels its book reaped/archived, renders no quote or depth, and disables trading (doc 11). A present mapping with an absent or mismatched book is corrupt chain state and triggers the compatibility hard block. A bounded `MarketState` tombstone is unnecessary because cohort history is already served by `RecentCohortSummaries`.
 
 ### 8.4 Lifecycle and settlement
 
-Created and seeded during epoch e's Seed window; trades d5–d18 alongside decision books and **remains open through the last epoch-e decision, including per-pair 3-day extensions** (its TWAP is consumed over each deciding pair's own window); then freezes. The measured path settles at **e+3** Housekeeping (`pallet-epoch::settle_cohort` → `pallet-welfare::compute_settlement` → ledger), when `snapshot(e+2)` has finalized and survived its challenge window. The two disjoint no-score cases settle neutrally when their owning transitions fire: cohort VOID under §7(5), or permissionless orphan-epoch finalization under §7(6). All three terminate through the same welfare-owned SettleAuthority boundary; reap follows settlement + archive delay.
+Created and seeded during epoch e's Seed window **when the first qualified proposal opens markets**; trades d5–d18 alongside decision books and **remains open through the last epoch-e decision, including per-pair 3-day extensions** (its TWAP is consumed over each deciding pair's own window); then freezes. An epoch with zero qualified proposals has no physical Baseline book and therefore no Baseline settlement or reap work. The measured path settles at **e+3** Housekeeping (`pallet-epoch::settle_cohort` → `pallet-welfare::compute_settlement` → ledger), when `snapshot(e+2)` has finalized and survived its challenge window. The two disjoint no-score cases settle neutrally when their owning transitions fire: cohort VOID under §7(5), or permissionless orphan-epoch finalization under §7(6). All three terminate through the same welfare-owned SettleAuthority boundary; reap follows settlement + archive delay.
 
 **Every Baseline book reaches a terminal latch (normative; SQ-320).** The measured e+3 settlement is not the only way the epoch's Baseline vault terminates, and the book's reapability depends on it terminating: §2's reap ordering makes a seeded book's POL obligation live until `settle_baseline` writes the terminal-block latch, so a Baseline vault that never settles leaves its book permanently un-reapable and its POL permanently committed. The two neutral paths of [05-welfare-and-decision-engine.md](./05-welfare-and-decision-engine.md) §7(5)–(6) — the epoch-VOID cohort void, and the permissionless orphan-epoch finalization for an epoch whose cohort never formed — settle the vault at `s = 0.5` and write the same latch through the same `settle_baseline` call, so no market-side rule changes and no third neutral path exists. Ledger-side ownership of the neutral settlement is [03-conditional-ledger.md](./03-conditional-ledger.md) §5.2.
 
@@ -224,7 +224,7 @@ Every `decide()` consumes the Baseline TWAP as the reject-leg floor (evaluation 
 r_eff = max(r_f, base − σ_class)        // adopt must beat max(reject leg, Baseline − σ)
 ```
 
-This is the capture-resistance adaptation of the reject-leg floor: suppressing the reject book below the economy's own unconditional forecast cannot lower the hurdle below `base − σ`. The Baseline book is also the standing **"priced second opinion"**: an always-on, unconditional market estimate of next-horizon welfare used for entrenchment-path calibration and phase-graduation evidence (doc 06/09 ownership). Degradation rules when the Baseline book fails decision-grade checks are owned by doc 05; the Baseline-floor-suppression threat row lives in doc 14.
+This is the capture-resistance adaptation of the reject-leg floor: suppressing the reject book below the economy's own unconditional forecast cannot lower the hurdle below `base − σ`. The Baseline obligation is also the standing **"priced second opinion"**: when instantiated, its unconditional market estimate of next-horizon welfare is used for entrenchment-path calibration and phase-graduation evidence (doc 06/09 ownership). Degradation rules when the Baseline book fails decision-grade checks, or is absent because no proposal opened one, are owned by doc 05; the Baseline-floor-suppression threat row lives in doc 14.
 
 ---
 

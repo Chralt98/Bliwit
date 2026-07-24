@@ -406,7 +406,22 @@ Carried forward from BE §10.4 with amendments:
 
 ## 8. Errors
 
-`VaultNotOpen`, `WrongVaultState`, `AlreadyResolved`, `AlreadyVoided`, `NotResolved`, `NotSettled`, `GateNotSettled`, `GateAlreadySettled`, `InsufficientPosition`, `BelowMinimum`, `TooManyPositions`, `DepositFailed`, `ProtocolDestination`, `ArithmeticOverflow` (all conservation math is checked; overflow aborts the extrinsic — and per §6.1, no *legal* flow can underflow a per-branch supply field).
+The public FRAME pallet error metadata is exactly the following ordered list:
+`BadOrigin`, `UnknownVault`, `UnknownBaselineVault`, `WrongVaultState`,
+`BelowMinimum`, `ArithmeticOverflow`, `InsufficientPosition`,
+`TooManyPositions`, `InvalidScore`, `GateAlreadySettled`, `GateNotSettled`,
+`TryStateViolation`, `ReapNotDue`, `DepositFailed`, `SplitPaused`, `Frozen`,
+`FreezeOutOfBounds`, `FreezeRenewalExhausted`, `InflowCapExceeded`,
+`ProtocolDestination`. This is the client-facing ledger error surface and is
+metadata-pinned by the pallet test. The frame-free core's internal
+`AmountTooSmall` and `PositionCapExceeded` variants are mapped to the public
+`BelowMinimum` and `TooManyPositions` names; the remaining shell-only variants
+are the origin, lifecycle, freeze, custody and inflow-cap guards. The five
+superseded names (`VaultNotOpen`, `AlreadyResolved`, `AlreadyVoided`,
+`NotResolved`, `NotSettled`) are not reachable errors and MUST NOT be presented
+as part of the pallet surface. All conservation math is checked; overflow
+aborts the extrinsic — and per §6.1, no *legal* flow can underflow a per-branch
+supply field.
 
 **No wrong-branch failure path is reachable (SQ-170).** The superseded list carried `NotWinningPosition`; it is **unreachable by construction** and has been struck: the settled-redemption calls of §5.3 take no branch argument — the ledger derives the winning branch itself from the vault's `Resolved(w)`/`ScalarSettled{w,s}` record before it builds the position key — so a caller cannot name the losing branch and there is no state in which such an error could be raised. A redemption against a position the caller does not hold surfaces as `InsufficientPosition`, and one against a vault in the wrong state as `WrongVaultState`. Implementations MUST NOT expose an unreachable wrong-branch error variant: an error an implementation declares but no path can produce is dead metadata the frontend must still decode, and is a defect rather than a specification to honor.
 

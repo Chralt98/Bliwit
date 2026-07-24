@@ -902,9 +902,6 @@ mod benches {
             MAX_NON_TERMINAL_COHORTS,
         );
         Pallet::<T>::seed(state)?;
-        // The B18 execution-guard gate now requires the ratification record
-        // to exist before binding; seed the same record used by the measured
-        // call so this fixture reaches the dispatch path.
         T::BenchmarkHelper::prime_ratification(1, 77);
 
         #[extrinsic_call]

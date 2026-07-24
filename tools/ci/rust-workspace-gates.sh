@@ -120,6 +120,7 @@ else
   echo "      Enforced by the 'Weight regression' CI job (fetch-depth: 0)."
   echo "      To run it here: git fetch origin main, or pass --base <rev> yourself."
 fi
+python3 tools/ci/check-weight-storage-bounds.py
 
 # B6 release gate (09 §2.1(5)): compile the deployable runtime and its
 # benchmarking surface, then compile and execute the runtime's genesis-state

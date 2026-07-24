@@ -4,6 +4,8 @@ use alloc::{borrow::Cow, boxed::Box, vec, vec::Vec};
 
 #[cfg(feature = "runtime-benchmarks")]
 use frame_support::traits::fungible::MutateHold;
+#[cfg(feature = "runtime-benchmarks")]
+use frame_support::traits::{Currency, Everything};
 use frame_support::{
     derive_impl,
     dispatch::{DispatchClass, DispatchResult},
@@ -1137,9 +1139,13 @@ pub(crate) mod xcm_config {
         staging_xcm_builder::SignedToAccountId32<RuntimeOrigin, AccountId, RelayNetwork>,
     );
 
-    pub struct XcmConfig<Assets = CappedAssets>(core::marker::PhantomData<Assets>);
-    impl<Assets: staging_xcm_executor::traits::TransactAsset> staging_xcm_executor::Config
-        for XcmConfig<Assets>
+    pub struct XcmConfig<Assets = CappedAssets, BarrierType = Barrier>(
+        core::marker::PhantomData<(Assets, BarrierType)>,
+    );
+    impl<
+            Assets: staging_xcm_executor::traits::TransactAsset,
+            BarrierType: staging_xcm_executor::traits::ShouldExecute,
+        > staging_xcm_executor::Config for XcmConfig<Assets, BarrierType>
     {
         type RuntimeCall = RuntimeCall;
         // The Coretime route's local reserve withdrawal targets Parent, so the
@@ -1151,7 +1157,7 @@ pub(crate) mod xcm_config {
         type IsReserve = bleavit_xcm::assets::BleavitReserves;
         type IsTeleporter = ();
         type UniversalLocation = UniversalLocation;
-        type Barrier = Barrier;
+        type Barrier = BarrierType;
         type Weigher = Weigher;
         // Unrefunded fees use payer-adverse disposal until treasury revenue
         // routing is wired; this cannot create an unbacked claim.
@@ -1183,7 +1189,12 @@ pub(crate) mod xcm_config {
     /// so issuance is unchanged. The recovery transactor bypasses only that
     /// prospective global check; its beneficiary deposit remains capped and
     /// records the per-account cumulative meter.
+    #[allow(dead_code)]
     pub type TrapRecoveryExecutor = XcmExecutor<XcmConfig<TrapRecoveryAssets>>;
+    #[cfg(feature = "runtime-benchmarks")]
+    pub type BenchmarkExecutor = XcmExecutor<
+        XcmConfig<TrapRecoveryAssets, staging_xcm_builder::AllowUnpaidExecutionFrom<Everything>>,
+    >;
 }
 
 parameter_types! {
@@ -1244,10 +1255,16 @@ impl cumulus_pallet_xcmp_queue::Config for Runtime {
 impl pallet_xcm::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type SendXcmOrigin = staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, ()>;
+    #[cfg(feature = "runtime-benchmarks")]
+    type XcmRouter = BenchmarkXcmRouter;
+    #[cfg(not(feature = "runtime-benchmarks"))]
     type XcmRouter = xcm_config::Router;
     type ExecuteXcmOrigin =
         staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, xcm_config::LocalOriginToLocation>;
     type XcmExecuteFilter = Nothing;
+    #[cfg(feature = "runtime-benchmarks")]
+    type XcmExecutor = xcm_config::BenchmarkExecutor;
+    #[cfg(not(feature = "runtime-benchmarks"))]
     type XcmExecutor = xcm_config::TrapRecoveryExecutor;
     type XcmTeleportFilter = Nothing;
     type XcmReserveTransferFilter = bleavit_xcm::filter::ReserveTransferFilter;
@@ -1262,12 +1279,150 @@ impl pallet_xcm::Config for Runtime {
     type TrustedLockers = ();
     type SovereignAccountOf = xcm_config::LocationToAccountId;
     type MaxLockers = ConstU32<0>;
-    type WeightInfo = pallet_xcm::TestWeightInfo;
+    type WeightInfo = crate::weights::pallet_xcm::WeightInfo<Runtime>;
     type AdminOrigin = EnsureRoot<AccountId>;
     type MaxRemoteLockConsumers = ConstU32<0>;
     type RemoteLockConsumerIdentifier = ();
     type AuthorizedAliasConsideration = ();
 }
+
+#[cfg(feature = "runtime-benchmarks")]
+pub struct BenchmarkXcmRouter;
+
+#[cfg(feature = "runtime-benchmarks")]
+impl staging_xcm::latest::SendXcm for BenchmarkXcmRouter {
+    type Ticket = (staging_xcm::latest::Location, staging_xcm::latest::Xcm<()>);
+
+    fn validate(
+        destination: &mut Option<staging_xcm::latest::Location>,
+        message: &mut Option<staging_xcm::latest::Xcm<()>>,
+    ) -> staging_xcm::latest::SendResult<Self::Ticket> {
+        let destination = destination
+            .take()
+            .ok_or(staging_xcm::latest::SendError::MissingArgument)?;
+        let message = message
+            .take()
+            .ok_or(staging_xcm::latest::SendError::MissingArgument)?;
+        Ok(((destination, message), staging_xcm::latest::Assets::new()))
+    }
+
+    fn deliver(
+        _ticket: Self::Ticket,
+    ) -> Result<staging_xcm::latest::XcmHash, staging_xcm::latest::SendError> {
+        Ok([0; 32])
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+pub struct XcmBenchmarkDelivery;
+
+#[cfg(feature = "runtime-benchmarks")]
+impl staging_xcm_builder::EnsureDelivery for XcmBenchmarkDelivery {
+    fn ensure_successful_delivery(
+        _origin_ref: &staging_xcm::latest::Location,
+        _dest: &staging_xcm::latest::Location,
+        _fee_reason: staging_xcm_executor::traits::FeeReason,
+    ) -> (
+        Option<staging_xcm_executor::FeesMode>,
+        Option<staging_xcm::latest::Assets>,
+    ) {
+        let caller = frame_benchmarking::whitelisted_caller::<AccountId>();
+        let _ = <Balances as Currency<AccountId>>::make_free_balance_be(
+            &caller,
+            Balances::minimum_balance().saturating_mul(1_000),
+        );
+        (None, None)
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_xcm::benchmarking::Config for Runtime {
+    type DeliveryHelper = XcmBenchmarkDelivery;
+
+    fn reachable_dest() -> Option<staging_xcm::latest::Location> {
+        Some(staging_xcm::latest::Location::parent())
+    }
+
+    fn reserve_transferable_asset_and_dest(
+    ) -> Option<(staging_xcm::latest::Asset, staging_xcm::latest::Location)> {
+        // `pallet-xcm`'s upstream fixture deposits the benchmark asset into
+        // `whitelisted_caller()`.  The production genesis deliberately
+        // endows only protocol custody accounts, so seed that disposable
+        // benchmark account here rather than weakening the live transactor.
+        Some((
+            Self::get_asset(),
+            bleavit_xcm::identity::asset_hub_location(),
+        ))
+    }
+
+    fn get_asset() -> staging_xcm::latest::Asset {
+        benchmark_prime_xcm_asset_state();
+        staging_xcm::latest::Asset {
+            id: staging_xcm::latest::AssetId(bleavit_xcm::identity::usdc_location()),
+            fun: staging_xcm::latest::Fungibility::Fungible(20 * currency::USDC),
+        }
+    }
+
+    fn set_up_complex_asset_transfer() -> Option<(
+        staging_xcm::latest::Assets,
+        u32,
+        staging_xcm::latest::Location,
+        alloc::boxed::Box<dyn FnOnce()>,
+    )> {
+        Some((
+            Self::get_asset().into(),
+            0,
+            bleavit_xcm::identity::asset_hub_location(),
+            alloc::boxed::Box::new(|| {}),
+        ))
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_prime_xcm_asset_state() {
+    use frame_support::traits::tokens::fungibles::Mutate;
+    use staging_xcm_executor::traits::ConvertLocation;
+
+    let caller = frame_benchmarking::whitelisted_caller::<AccountId>();
+    let amount = 20 * currency::USDC;
+    benchmark_ensure_usdc();
+
+    // The production executor withdraws from and deposits into real
+    // `ForeignAssets` accounts. Keep the benchmark account funded and present
+    // so those account mutations are part of the measured XCM path.
+    let mut accounts = vec![caller];
+    if let Some(asset_hub_account) = xcm_config::LocationToAccountId::convert_location(
+        &bleavit_xcm::identity::asset_hub_location(),
+    ) {
+        accounts.push(asset_hub_account);
+    }
+    for account in accounts {
+        let balance = <ForeignAssets as Inspect<AccountId>>::balance(
+            bleavit_xcm::identity::usdc_location(),
+            &account,
+        );
+        if balance < amount {
+            let _ = <ForeignAssets as Mutate<AccountId>>::mint_into(
+                bleavit_xcm::identity::usdc_location(),
+                &account,
+                amount - balance,
+            );
+        }
+    }
+
+    // `TrapRecoveryInflows` deliberately bypasses only the prospective global
+    // mint check; its beneficiary deposit still records the cumulative
+    // per-account inflow. Seed an existing entry just below the live cap so
+    // the benchmark observes the production meter read/update/write path.
+    let cap = balance_param(b"phase3.dep_cap");
+    if cap != u128::MAX {
+        pallet_inflow_caps::CumulativeDeposits::<Runtime>::insert(
+            &frame_benchmarking::whitelisted_caller::<AccountId>(),
+            cap.saturating_sub(amount),
+        );
+    }
+}
+
 impl cumulus_pallet_xcm::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type XcmExecutor = xcm_config::Executor;
@@ -8032,18 +8187,32 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
     }
 
     fn prime_ratification(pid: futarchy_primitives::ProposalId, referendum_index: u32) {
-        let payload_hash = pallet_epoch::Proposals::<Runtime>::get(pid)
-            .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
-            .map(|proposal| proposal.payload_hash)
-            .unwrap_or_default();
-        pallet_execution_guard::Ratifications::<Runtime>::insert(
-            pid,
-            pallet_execution_guard::RatificationRecord {
-                referendum_index,
-                payload_hash,
-                ratified_at: System::block_number(),
-            },
+        let guardian = guardian_account();
+        let _ = Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            sp_runtime::MultiAddress::Id(guardian.clone()),
+            20_000 * currency::VIT,
         );
+        pallet_referenda::ReferendumCount::<Runtime>::put(referendum_index);
+        let call = RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::ratify {
+            pid,
+            referendum_index,
+        });
+        let Ok(proposal) = <Preimage as StorePreimage>::bound(call) else {
+            return;
+        };
+        let ratify_origin: RuntimeOrigin = crate::track_origins::Origin::Ratify.into();
+        let submit_result = Referenda::submit(
+            RuntimeOrigin::signed(guardian.clone()),
+            Box::new(ratify_origin.caller().clone()),
+            proposal,
+            frame_support::traits::schedule::DispatchTime::After(0),
+        );
+        if submit_result.is_err() {
+            return;
+        }
+        let _ =
+            Referenda::place_decision_deposit(RuntimeOrigin::signed(guardian), referendum_index);
     }
 
     fn void_authority_origin() -> RuntimeOrigin {

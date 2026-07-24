@@ -351,8 +351,8 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     fn prime_recovery_qualification(_: &mut Proposal<AccountId>) {}
     /// Saturate the real execution-guard aggregate before a decision enqueues.
     fn prime_guard_enqueue(pid: ProposalId);
-    /// Seed the exact ratification referendum consumed by the benchmark-only
-    /// bind fixture. Runtime implementations may leave this a no-op.
+    /// Seed the exact ongoing ratification referendum consumed by the
+    /// benchmark-only bind fixture.
     fn prime_ratification(_: ProposalId, _: u32) {}
     fn prime_settlement(epoch: EpochId);
     fn prime_keeper_rebate() {}

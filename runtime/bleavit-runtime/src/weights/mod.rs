@@ -7,8 +7,10 @@
 //! (`tools/ci/check-weight-regression.py`) compares these files against the
 //! merge-base and fails on >10 % growth (15 §4.5).
 //!
-//! Not present here (deliberate): `pallet_xcm` (production XCM config and its
-//! weights are B4; `TestWeightInfo` until then), `pallet_transaction_payment` /
+//! `pallet_xcm` is calibrated here; its two protocol-disabled calls retain a
+//! fail-closed `Weight::MAX` because no valid benchmark fixture may bypass the
+//! production filters. Not present here (deliberate):
+//! `pallet_transaction_payment` /
 //! `pallet_asset_tx_payment` (no benchmarkable calls in this SDK train), and
 //! the hook-only consensus pallets (`pallet_aura`, `pallet_authorship`,
 //! `cumulus_pallet_aura_ext`, `staging_parachain_info`) which expose no
@@ -44,3 +46,4 @@ pub mod pallet_sudo;
 pub mod pallet_timestamp;
 pub mod pallet_utility;
 pub mod pallet_welfare;
+pub mod pallet_xcm;

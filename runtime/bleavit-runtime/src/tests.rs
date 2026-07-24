@@ -2761,6 +2761,7 @@ fn create_local_production_xcm_trap(
     Some((hash, assets))
 }
 
+#[cfg(not(feature = "runtime-benchmarks"))]
 #[test]
 fn production_xcm_config_binds_capped_assets_reserves_barrier_and_trap_claims() {
     use crate::configs::xcm_config;

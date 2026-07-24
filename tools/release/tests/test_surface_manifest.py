@@ -568,13 +568,6 @@ class SurfaceManifestTests(unittest.TestCase):
                         "economic custody — registration and slashing carry no capital cost"
                     ),
                 },
-                {
-                    "id": "xcm.pallet_xcm_weights_placeholder",
-                    "owner": "B5",
-                    "reason": (
-                        "pallet_xcm still uses TestWeightInfo after claim_assets became Public"
-                    ),
-                },
             ],
         )
 
