@@ -396,8 +396,6 @@ pub mod pallet {
         TooManyMarkets,
         /// Creating this book would exceed the archive-derived stored-book cap.
         TooManyStoredMarkets,
-        /// The explicit event epoch disagrees with an embedded Baseline epoch.
-        EpochMismatch,
         /// The book's POL headroom has already been seeded (04 §10, idempotence).
         AlreadySeeded,
         /// PB-DEPEG blocks book creation/seeding until its bounded expiry.
@@ -411,6 +409,11 @@ pub mod pallet {
         /// A proposed book/fee address is not the canonical, permanently
         /// reserved protocol-custody address for this market id.
         UnreservedProtocolAccount,
+        /// The explicit event epoch disagrees with an embedded Baseline epoch.
+        ///
+        /// This is append-only: the market error discriminants above are part
+        /// of retained dispatch metadata and must not be renumbered.
+        EpochMismatch,
     }
 
     impl<T: Config> From<market_core::Error> for Error<T> {
