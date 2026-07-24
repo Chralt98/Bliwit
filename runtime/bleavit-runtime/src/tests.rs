@@ -11987,6 +11987,34 @@ fn sq75_both_registry_instances_are_base_filter_public_and_resolve_is_origin_gat
         );
     }
 
+    // SQ-75: origin-elevating utility wrappers must not smuggle either
+    // instance's ResolutionAuthority-only leaf through the base filter. The
+    // bare leaves remain values-enactment-admissible so the scheduler can
+    // dispatch them with the captured governance origin; these wrappers do
+    // not carry that origin and are categorically denied.
+    let who = account(7);
+    let signed_origin: <RuntimeOrigin as frame_support::traits::OriginTrait>::PalletsOrigin =
+        frame_system::RawOrigin::Signed(who.clone()).into();
+    for leaf in [incident[RESOLVE].clone(), milestone[RESOLVE].clone()] {
+        let wrappers = [
+            RuntimeCall::Utility(pallet_utility::Call::dispatch_as {
+                as_origin: Box::new(signed_origin.clone()),
+                call: Box::new(leaf.clone()),
+            }),
+            RuntimeCall::Utility(pallet_utility::Call::dispatch_as_fallible {
+                as_origin: Box::new(signed_origin.clone()),
+                call: Box::new(leaf.clone()),
+            }),
+            RuntimeCall::Utility(pallet_utility::Call::as_derivative {
+                index: 0,
+                call: Box::new(leaf),
+            }),
+        ];
+        for wrapper in wrappers {
+            assert!(!RuntimeBaseCallFilter::contains(&wrapper));
+        }
+    }
+
     development_ext().execute_with(|| {
         let result = incident[4]
             .clone()
