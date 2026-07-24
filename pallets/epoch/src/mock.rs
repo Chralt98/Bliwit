@@ -282,6 +282,7 @@ parameter_types! {
     pub static MarketGrade: bool = true;
     pub static UnavailableMarkets: Vec<MarketId> = Vec::new();
     pub static UngradedMarkets: Vec<MarketId> = Vec::new();
+    pub static UnsealedMarkets: Vec<MarketId> = Vec::new();
     pub static BaselineAvailable: bool = true;
     pub static TwapOverrides: Vec<(MarketId, FixedU64)> = Vec::new();
     pub static TrailingOverrides: Vec<(MarketId, FixedU64)> = Vec::new();
@@ -455,6 +456,12 @@ impl MarketAccess<AccountId32> for TestMarket {
         MarketGrade::get()
             && !UnavailableMarkets::get().contains(&market)
             && !UngradedMarkets::get().contains(&market)
+    }
+
+    fn decision_window_sealed(market: MarketId, _end: BlockNumber) -> bool {
+        BaselineAvailable::get()
+            && !UnavailableMarkets::get().contains(&market)
+            && !UnsealedMarkets::get().contains(&market)
     }
 
     fn measured_depth(_pid: ProposalId) -> Option<Balance> {
@@ -934,6 +941,7 @@ pub fn reset_doubles() {
     MarketGrade::set(true);
     UnavailableMarkets::set(Vec::new());
     UngradedMarkets::set(Vec::new());
+    UnsealedMarkets::set(Vec::new());
     BaselineAvailable::set(true);
     TwapOverrides::set(Vec::new());
     TrailingOverrides::set(Vec::new());

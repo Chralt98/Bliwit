@@ -16170,16 +16170,16 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
         ] {
             assert_ok!(result);
         }
-        // Leave the live Baseline unregistered so the shared decision helper
-        // must use the previous epoch's sealed 05 §5.3 carry value. The
-        // snapshot is available before the e+3 cohort summary is finalized.
+        pallet_market::BaselineMarketOf::<Runtime>::insert(epoch, markets.baseline);
+        // The previous epoch's sealed 05 §5.3 carry is available before the
+        // e+3 cohort summary is finalized.
         pallet_market::SealedBaselineTwap::<Runtime>::insert(
             epoch.saturating_sub(1),
             carried_baseline,
         );
-        // Remove the live Baseline decision windows entirely. The decision
-        // path remains evaluable through the previous sealed carry; the view
-        // must make the same choice rather than requiring dead live-book data.
+        let baseline_windows = pallet_market::DecisionWindows::<Runtime>::get(markets.baseline);
+        // A missing live Baseline window makes `decide()` fail while sealing
+        // the exact book boundary, so the read-only view must remain partial.
         pallet_market::DecisionWindows::<Runtime>::remove(markets.baseline);
 
         let spend = RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::spend {
@@ -16234,6 +16234,45 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
             *next = (*next).max(PID.saturating_add(1));
         });
 
+        let missing_snapshot = Epoch::decision_input_snapshot(PID)
+            .expect("missing Baseline window must not make snapshot assembly fail");
+        assert!(!missing_snapshot.backing_complete);
+        assert_eq!(crate::views::decision_stats(PID), None);
+
+        // A registered but still-open Baseline window is also not a valid
+        // carry source. Once the same failed-grade window is sealed, the
+        // previous carry becomes usable and the full view is exposed.
+        pallet_market::DecisionWindows::<Runtime>::insert(markets.baseline, baseline_windows);
+        pallet_market::DecisionWindows::<Runtime>::mutate(markets.baseline, |windows| {
+            if let Some(window) = windows.iter_mut().find(|window| window.end == end) {
+                window.contest_capital_blocks = effective_floor
+                    .saturating_sub(1)
+                    .saturating_mul(Balance::from(params.decision_window));
+                window.sealed = false;
+            }
+        });
+        let unsealed_snapshot = Epoch::decision_input_snapshot(PID)
+            .expect("unsealed Baseline window must still assemble a partial snapshot");
+        assert!(!unsealed_snapshot.backing_complete);
+        assert_eq!(crate::views::decision_stats(PID), None);
+        pallet_market::DecisionWindows::<Runtime>::mutate(markets.baseline, |windows| {
+            if let Some(window) = windows.iter_mut().find(|window| window.end == end) {
+                window.sealed = true;
+            }
+        });
+        assert!(
+            <crate::configs::RuntimeMarketAccess as pallet_epoch::MarketAccess<AccountId>>::decision_window_sealed(
+                markets.baseline,
+                end,
+            )
+        );
+        assert!(!<crate::configs::RuntimeMarketAccess as pallet_epoch::MarketAccess<AccountId>>::decision_grade(
+            markets.baseline,
+            end,
+            pallet_epoch::BookRole::Baseline,
+            ProposalClass::Treasury,
+            &params,
+        ));
         let interval = u32::try_from(crate::configs::MarketObsInterval::get()).unwrap_or_default();
         assert_ne!(interval, 0);
         let expected_observations = params.decision_window / interval;
@@ -16339,13 +16378,15 @@ fn view_decision_stats_pins_effective_floor_pair_minima_gates_and_convergence() 
         assert_ne!(expected_min_depth, sum_mutant_depth);
         assert_eq!(stats.gate_twaps_1e9, Some(gate_quotes));
         assert_eq!(stats.twap_baseline_1e9, carried_baseline);
+        // The snapshot retains the sealed live-window inputs; the public
+        // statistic projects the effective carried value used by the hurdle.
         assert_eq!(
             snapshot.inputs.baseline_full,
-            futarchy_primitives::FixedU64(0)
+            futarchy_primitives::FixedU64(650_000_000)
         );
         assert_eq!(
             snapshot.inputs.baseline_trailing,
-            futarchy_primitives::FixedU64(0)
+            futarchy_primitives::FixedU64(650_000_000)
         );
         assert_ne!(stats.twap_baseline_1e9, snapshot.inputs.baseline_full);
         assert_eq!(stats.traded_volume, reject_volume);
