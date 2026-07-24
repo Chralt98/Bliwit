@@ -314,6 +314,23 @@ fn storage_v2_try_runtime_current_version_is_an_idempotent_latch_noop() {
     });
 }
 
+#[cfg(feature = "try-runtime")]
+#[test]
+fn storage_v2_try_runtime_preserves_existing_v1_bootstrap_latch() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(1).put::<Treasury>();
+        TreasuryArmedValue::set(true);
+        crate::BootstrapOpsFundingClosed::<Test>::put(false);
+
+        let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
+        let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+        <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
+
+        assert!(!crate::BootstrapOpsFundingClosed::<Test>::get());
+        assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(2));
+    });
+}
+
 #[test]
 fn default_genesis_is_empty_and_solvent() {
     new_test_ext().execute_with(|| {

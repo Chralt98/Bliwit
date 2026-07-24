@@ -6,6 +6,8 @@
 
 Normative language: RFC 2119. USDC amounts in whole units (6 decimals); `ln 2 = 0.693147…`; all worked arithmetic is shown and MUST be reproduced by the Phase-0 reference model.
 
+**A13 REWARDS extension (2026-07-24):** `REWARDS` is also backed by its dedicated `REWARDS_` real-USDC pot. `fund_budget_line(REWARDS, amount)` therefore performs the same atomic `MAIN`→pot custody sync and the same line≤pot try-state check; unlike the keeper/oracle rebate pots, this pot is consumed by fail-soft execution-time proposer rewards.
+
 ---
 
 ## 1. `pallet-futarchy-treasury` (carried forward, amended)
@@ -124,6 +126,7 @@ Under [03 §7](03-conditional-ledger.md) R-4, `usdc_genesis_endowments()` endows
 | `treasury_account()` (`MAIN`) | `PalletId(*b"bl/trsry").into_account_truncating()` |
 | `treasury_keeper_account()` (`KEEPER`) | `PalletId(*b"bl/trsry").into_sub_account_truncating(*b"KEEPER__")` |
 | `treasury_oracle_account()` (`ORACLE`) | `PalletId(*b"bl/trsry").into_sub_account_truncating(*b"ORACLE__")` |
+| `treasury_rewards_account()` (`REWARDS`) | `PalletId(*b"bl/trsry").into_sub_account_truncating(*b"REWARDS_")` |
 
 The set is deliberately exact. Per-market book/fee accounts do not exist until `create_market` and are reaped at close, so they cannot be genesis-endowed. The market, epoch, execution-guard, welfare-settlement, guardian and both registry sovereign accounts are excluded because [03 §7](03-conditional-ledger.md) R-4 does not name them; registry payouts deliberately use `Expendable`. A derivation or membership change is therefore a genesis/deployment identity change and MUST update this section and [13 §3.5](13-parameters.md) together.
 

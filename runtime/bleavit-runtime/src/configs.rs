@@ -2,6 +2,8 @@
 
 use alloc::{borrow::Cow, boxed::Box, vec, vec::Vec};
 
+#[cfg(feature = "runtime-benchmarks")]
+use frame_support::traits::fungible::MutateHold;
 use frame_support::{
     derive_impl,
     dispatch::{DispatchClass, DispatchResult},
@@ -2392,12 +2394,19 @@ fn scaled_pol_floor(
     }
 }
 
-fn scaled_decision_delta(class: futarchy_primitives::ProposalClass, prize: Balance) -> Option<u64> {
+fn scaled_decision_delta(
+    class: futarchy_primitives::ProposalClass,
+    floor: u64,
+    prize: Balance,
+) -> Option<u64> {
     let index = proposal_class_index(class);
     if index >= 4 {
         return None;
     }
-    let floor = u128::from(kernel::DECISION_DELTA_FLOORS[index].0);
+    // 08 §5.3 scales from the class's governed `dec.delta` floor.  The
+    // kernel minimum only constrains that live value; it is not the slope
+    // base for a qualification-time certificate.
+    let floor = u128::from(floor);
     let p_ref = proposal_p_ref(class, class_pol_floor(class))?;
     let scaled = if prize <= p_ref {
         floor
@@ -4119,9 +4128,13 @@ impl pallet_epoch::ConstitutionAccess<AccountId> for RuntimeConstitutionAccess {
         proposal: &futarchy_primitives::Proposal<AccountId>,
     ) -> Option<pallet_epoch::ProposalSecurityTerms> {
         let prize = Self::in_cap_prize(proposal);
+        let delta_floor = <RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get().delta
+            [proposal_class_index(proposal.class)]
+        .0;
         Some(pallet_epoch::ProposalSecurityTerms {
             in_cap_prize: prize,
-            decision_delta: prize.and_then(|value| scaled_decision_delta(proposal.class, value)),
+            decision_delta: prize
+                .and_then(|value| scaled_decision_delta(proposal.class, delta_floor, value)),
         })
     }
 
@@ -7748,6 +7761,15 @@ impl pallet_guardian::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
             remark: b"guardian-benchmark-queue".to_vec(),
         });
         let _ = benchmark_guard_enqueue(1, call, pallet_execution_guard::CallDomain::Public);
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        pallet_welfare::GateBreachFlags::<Runtime>::insert(
+            epoch,
+            pallet_welfare::CoreGateBreachFlags {
+                s_breached: true,
+                c_breached: false,
+                day_bitmap: [0; 2],
+            },
+        );
         for seed in 1..=pallet_guardian::GUARDIAN_SEATS as u8 {
             let who = AccountId32::new([seed; 32]);
             let _ = <Balances as frame_support::traits::fungible::Mutate<AccountId>>::mint_into(
@@ -7787,6 +7809,37 @@ impl pallet_guardian::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper 
 }
 #[cfg(feature = "runtime-benchmarks")]
 impl pallet_attestor::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmarkHelper {
+    fn prime_funds() {
+        let reason: RuntimeHoldReason = pallet_attestor::HoldReason::AttestorBond.into();
+        let challenge_reason: RuntimeHoldReason = pallet_attestor::HoldReason::ChallengeBond.into();
+        let _ = Balances::force_set_balance(
+            RuntimeOrigin::root(),
+            sp_runtime::MultiAddress::Id(insurance_account()),
+            1_000_000 * currency::VIT,
+        );
+        for seed in 1..=255u8 {
+            let who = AccountId32::new([seed; 32]);
+            let _ = Balances::force_set_balance(
+                RuntimeOrigin::root(),
+                sp_runtime::MultiAddress::Id(who.clone()),
+                1_000_000 * currency::VIT,
+            );
+            if seed <= pallet_attestor::MAX_ATTESTORS as u8 {
+                let _ = <Balances as MutateHold<AccountId>>::hold(
+                    &reason,
+                    &who,
+                    pallet_attestor::ATTESTOR_BOND,
+                );
+            }
+            if seed == 250 {
+                let _ = <Balances as MutateHold<AccountId>>::hold(
+                    &challenge_reason,
+                    &who,
+                    pallet_attestor::CHALLENGE_BOND,
+                );
+            }
+        }
+    }
     fn signed(who: [u8; 32]) -> RuntimeOrigin {
         RuntimeOrigin::signed(AccountId32::new(who))
     }
@@ -7831,6 +7884,21 @@ impl pallet_epoch::BenchmarkHelper<RuntimeOrigin, AccountId> for RuntimeBenchmar
 
     fn execution_guard_origin() -> RuntimeOrigin {
         RuntimeOrigin::signed(execution_guard_account())
+    }
+
+    fn prime_ratification(pid: futarchy_primitives::ProposalId, referendum_index: u32) {
+        let payload_hash = pallet_epoch::Proposals::<Runtime>::get(pid)
+            .or_else(|| pallet_epoch::IntakeProposals::<Runtime>::get(pid))
+            .map(|proposal| proposal.payload_hash)
+            .unwrap_or_default();
+        pallet_execution_guard::Ratifications::<Runtime>::insert(
+            pid,
+            pallet_execution_guard::RatificationRecord {
+                referendum_index,
+                payload_hash,
+                ratified_at: System::block_number(),
+            },
+        );
     }
 
     fn void_authority_origin() -> RuntimeOrigin {
@@ -8201,6 +8269,16 @@ fn benchmark_guard_enqueue_calls_for_class(
         grace_end,
         version_constraint.clone(),
     )?;
+    if ratified
+        && matches!(
+            class,
+            futarchy_primitives::ProposalClass::Code | futarchy_primitives::ProposalClass::Meta
+        )
+    {
+        // CODE/META ratification is a two-step join: bind the pending
+        // referendum before queue admission, then record its passed identity.
+        crate::ExecutionGuard::bind_ratification(pid, 1)?;
+    }
     crate::ExecutionGuard::enqueue(
         RuntimeOrigin::signed(epoch_account()),
         pallet_execution_guard::pallet::StoredQueuedExecution {
@@ -8343,7 +8421,12 @@ impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmark
             Some(attestation_id),
             true,
         ) {
-            System::set_block_number(maturity);
+            System::set_block_number(maturity.saturating_add(1));
+            pallet_execution_guard::Queue::<Runtime>::mutate(pid, |queued| {
+                if let Some(queued) = queued {
+                    queued.maturity = System::block_number();
+                }
+            });
         }
     }
     fn prime_recovery_commit(
@@ -8484,7 +8567,15 @@ impl pallet_execution_guard::BenchmarkHelper<RuntimeOrigin> for RuntimeBenchmark
                 Some(attestation_id),
                 true,
             ) {
-                System::set_block_number(maturity);
+                // Benchmark dispatch runs after the queue has been admitted;
+                // advance strictly past the timelock so a boundary-sensitive
+                // runtime hook cannot re-read the just-matured block as early.
+                System::set_block_number(maturity.saturating_add(1));
+                pallet_execution_guard::Queue::<Runtime>::mutate(pid, |queued| {
+                    if let Some(queued) = queued {
+                        queued.maturity = System::block_number();
+                    }
+                });
             }
         }
     }
@@ -8675,5 +8766,26 @@ fn benchmark_runtime_code_with_spec(target_code_bytes: u32, spec_version: u32) -
             core::cmp::Ordering::Greater => padding_len = padding_len.saturating_sub(1),
             core::cmp::Ordering::Less => padding_len = padding_len.saturating_add(1),
         }
+    }
+}
+
+#[cfg(test)]
+mod security_term_tests {
+    use super::scaled_decision_delta;
+    use futarchy_primitives::ProposalClass;
+
+    #[test]
+    fn scaled_decision_delta_starts_from_the_governed_class_floor() {
+        crate::tests::development_ext().execute_with(|| {
+            // The Treasury floor is 0.0375 in the live registry, while the
+            // kernel minimum is 0.005.  A prize at or below P_ref must
+            // preserve the governed floor rather than silently falling back
+            // to the kernel minimum.
+            let governed_floor = 37_500_000;
+            assert_eq!(
+                scaled_decision_delta(ProposalClass::Treasury, governed_floor, 0),
+                Some(governed_floor),
+            );
+        });
     }
 }
