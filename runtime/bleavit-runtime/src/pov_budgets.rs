@@ -273,7 +273,7 @@ fn xcm_claim_assets_fits_the_normal_class() {
         <crate::weights::pallet_xcm::WeightInfo<Runtime> as pallet_xcm::WeightInfo>::claim_assets();
     assert_eq!(
         claim.proof_size(),
-        5_275,
+        5_469,
         "claim_assets proof bound drifted"
     );
     assert_fits("pallet_xcm::claim_assets", claim);
@@ -339,8 +339,9 @@ fn recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets() {
 
 /// 13 §5 item 1: "`decide(pid)` reads ≤ 6 proposal books + 1 Baseline + O(10)
 /// params — PoV per call bounded regardless of map ceiling." Pinned regression
-/// ceilings (current 50×20 generated-weight estimate: `decide` 183,055 B;
-/// `settle_cohort(5)` 336,825 B, both dominated by per-key trie overhead, not
+/// ceilings (current 50×20 generated-weight estimate plus the A13 collator-
+/// compensation add of 48,000 B: `decide` 231,055 B; `settle_cohort(5)`
+/// 384,825 B, both dominated by per-key trie overhead, not
 /// the 2,240-row retained map): growth past ~2× the measurement reopens the
 /// touch-bound derivation.
 #[test]
@@ -349,7 +350,7 @@ fn decide_and_settle_cohort_pov_pinned_below_map_scaling() {
         <crate::weights::pallet_epoch::WeightInfo<Runtime> as pallet_epoch::WeightInfo>::decide();
     assert_eq!(
         decide.proof_size(),
-        183_055,
+        231_055,
         "decide proof_size drifted from the 13 §5 generated-weight estimate"
     );
     assert!(
@@ -361,7 +362,7 @@ fn decide_and_settle_cohort_pov_pinned_below_map_scaling() {
         <crate::weights::pallet_epoch::WeightInfo<Runtime> as pallet_epoch::WeightInfo>::settle_cohort(5);
     assert_eq!(
         settle_five.proof_size(),
-        336_825,
+        384_825,
         "settle_cohort(5) proof_size drifted from the 13 §5 generated-weight estimate"
     );
     let settle = <crate::weights::pallet_epoch::WeightInfo<Runtime> as pallet_epoch::WeightInfo>::settle_cohort(

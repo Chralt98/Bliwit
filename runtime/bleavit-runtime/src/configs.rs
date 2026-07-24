@@ -2,6 +2,7 @@
 
 use alloc::{borrow::Cow, boxed::Box, vec, vec::Vec};
 
+#[cfg(feature = "runtime-benchmarks")]
 use frame_support::traits::fungible::MutateHold;
 #[cfg(feature = "runtime-benchmarks")]
 use frame_support::traits::{Currency, Everything};
@@ -1054,12 +1055,8 @@ impl staging_parachain_info::Config for Runtime {}
 pub(crate) mod xcm_config {
     use super::*;
     use staging_xcm::latest::prelude::*;
-    #[cfg(feature = "runtime-benchmarks")]
-    use staging_xcm::latest::XcmContext;
     use staging_xcm_builder::{FixedWeightBounds, FrameTransactionalProcessor, WithUniqueTopic};
     use staging_xcm_executor::XcmExecutor;
-    #[cfg(feature = "runtime-benchmarks")]
-    use staging_xcm_executor::{traits::TransactAsset, AssetsInHolding};
 
     parameter_types! {
         pub RelayNetwork: Option<NetworkId> = Some(NetworkId::Polkadot);
@@ -1093,42 +1090,6 @@ pub(crate) mod xcm_config {
         LocationToAccountId,
         AccountId,
     >;
-    #[cfg(feature = "runtime-benchmarks")]
-    pub struct BenchmarkAssets;
-    #[cfg(feature = "runtime-benchmarks")]
-    impl TransactAsset for BenchmarkAssets {
-        fn can_check_in(_: &Location, _: &Asset, _: &XcmContext) -> Result<(), XcmError> {
-            Ok(())
-        }
-        fn can_check_out(_: &Location, _: &Asset, _: &XcmContext) -> Result<(), XcmError> {
-            Ok(())
-        }
-        fn deposit_asset(
-            _: AssetsInHolding,
-            _: &Location,
-            _: Option<&XcmContext>,
-        ) -> Result<(), (AssetsInHolding, XcmError)> {
-            Ok(())
-        }
-        fn withdraw_asset(
-            _what: &Asset,
-            _: &Location,
-            _: Option<&XcmContext>,
-        ) -> Result<AssetsInHolding, XcmError> {
-            Ok(AssetsInHolding::new())
-        }
-        fn mint_asset(_what: &Asset, _: &XcmContext) -> Result<AssetsInHolding, XcmError> {
-            Ok(AssetsInHolding::new())
-        }
-        fn internal_transfer_asset(
-            what: &Asset,
-            _: &Location,
-            _: &Location,
-            _: &XcmContext,
-        ) -> Result<Asset, XcmError> {
-            Ok(what.clone())
-        }
-    }
     pub type ResponseHandler =
         bleavit_xcm::probe::ProbeAwareResponseHandler<PolkadotXcm, super::RuntimeOracleProbeSink>;
     pub type Barrier = bleavit_xcm::barrier::BleavitBarrier<
@@ -1232,7 +1193,7 @@ pub(crate) mod xcm_config {
     pub type TrapRecoveryExecutor = XcmExecutor<XcmConfig<TrapRecoveryAssets>>;
     #[cfg(feature = "runtime-benchmarks")]
     pub type BenchmarkExecutor = XcmExecutor<
-        XcmConfig<BenchmarkAssets, staging_xcm_builder::AllowUnpaidExecutionFrom<Everything>>,
+        XcmConfig<TrapRecoveryAssets, staging_xcm_builder::AllowUnpaidExecutionFrom<Everything>>,
     >;
 }
 
@@ -1388,12 +1349,6 @@ impl pallet_xcm::benchmarking::Config for Runtime {
         // `whitelisted_caller()`.  The production genesis deliberately
         // endows only protocol custody accounts, so seed that disposable
         // benchmark account here rather than weakening the live transactor.
-        let caller = frame_benchmarking::whitelisted_caller::<AccountId>();
-        let _ = <ForeignAssets as Mutate<AccountId>>::mint_into(
-            bleavit_xcm::identity::usdc_location(),
-            &caller,
-            20 * currency::USDC,
-        );
         Some((
             Self::get_asset(),
             bleavit_xcm::identity::asset_hub_location(),
@@ -1401,6 +1356,7 @@ impl pallet_xcm::benchmarking::Config for Runtime {
     }
 
     fn get_asset() -> staging_xcm::latest::Asset {
+        benchmark_prime_xcm_asset_state();
         staging_xcm::latest::Asset {
             id: staging_xcm::latest::AssetId(bleavit_xcm::identity::usdc_location()),
             fun: staging_xcm::latest::Fungibility::Fungible(20 * currency::USDC),
@@ -1419,6 +1375,51 @@ impl pallet_xcm::benchmarking::Config for Runtime {
             bleavit_xcm::identity::asset_hub_location(),
             alloc::boxed::Box::new(|| {}),
         ))
+    }
+}
+
+#[cfg(feature = "runtime-benchmarks")]
+fn benchmark_prime_xcm_asset_state() {
+    use frame_support::traits::tokens::fungibles::Mutate;
+    use staging_xcm_executor::traits::ConvertLocation;
+
+    let caller = frame_benchmarking::whitelisted_caller::<AccountId>();
+    let amount = 20 * currency::USDC;
+    benchmark_ensure_usdc();
+
+    // The production executor withdraws from and deposits into real
+    // `ForeignAssets` accounts. Keep the benchmark account funded and present
+    // so those account mutations are part of the measured XCM path.
+    let mut accounts = vec![caller];
+    if let Some(asset_hub_account) = xcm_config::LocationToAccountId::convert_location(
+        &bleavit_xcm::identity::asset_hub_location(),
+    ) {
+        accounts.push(asset_hub_account);
+    }
+    for account in accounts {
+        let balance = <ForeignAssets as Inspect<AccountId>>::balance(
+            bleavit_xcm::identity::usdc_location(),
+            &account,
+        );
+        if balance < amount {
+            let _ = <ForeignAssets as Mutate<AccountId>>::mint_into(
+                bleavit_xcm::identity::usdc_location(),
+                &account,
+                amount - balance,
+            );
+        }
+    }
+
+    // `TrapRecoveryInflows` deliberately bypasses only the prospective global
+    // mint check; its beneficiary deposit still records the cumulative
+    // per-account inflow. Seed an existing entry just below the live cap so
+    // the benchmark observes the production meter read/update/write path.
+    let cap = balance_param(b"phase3.dep_cap");
+    if cap != u128::MAX {
+        pallet_inflow_caps::CumulativeDeposits::<Runtime>::insert(
+            &frame_benchmarking::whitelisted_caller::<AccountId>(),
+            cap.saturating_sub(amount),
+        );
     }
 }
 

@@ -4,7 +4,8 @@
 //! 50 steps × 20 repeats, on 2026-07-24.  `execute` and `teleport_assets` are
 //! intentionally fail-closed: the production filter denies both paths, so a
 //! successful benchmark fixture cannot be constructed without changing the
-//! protocol's security posture.  They therefore charge `Weight::MAX`.
+//! protocol's security posture.  They therefore charge `Weight::MAX`.  The
+//! transfer and claim rows use the production ForeignAssets/cap transactor.
 
 #![cfg_attr(rustfmt, rustfmt_skip)]
 #![allow(unused_imports)]
@@ -25,15 +26,17 @@ impl<T: frame_system::Config> pallet_xcm::WeightInfo for WeightInfo<T> {
     }
 
     fn reserve_transfer_assets() -> Weight {
-        Weight::from_parts(27_250_000, 0)
-            .saturating_add(Weight::from_parts(0, 1_621))
-            .saturating_add(T::DbWeight::get().reads(2))
+        Weight::from_parts(60_030_000, 0)
+            .saturating_add(Weight::from_parts(0, 4_273))
+            .saturating_add(T::DbWeight::get().reads(4))
+            .saturating_add(T::DbWeight::get().writes(2))
     }
 
     fn transfer_assets() -> Weight {
-        Weight::from_parts(26_330_000, 0)
-            .saturating_add(Weight::from_parts(0, 1_621))
-            .saturating_add(T::DbWeight::get().reads(2))
+        Weight::from_parts(61_710_000, 0)
+            .saturating_add(Weight::from_parts(0, 4_273))
+            .saturating_add(T::DbWeight::get().reads(4))
+            .saturating_add(T::DbWeight::get().writes(2))
     }
 
     fn execute() -> Weight {
@@ -128,8 +131,8 @@ impl<T: frame_system::Config> pallet_xcm::WeightInfo for WeightInfo<T> {
     }
 
     fn claim_assets() -> Weight {
-        Weight::from_parts(73_480_000, 0)
-            .saturating_add(Weight::from_parts(0, 5_275))
+        Weight::from_parts(70_160_000, 0)
+            .saturating_add(Weight::from_parts(0, 5_469))
             .saturating_add(T::DbWeight::get().reads(6))
             .saturating_add(T::DbWeight::get().writes(4))
     }
