@@ -151,6 +151,10 @@ pub trait MarketAccess<AccountId> {
         class: ProposalClass,
         params: &CoreEpochParams,
     ) -> bool;
+    /// Whether the exact decision window exists and has crossed the immutable
+    /// seal boundary. A Baseline carry may replace its values only after this
+    /// predicate is true; an absent or still-open window is not decision input.
+    fn decision_window_sealed(market: MarketId, end: BlockNumber) -> bool;
     /// 05 §5.2 tri-state decision grade of one welfare (Decision) book:
     /// `Insufficient` for the remediable-by-time shortfalls (contest capital
     /// below the class floor, coverage below `dec.coverage`, a first stale
@@ -2324,8 +2328,9 @@ pub mod pallet {
                 .map(|market| T::Market::welfare_grade(*market, end, proposal.class, &params))
                 .max()
                 .unwrap_or(WelfareGrade::Invalid);
-            let baseline_grade_ok = T::Market::baseline_market(proposal.epoch)
-                == Some(markets.baseline)
+            let baseline_market_matches =
+                T::Market::baseline_market(proposal.epoch) == Some(markets.baseline);
+            let baseline_grade_ok = baseline_market_matches
                 && T::Market::decision_grade(
                     markets.baseline,
                     end,
@@ -2371,18 +2376,35 @@ pub mod pallet {
             let in_cap_prize = ProposalSecurityTermsOf::<T>::get(pid)
                 .map(|terms| terms.in_cap_prize)
                 .unwrap_or_else(|| T::Constitution::in_cap_prize(&proposal));
+            // The decision path accepts the previous settled Baseline carry
+            // when the live Baseline is not decision-grade (05 §5.3). Keep
+            // the view's completeness predicate identical: the live pair is
+            // required, and the carry may replace Baseline values only after
+            // the exact live window is registered and sealed. A missing window
+            // makes `decide` fail in `seal_decision_window`, while a still-open
+            // window has not reached the immutable boundary required by this
+            // finalized view. Baseline spot is never consumed by `decide` and
+            // is therefore not a separate requirement here.
+            let baseline_backing_complete = if baseline_grade_ok {
+                baseline_full.is_some() && baseline_trailing.is_some()
+            } else {
+                baseline_market_matches
+                    && T::Market::decision_window_sealed(markets.baseline, end)
+                    && baseline_full.is_some()
+                    && baseline_trailing.is_some()
+                    && T::Market::previous_settled_baseline_twap(proposal.epoch).is_some()
+            };
             let backing_complete = [
                 accept_full,
                 reject_full,
-                baseline_full,
                 accept_trailing,
                 reject_trailing,
-                baseline_trailing,
                 accept_spot,
                 reject_spot,
             ]
             .iter()
             .all(Option::is_some)
+                && baseline_backing_complete
                 && gate_backing_complete
                 && measured_depth.is_some()
                 && in_cap_prize.is_some();
