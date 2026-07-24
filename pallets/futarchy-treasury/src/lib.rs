@@ -587,11 +587,21 @@ pub mod pallet {
     #[pallet::storage]
     pub type CollatorPendingRegisteredCount<T: Config> = StorageValue<_, u32, OptionQuery>;
 
-    /// Sticky fail-closed marker for an authored-share accumulator overflow.
-    /// A payout is never attempted while this is set, so omitted authors can
-    /// never be silently underpaid.
+    /// Fail-closed marker for the current authored-share accumulator. It is
+    /// moved to `CollatorPendingOverflowed` when the current accumulator is
+    /// rotated into the pending slot.
     #[pallet::storage]
     pub type CollatorAuthoredOverflowed<T: Config> = StorageValue<_, bool, ValueQuery>;
+
+    /// Fail-closed marker paired with the pending authored-share accumulator.
+    #[pallet::storage]
+    pub type CollatorPendingOverflowed<T: Config> = StorageValue<_, bool, ValueQuery>;
+
+    /// Epoch whose boundary-owned block was dropped because the pending slot
+    /// was already occupied. The marker is consumed when that epoch gets a
+    /// fresh current accumulator.
+    #[pallet::storage]
+    pub type CollatorDroppedEpoch<T: Config> = StorageValue<_, EpochId, OptionQuery>;
 
     /// Last epoch whose compensation was committed. This prevents authorship
     /// arriving after the Housekeeping payout from creating a second claim.
@@ -1308,7 +1318,16 @@ pub mod pallet {
         /// handler. It is deliberately infallible: an unexpected new author
         /// or an uncranked prior epoch leaves the bounded accumulator intact
         /// and defers the reward rather than growing state or panicking.
+        ///
+        /// `pallet_authorship` drives its `EventHandler` from `on_initialize`
+        /// and reserves no weight for it, so this registers its own benchmarked
+        /// worst-case weight before touching storage (the
+        /// `pallet-collator-selection` `note_author` pattern).
         pub fn note_collator_block(author: T::AccountId) {
+            frame_system::Pallet::<T>::register_extra_weight_unchecked(
+                T::WeightInfo::note_collator_block(),
+                DispatchClass::Mandatory,
+            );
             let epoch = T::CollatorEpoch::epoch_at(Self::now());
             if let Some(tracked) = CollatorAuthoredEpoch::<T>::get() {
                 if tracked != epoch {
@@ -1318,13 +1337,24 @@ pub mod pallet {
                     // boundary-owned block. A second unpayoutable completed
                     // accumulator is a bounded fail-closed condition.
                     if CollatorPendingEpoch::<T>::get().is_some() {
-                        CollatorAuthoredOverflowed::<T>::put(true);
+                        match CollatorDroppedEpoch::<T>::get() {
+                            None => CollatorDroppedEpoch::<T>::put(epoch),
+                            Some(dropped) if dropped != epoch => {
+                                // Keep the first dropped epoch. A second
+                                // distinct drop also taints the complete
+                                // current accumulator conservatively.
+                                CollatorAuthoredOverflowed::<T>::put(true);
+                            }
+                            Some(_) => {}
+                        }
                         return;
                     }
                     let blocks = CollatorAuthoredBlocks::<T>::take();
                     let registered = CollatorAuthoredRegisteredCount::<T>::take();
+                    let overflowed = CollatorAuthoredOverflowed::<T>::take();
                     CollatorPendingBlocks::<T>::put(blocks);
                     CollatorPendingEpoch::<T>::put(tracked);
+                    CollatorPendingOverflowed::<T>::put(overflowed);
                     if let Some(registered) = registered {
                         CollatorPendingRegisteredCount::<T>::put(registered);
                     }
@@ -1334,6 +1364,10 @@ pub mod pallet {
             if CollatorAuthoredEpoch::<T>::get().is_none() {
                 CollatorAuthoredEpoch::<T>::put(epoch);
                 CollatorAuthoredRegisteredCount::<T>::put(T::RegisteredCollatorCount::get());
+                if CollatorDroppedEpoch::<T>::get() == Some(epoch) {
+                    CollatorAuthoredOverflowed::<T>::put(true);
+                    CollatorDroppedEpoch::<T>::kill();
+                }
             }
             CollatorAuthoredBlocks::<T>::mutate(|shares| {
                 if let Some((_, blocks)) = shares.iter_mut().find(|(who, _)| *who == author) {
@@ -1366,7 +1400,28 @@ pub mod pallet {
             if tracked_epoch >= T::CollatorEpoch::epoch_at(Self::now()) {
                 return;
             }
-            if CollatorAuthoredOverflowed::<T>::get() {
+            let overflowed = if pending {
+                CollatorPendingOverflowed::<T>::get()
+            } else {
+                CollatorAuthoredOverflowed::<T>::get()
+            };
+            if overflowed {
+                let result = frame_support::storage::with_storage_layer(|| {
+                    if pending {
+                        CollatorPendingBlocks::<T>::kill();
+                        CollatorPendingEpoch::<T>::kill();
+                        CollatorPendingRegisteredCount::<T>::kill();
+                        CollatorPendingOverflowed::<T>::kill();
+                    } else {
+                        CollatorAuthoredBlocks::<T>::kill();
+                        CollatorAuthoredEpoch::<T>::kill();
+                        CollatorAuthoredRegisteredCount::<T>::kill();
+                        CollatorAuthoredOverflowed::<T>::kill();
+                    }
+                    CollatorCompensationPaidEpoch::<T>::put(tracked_epoch);
+                    Ok::<(), DispatchError>(())
+                });
+                let _ = result;
                 return;
             }
             let Some(registered_collators) = (if pending {
@@ -1416,8 +1471,11 @@ pub mod pallet {
                     CollatorAuthoredBlocks::<T>::kill();
                     CollatorAuthoredEpoch::<T>::kill();
                     CollatorAuthoredRegisteredCount::<T>::kill();
+                    CollatorAuthoredOverflowed::<T>::kill();
                 }
-                CollatorAuthoredOverflowed::<T>::kill();
+                if pending {
+                    CollatorPendingOverflowed::<T>::kill();
+                }
                 CollatorCompensationPaidEpoch::<T>::put(tracked_epoch);
                 Ok::<(), DispatchError>(())
             });
@@ -1895,6 +1953,17 @@ pub mod pallet {
                     "treasury: pending collator snapshot is not joined to its accumulator",
                 ));
             }
+            if CollatorAuthoredOverflowed::<T>::get() && CollatorAuthoredEpoch::<T>::get().is_none()
+            {
+                return Err(TryRuntimeError::Other(
+                    "treasury: current collator overflow marker has no accumulator",
+                ));
+            }
+            if CollatorPendingOverflowed::<T>::get() && CollatorPendingEpoch::<T>::get().is_none() {
+                return Err(TryRuntimeError::Other(
+                    "treasury: pending collator overflow marker has no accumulator",
+                ));
+            }
             if let (Some(active), Some(pending)) = (
                 CollatorAuthoredEpoch::<T>::get(),
                 CollatorPendingEpoch::<T>::get(),
@@ -1904,11 +1973,6 @@ pub mod pallet {
                         "treasury: pending collator epoch is not older than active epoch",
                     ));
                 }
-            }
-            if CollatorAuthoredOverflowed::<T>::get() {
-                return Err(TryRuntimeError::Other(
-                    "treasury: collator authored-share accumulator overflowed",
-                ));
             }
             let community_remaining = CommunityDistributionRemaining::<T>::get();
             if community_remaining > T::CommunityDistributionAmount::get() {

@@ -4585,6 +4585,23 @@ fn treasury_collator_boundary_authorship_uses_the_next_epoch_accumulator() {
 }
 
 #[test]
+fn runtime_collator_authorship_charges_mandatory_accounting_weight() {
+    development_ext().execute_with(|| {
+        let before = *System::block_weight().get(DispatchClass::Mandatory);
+        let expected = <<Runtime as pallet_futarchy_treasury::Config>::WeightInfo as
+            pallet_futarchy_treasury::WeightInfo>::note_collator_block();
+
+        <crate::configs::RuntimeCollatorAuthorship as pallet_authorship::EventHandler<
+            AccountId,
+            BlockNumber,
+        >>::note_author(account(77));
+
+        let after = *System::block_weight().get(DispatchClass::Mandatory);
+        assert_eq!(after, before.saturating_add(expected));
+    });
+}
+
+#[test]
 fn treasury_keeper_line_funding_moves_matching_real_usdc_into_the_pot() {
     use crate::{configs::treasury_keeper_account, genesis::treasury_account};
     use pallet_futarchy_treasury::BudgetLine;
@@ -16420,6 +16437,119 @@ fn baseline_carry_rejects_a_voided_previous_cohort() {
             ),
             None,
             "a voided cohort must not provide a Baseline carry value"
+        );
+    });
+}
+
+fn seed_runtime_baseline_grade_fixture() -> (
+    futarchy_primitives::MarketId,
+    BlockNumber,
+    futarchy_primitives::EpochId,
+    Balance,
+    Balance,
+) {
+    const PID: futarchy_primitives::ProposalId = 9_388;
+    let version = pallet_execution_guard::CurrentSpecName::<Runtime>::get()
+        .expect("guard genesis must bind a runtime version");
+    assert_ok!(seed_queued_epoch_proposal(
+        PID,
+        ProposalClass::Code,
+        H256::repeat_byte(38),
+        0,
+        10,
+        20,
+        version,
+    ));
+    let params = <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+    let end = System::block_number().saturating_add(params.decision_window);
+    pallet_epoch::Proposals::<Runtime>::mutate(PID, |proposal| {
+        if let Some(proposal) = proposal {
+            proposal.decide_at = end;
+        }
+    });
+    let proposal = pallet_epoch::Proposals::<Runtime>::get(PID)
+        .expect("the baseline grade proposal must be stored");
+    let markets = proposal
+        .markets
+        .expect("the baseline grade proposal must have markets");
+    assert_ok!(seed_decision_markets(
+        PID,
+        ProposalClass::Code,
+        end,
+        futarchy_primitives::FixedU64(500_000_000),
+        futarchy_primitives::FixedU64(500_000_000),
+        futarchy_primitives::FixedU64(500_000_000),
+    ));
+    let treasury_floor =
+        params.v_min[crate::configs::proposal_class_index(ProposalClass::Treasury)];
+    let code_floor = params.v_min[crate::configs::proposal_class_index(ProposalClass::Code)];
+    assert!(code_floor > treasury_floor);
+    (
+        markets.baseline,
+        end,
+        proposal.epoch,
+        treasury_floor,
+        code_floor,
+    )
+}
+
+fn set_runtime_baseline_grade_contest(
+    market: futarchy_primitives::MarketId,
+    end: BlockNumber,
+    contest: Balance,
+) {
+    let params = <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get();
+    pallet_market::DecisionWindows::<Runtime>::mutate(market, |windows| {
+        if let Some(window) = windows.iter_mut().find(|window| window.end == end) {
+            window.contest_capital_blocks =
+                contest.saturating_mul(Balance::from(params.decision_window));
+            window.sealed = false;
+        }
+    });
+}
+
+#[test]
+fn baseline_carry_captures_at_treasury_floor_below_code_floor() {
+    development_ext().execute_with(|| {
+        let (market, end, epoch, treasury_floor, code_floor) =
+            seed_runtime_baseline_grade_fixture();
+        set_runtime_baseline_grade_contest(market, end, treasury_floor);
+        System::set_block_number(end);
+
+        assert!(code_floor > treasury_floor);
+        assert_ok!(Market::seal_decision_window(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            market,
+            end,
+        ));
+        assert_eq!(
+            pallet_market::SealedBaselineTwap::<Runtime>::get(epoch,),
+            Market::twap_at(
+                market,
+                end,
+                <crate::configs::RuntimeEpochParams as pallet_epoch::EpochParamsProvider>::get()
+                    .decision_window,
+            ),
+        );
+    });
+}
+
+#[test]
+fn baseline_carry_rejects_below_treasury_floor() {
+    development_ext().execute_with(|| {
+        let (market, end, _, treasury_floor, _) = seed_runtime_baseline_grade_fixture();
+        set_runtime_baseline_grade_contest(market, end, treasury_floor.saturating_sub(1));
+        System::set_block_number(end);
+
+        assert_ok!(Market::seal_decision_window(
+            RuntimeOrigin::signed(crate::configs::epoch_account()),
+            market,
+            end,
+        ));
+        assert_eq!(
+            pallet_market::SealedBaselineTwap::<Runtime>::iter().count(),
+            0,
+            "a Baseline below dec.v_min.trs must not provide a carry value",
         );
     });
 }
