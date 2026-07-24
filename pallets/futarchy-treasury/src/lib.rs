@@ -1308,7 +1308,16 @@ pub mod pallet {
         /// handler. It is deliberately infallible: an unexpected new author
         /// or an uncranked prior epoch leaves the bounded accumulator intact
         /// and defers the reward rather than growing state or panicking.
+        ///
+        /// `pallet_authorship` drives its `EventHandler` from `on_initialize`
+        /// and reserves no weight for it, so this registers its own benchmarked
+        /// worst-case weight before touching storage (the
+        /// `pallet-collator-selection` `note_author` pattern).
         pub fn note_collator_block(author: T::AccountId) {
+            frame_system::Pallet::<T>::register_extra_weight_unchecked(
+                T::WeightInfo::note_collator_block(),
+                DispatchClass::Mandatory,
+            );
             let epoch = T::CollatorEpoch::epoch_at(Self::now());
             if let Some(tracked) = CollatorAuthoredEpoch::<T>::get() {
                 if tracked != epoch {

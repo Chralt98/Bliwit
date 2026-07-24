@@ -247,4 +247,11 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 			.saturating_add(T::DbWeight::get().reads(3))
 			.saturating_add(T::DbWeight::get().writes(2))
 	}
+	/// `pallet_authorship` invokes this internal callback from `on_initialize`
+	/// without returning its cost. Use the treasury pallet's conservative
+	/// bounded-accumulator estimate until the callback has a dedicated
+	/// generated benchmark row.
+	fn note_collator_block() -> Weight {
+		<pallet_futarchy_treasury::weights::SubstrateWeight<T> as pallet_futarchy_treasury::WeightInfo>::note_collator_block()
+	}
 }
