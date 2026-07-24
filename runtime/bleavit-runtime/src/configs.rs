@@ -3453,6 +3453,12 @@ impl pallet_epoch::MarketAccess<AccountId> for RuntimeMarketAccess {
         )
     }
 
+    fn decision_window_sealed(market: futarchy_primitives::MarketId, end: BlockNumber) -> bool {
+        pallet_market::DecisionWindows::<Runtime>::get(market)
+            .iter()
+            .any(|window| window.end == end && window.sealed)
+    }
+
     fn welfare_grade(
         market: futarchy_primitives::MarketId,
         end: BlockNumber,
