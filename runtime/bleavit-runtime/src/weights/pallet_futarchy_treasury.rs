@@ -237,14 +237,14 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 			.saturating_add(T::DbWeight::get().reads(9))
 			.saturating_add(T::DbWeight::get().writes(4))
 	}
-	/// Storage: `FutarchyTreasury::CommunityDistributionArmedAt` (r:1 w:0)
-	/// Storage: `FutarchyTreasury::CommunityDistributionRemaining` (r:1 w:1)
-	/// Storage: `FutarchyTreasury::CommunityScheduleCount` (r:1 w:1)
-	/// The native vesting adapter additionally touches the source and beneficiary
-	/// `System::Account` rows; the generated benchmark will replace this envelope.
+	/// Composes the SDK pallet-vesting worst-case `vested_transfer` weight
+	/// (`MaxLocksOf = 50`, `MAX_VESTING_SCHEDULES = 8`) with the three bounded
+	/// community-allocation reads/two writes. This prevents the runtime PARAM
+	/// leaf from undercharging the real adapter.
 	fn create_community_schedule() -> Weight {
-		Weight::from_parts(60_000_000, 32_000)
-			.saturating_add(T::DbWeight::get().reads(7))
-			.saturating_add(T::DbWeight::get().writes(5))
+		<pallet_vesting::weights::SubstrateWeight<T> as pallet_vesting::WeightInfo>::vested_transfer(50, 8)
+			.saturating_add(Weight::from_parts(0, 32_000))
+			.saturating_add(T::DbWeight::get().reads(3))
+			.saturating_add(T::DbWeight::get().writes(2))
 	}
 }
