@@ -5343,6 +5343,16 @@ impl Get<u32> for RuntimeRegisteredCollatorCount {
     }
 }
 
+/// Boundary-aware epoch projection for the authorship callback. The
+/// persisted `EpochOf` can still name the completed epoch when the callback
+/// runs before the first clock-cranking extrinsic in a boundary block.
+pub struct RuntimeCollatorEpoch;
+impl pallet_futarchy_treasury::CollatorEpochProvider for RuntimeCollatorEpoch {
+    fn epoch_at(block: futarchy_primitives::BlockNumber) -> futarchy_primitives::EpochId {
+        pallet_epoch::Pallet::<Runtime>::epoch_for_block(block)
+    }
+}
+
 impl pallet_futarchy_treasury::Config for Runtime {
     type TreasuryOrigin = pallet_origins::EnsureFutarchyTreasury;
     type CommunityDistributionOrigin = pallet_origins::EnsureFutarchyParam;
@@ -5355,6 +5365,7 @@ impl pallet_futarchy_treasury::Config for Runtime {
     type MaxCollatorCompensationEntries =
         ConstU32<{ pallet_futarchy_treasury::MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND }>;
     type RegisteredCollatorCount = RuntimeRegisteredCollatorCount;
+    type CollatorEpoch = RuntimeCollatorEpoch;
     type Params = TreasuryParams;
     type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
     type TreasuryPhase = RuntimeTreasuryPhase;
