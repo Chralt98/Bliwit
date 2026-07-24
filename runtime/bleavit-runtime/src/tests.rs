@@ -4560,6 +4560,30 @@ fn treasury_collator_compensation_uses_authored_share_and_dedicated_custody() {
 }
 
 #[test]
+fn treasury_collator_boundary_authorship_uses_the_next_epoch_accumulator() {
+    use pallet_futarchy_treasury::{
+        CollatorAuthoredBlocks, CollatorAuthoredEpoch, CollatorPendingEpoch,
+    };
+
+    development_ext().execute_with(|| {
+        let epoch = pallet_epoch::CurrentEpoch::<Runtime>::get();
+        let schedule = pallet_epoch::Schedule::<Runtime>::get();
+        let boundary = schedule.epoch_start_block.saturating_add(schedule.length);
+        let first = account(77);
+        let second = account(78);
+
+        System::set_block_number(boundary.saturating_sub(1));
+        FutarchyTreasury::note_collator_block(first);
+        System::set_block_number(boundary);
+        FutarchyTreasury::note_collator_block(second);
+
+        assert_eq!(CollatorPendingEpoch::<Runtime>::get(), Some(epoch));
+        assert_eq!(CollatorAuthoredEpoch::<Runtime>::get(), Some(epoch + 1));
+        assert_eq!(CollatorAuthoredBlocks::<Runtime>::get().len(), 1);
+    });
+}
+
+#[test]
 fn treasury_keeper_line_funding_moves_matching_real_usdc_into_the_pot() {
     use crate::{configs::treasury_keeper_account, genesis::treasury_account};
     use pallet_futarchy_treasury::BudgetLine;

@@ -50,6 +50,8 @@ pub fn coretime_quote_authority() -> AccountId32 {
 
 parameter_types! {
     pub static CurrentEpochValue: u32 = 0;
+    pub static CollatorBoundaryBlockValue: u32 = u32::MAX;
+    pub static RegisteredCollatorCountValue: u32 = 2;
     pub static TreasuryArmedValue: bool = false;
     // 13 §1 treasury tunables — defaulting to the core defaults so shell ≡ core,
     // overridable per-test to prove the pallet reads `Params` (rule 4), never a
@@ -346,7 +348,8 @@ impl pallet_futarchy_treasury::Config for Test {
     type MaxCommunitySchedules = MaxCommunitySchedules;
     type MaxCollatorCompensationEntries =
         ConstU32<{ pallet_futarchy_treasury::MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND }>;
-    type RegisteredCollatorCount = ConstU32<2>;
+    type RegisteredCollatorCount = RegisteredCollatorCountValue;
+    type CollatorEpoch = TestCollatorEpoch;
     type Params = TestParams;
     type CurrentEpoch = CurrentEpochValue;
     type TreasuryPhase = TestTreasuryPhase;
@@ -398,6 +401,8 @@ pub fn new_test_ext_with(
     let mut ext = sp_io::TestExternalities::new(storage);
     ext.execute_with(|| {
         System::set_block_number(1);
+        CollatorBoundaryBlockValue::set(u32::MAX);
+        RegisteredCollatorCountValue::set(2);
         KeeperBudgetEpoch::set(futarchy_treasury_core::KEEPER_BUDGET_EPOCH);
         KeeperRebate::set(0);
         CoretimeDotRate::set(10_000_000_000);
@@ -424,4 +429,17 @@ pub fn new_test_ext_with(
 /// Drive the mock epoch clock (`Config::CurrentEpoch`).
 pub fn set_epoch(epoch: u32) {
     CurrentEpochValue::set(epoch);
+}
+
+pub struct TestCollatorEpoch;
+impl pallet_futarchy_treasury::CollatorEpochProvider for TestCollatorEpoch {
+    fn epoch_at(block: futarchy_primitives::BlockNumber) -> futarchy_primitives::EpochId {
+        CurrentEpochValue::get()
+            .saturating_add(u32::from(block >= CollatorBoundaryBlockValue::get()))
+    }
+}
+
+/// Drive the registered-session size used by the payout snapshot regression.
+pub fn set_registered_collator_count(count: u32) {
+    RegisteredCollatorCountValue::set(count);
 }
