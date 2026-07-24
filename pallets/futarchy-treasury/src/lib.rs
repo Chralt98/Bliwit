@@ -705,6 +705,7 @@ pub mod pallet {
         fn pre_upgrade() -> Result<Vec<u8>, TryRuntimeError> {
             Ok((
                 StorageVersion::get::<Pallet<T>>() < STORAGE_VERSION,
+                StorageVersion::get::<Pallet<T>>() < StorageVersion::new(1),
                 T::TreasuryPhase::treasury_armed(),
                 BootstrapOpsFundingClosed::<T>::get(),
             )
@@ -713,7 +714,7 @@ pub mod pallet {
 
         #[cfg(feature = "try-runtime")]
         fn post_upgrade(state: Vec<u8>) -> Result<(), TryRuntimeError> {
-            let (migrated, treasury_was_armed, closed_before): (bool, bool, bool) =
+            let (migrated, was_v0, treasury_was_armed, closed_before): (bool, bool, bool, bool) =
                 Decode::decode(&mut &state[..]).map_err(|_| {
                     TryRuntimeError::Other("treasury v2 migration: invalid pre-upgrade state")
                 })?;
@@ -723,8 +724,13 @@ pub mod pallet {
                     "treasury v2 migration: storage version was not advanced"
                 );
                 frame_support::ensure!(
-                    BootstrapOpsFundingClosed::<T>::get() == treasury_was_armed,
-                    "treasury v2 migration: closure does not match existing phase"
+                    BootstrapOpsFundingClosed::<T>::get()
+                        == if was_v0 {
+                            treasury_was_armed
+                        } else {
+                            closed_before
+                        },
+                    "treasury v2 migration: closure does not match pre-upgrade latch"
                 );
                 frame_support::ensure!(
                     CommunityDistributionRemaining::<T>::get()

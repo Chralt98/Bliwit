@@ -13469,6 +13469,28 @@ fn treasury_spend_resource_key_is_0x07_plus_beneficiary_digest() {
 }
 
 #[test]
+fn community_schedule_resource_is_a_singleton_across_beneficiaries() {
+    development_ext().execute_with(|| {
+        let first = RuntimeCall::FutarchyTreasury(
+            pallet_futarchy_treasury::Call::create_community_schedule {
+                beneficiary: account(240),
+                amount: currency::VIT,
+            },
+        );
+        let second = RuntimeCall::FutarchyTreasury(
+            pallet_futarchy_treasury::Call::create_community_schedule {
+                beneficiary: account(241),
+                amount: currency::VIT,
+            },
+        );
+        let first = derived_single_resource(first).expect("community schedule must classify");
+        let second = derived_single_resource(second).expect("community schedule must classify");
+        assert_eq!(first, second, "the finite allocation uses one global lock");
+        assert_eq!(first, expected_resource_key(0x0C, None));
+    });
+}
+
+#[test]
 fn canonical_resource_footprint_enforces_call_and_nesting_bounds() {
     development_ext().execute_with(|| {
         let record = match pallet_constitution::Params::<Runtime>::get(pallet_constitution::key16(
@@ -13590,7 +13612,7 @@ fn canonical_resource_key_universe_has_no_semantic_collisions() {
             }
         }
 
-        for singleton in [0x03, 0x04, 0x05, 0x0A, 0x0B] {
+        for singleton in [0x03, 0x04, 0x05, 0x0A, 0x0B, 0x0C] {
             insert_distinct(&mut keys, expected_resource_key(singleton, None));
         }
         for instance in [0_u8, 1_u8] {
